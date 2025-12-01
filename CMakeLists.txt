@@ -13,4 +13,4 @@ endif()
 
 # 설치 경로 설정
 install(TARGETS plantri
-        RUNTIME DESTINATION bin)
+        RUNTIME DESTINATION .)
