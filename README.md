@@ -2,7 +2,7 @@
 
 plantri를 Python에서 쉽게 사용할 수 있게 해주는 래퍼 패키지입니다.
 
-[plantri](http://users.cecs.anu.edu.au/~bdm/plantri/)는 평면 그래프(triangulation, quadrangulation 등)를 생성하는 고성능 C 프로그램입니다.
+[plantri](http://users.cecs.anu.edu.au/~bdm/plantri/)는 평면 그래프(triangulation, quadrangulation 등)를 생성하는 C 프로그램입니다.
 
 ## 논문 기반 사용 (Samuel Peltier et al., 2021)
 
@@ -56,27 +56,15 @@ output = plantri.run(6, options=["-q", "-c2", "-m2", "-d", "-a"])
 print(output.decode())
 ```
 
-### example.py 실행
+### example.py 
 
 ```bash
 # n = Q*의 정점 수 (최소 3)
 python example.py 3    # Q*: 3정점, Q: 5정점
-python example.py 4    # Q*: 4정점, Q: 6정점
-python example.py 6    # Q*: 6정점, Q: 8정점
-```
 
-### pyplantri_ilp_bridge.py (ILP Warm Start)
-
-```bash
-# n = Q*의 정점 수 (최소 3)
-python pyplantri_ilp_bridge.py 3    # Q*: 3정점, Q: 5정점
-python pyplantri_ilp_bridge.py 6    # Q*: 6정점, Q: 8정점
-
-# 인접 행렬 포함
-python pyplantri_ilp_bridge.py 6 --show-matrix
-
-# JSON 내보내기
-python pyplantri_ilp_bridge.py 6 --export output.json
+# 내부적으로 plantri 호출:
+# plantri -q -c2 -m2 -a 5    → Q 출력 (5정점)
+# plantri -q -c2 -m2 -a -d 5 → Q* 출력 (3정점)
 ```
 
 ### plantri 옵션
@@ -90,8 +78,8 @@ python pyplantri_ilp_bridge.py 6 --export output.json
 | `-c2` | 2-connected | `-q`와 함께 사용 |
 | `-m2` | minimum degree 2 | `-q`와 함께 사용 |
 
-**논문 조건 만족을 위한 권장 옵션: `-q -c2 -m2`**
-- `-q`: Simple quadrangulation (primal에 multi-edge 없음)
+**논문 조건 만족을 위한 옵션: `-q -c2 -m2`**
+- `-q`: Simple quadrangulation (primal에 multi-edge가 없도록)
 - `-c2`: 2-connected
 - `-m2`: minimum degree 2
 - → Dual: 4-edge-connected quartic multigraph (double edge 허용, loop 없음)
@@ -120,8 +108,7 @@ pyplantri/
 ├── pyproject.toml          # 프로젝트 메타데이터
 ├── README.md               # 이 파일
 ├── examples/
-│   ├── example.py              # Q/Q* 생성 예제
-│   └── pyplantri_ilp_bridge.py # ILP Warm Start 변환
+│   └──example.py              # Q/Q* 생성 예제
 ├── src/
 │   └── plantri/
 │       ├── plantri.c       # Plantri 소스 (필수)
