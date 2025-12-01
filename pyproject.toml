@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Your Name", email = "your@email.com"}
+    {name = "Suil Hwang", email = "av600md@gmail.com"}
 ]
 keywords = ["graph", "planar", "triangulation", "quadrangulation", "plantri"]
 classifiers = [
@@ -31,7 +31,7 @@ classifiers = [
 dev = ["pytest", "pytest-cov"]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/pyplantri"
+Homepage = "https://github.com/suil-hwang/pyplantri"
 
 [tool.setuptools.packages.find]
 where = ["."]

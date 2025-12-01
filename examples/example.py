@@ -32,47 +32,47 @@ def parse_plantri_ascii(ascii_line: str) -> dict:
     - 쉼표로 구분
 
     Returns:
-        {"n_vertices": int, "adjacency": {vertex: [neighbors]}}
+        {"vertex_count": int, "adjacency_list": {vertex: [neighbors]}}
     """
     if ascii_line.startswith("Graph"):
-        return {"n_vertices": 0, "adjacency": {}}
+        return {"vertex_count": 0, "adjacency_list": {}}
 
     parts = ascii_line.strip().split()
     if len(parts) < 2:
-        return {"n_vertices": 0, "adjacency": {}}
+        return {"vertex_count": 0, "adjacency_list": {}}
 
-    n_vertices = int(parts[0])
-    adj_str = parts[1]
+    vertex_count = int(parts[0])
+    adjacency_str = parts[1]
 
-    adjacency = {}
-    vertex_lists = adj_str.split(",")
+    adjacency_list = {}
+    vertex_neighbor_lists = adjacency_str.split(",")
 
-    for i, neighbors_str in enumerate(vertex_lists, start=1):
+    for i, neighbors_str in enumerate(vertex_neighbor_lists, start=1):
         neighbors = [ord(c) - ord('a') + 1 for c in neighbors_str]
-        adjacency[i] = neighbors
+        adjacency_list[i] = neighbors
 
-    return {"n_vertices": n_vertices, "adjacency": adjacency}
+    return {"vertex_count": vertex_count, "adjacency_list": adjacency_list}
 
 
 def print_graph_info(graph_data: dict, title: str = "Graph"):
     """그래프 정보 출력"""
-    adj = graph_data["adjacency"]
-    n_vertices = graph_data["n_vertices"]
-    n_edges = sum(len(neighbors) for neighbors in adj.values()) // 2
+    adjacency_list = graph_data["adjacency_list"]
+    vertex_count = graph_data["vertex_count"]
+    edge_count = sum(len(neighbors) for neighbors in adjacency_list.values()) // 2
 
     print(f"\n{'='*50}")
     print(f"{title}")
     print(f"{'='*50}")
-    print(f"정점 수: {n_vertices}")
-    print(f"간선 수: {n_edges}")
+    print(f"정점 수: {vertex_count}")
+    print(f"간선 수: {edge_count}")
     print(f"\n인접 리스트:")
-    for v in sorted(adj.keys()):
-        neighbors = " ".join(map(str, adj[v]))
-        degree = len(adj[v])
-        print(f"  {v}: [{neighbors}] (차수: {degree})")
+    for vertex in sorted(adjacency_list.keys()):
+        neighbors = " ".join(map(str, adjacency_list[vertex]))
+        degree = len(adjacency_list[vertex])
+        print(f"  {vertex}: [{neighbors}] (차수: {degree})")
 
 
-def generate_simple_quadrangulation(n_dual: int, dual: bool = False):
+def generate_simple_quadrangulation(dual_vertex_count: int, is_dual: bool = False):
     """
     Simple Quadrangulation 생성 (-q -c2 -m2 옵션 사용)
 
@@ -83,8 +83,8 @@ def generate_simple_quadrangulation(n_dual: int, dual: bool = False):
     → Dual: 4-edge-connected quartic multigraph (double edge 허용, loop 없음)
 
     Args:
-        n_dual: Q*의 정점 수 (최소 2)
-        dual: True이면 Q* (4-regular planar multigraph) 출력
+        dual_vertex_count: Q*의 정점 수 (최소 2)
+        is_dual: True이면 Q* (4-regular planar multigraph) 출력
 
     Yields:
         plantri ASCII 출력 라인
@@ -96,13 +96,13 @@ def generate_simple_quadrangulation(n_dual: int, dual: bool = False):
     # -a: ASCII output
     options = ["-q", "-c2", "-m2", "-a"]
 
-    if dual:
+    if is_dual:
         options.append("-d")
 
     # Q*의 정점 수 = Q의 정점 수 - 2 (Euler 공식)
-    # 따라서 Q의 정점 수 = n_dual + 2
-    n_primal = n_dual + 2
-    output = plantri.run(n_primal, options)
+    # 따라서 Q의 정점 수 = dual_vertex_count + 2
+    primal_vertex_count = dual_vertex_count + 2
+    output = plantri.run(primal_vertex_count, options)
 
     for line in output.decode(errors="replace").split("\n"):
         line = line.strip()
@@ -134,11 +134,11 @@ def main():
     )
     args = parser.parse_args()
 
-    n_dual = args.n
-    if n_dual < 3:
+    dual_vertex_count = args.n
+    if dual_vertex_count < 3:
         parser.error("n은 최소 3 이상이어야 합니다.")
 
-    n_primal = n_dual + 2  # Euler 공식: Q의 정점 수
+    primal_vertex_count = dual_vertex_count + 2  # Euler 공식: Q의 정점 수
 
     print("=" * 60)
     print("pyplantri - Simple Quadrangulation (SQS) Generator")
@@ -147,24 +147,24 @@ def main():
     print("  Q:  Simple quadrangulation (loop/multi-edge 없음)")
     print("  Q*: 4-regular planar multigraph (loop 없음, double edge 허용)")
     print(f"\nplantri 옵션: -q -c2 -m2")
-    print(f"관계: Q*({n_dual}정점) <- Q({n_primal}정점)")
+    print(f"관계: Q*({dual_vertex_count}정점) <- Q({primal_vertex_count}정점)")
 
     print(f"\n생성 중...")
 
     # Q (primal) 생성
-    primal_graphs = list(generate_simple_quadrangulation(n_dual, dual=False))
+    primal_graphs = list(generate_simple_quadrangulation(dual_vertex_count, is_dual=False))
 
     if not primal_graphs:
-        print(f"n={n_dual}에 대한 simple quadrangulation이 없습니다.")
+        print(f"n={dual_vertex_count}에 대한 simple quadrangulation이 없습니다.")
         return
 
     # Q* (dual) 생성
-    dual_graphs = list(generate_simple_quadrangulation(n_dual, dual=True))
+    dual_graphs = list(generate_simple_quadrangulation(dual_vertex_count, is_dual=True))
 
     # 개수 출력 및 진행 여부 확인
     print(f"\n구성 가능한 비동형 구조:")
-    print(f"  Q* (4-regular multigraph, {n_dual}정점): {len(dual_graphs)}개")
-    print(f"  Q  (Simple Quadrangulation, {n_primal}정점): {len(primal_graphs)}개")
+    print(f"  Q* (4-regular multigraph, {dual_vertex_count}정점): {len(dual_graphs)}개")
+    print(f"  Q  (Simple Quadrangulation, {primal_vertex_count}정점): {len(primal_graphs)}개")
 
     response = input("\n구조를 확인하시겠습니까? (y/n): ")
     if response.lower() != 'y':
@@ -172,28 +172,29 @@ def main():
         return
 
     # 각 그래프 쌍 출력
-    for i, (primal_ascii, dual_ascii) in enumerate(zip(primal_graphs, dual_graphs), 1):
+    for graph_idx, (primal_ascii, dual_ascii) in enumerate(zip(primal_graphs, dual_graphs), 1):
         print(f"\n{'#'*60}")
-        print(f"# 구조 {i}/{len(dual_graphs)}")
+        print(f"# 구조 {graph_idx}/{len(dual_graphs)}")
         print(f"{'#'*60}")
 
         # Q* (4-regular multigraph) 먼저 출력
         dual_data = parse_plantri_ascii(dual_ascii)
-        print_graph_info(dual_data, f"Q* (4-Regular Planar Multigraph, {n_dual} vertices)")
+        print_graph_info(dual_data, f"Q* (4-Regular Planar Multigraph, {dual_vertex_count} vertices)")
 
         # Q (Simple Quadrangulation)
         primal_data = parse_plantri_ascii(primal_ascii)
-        print_graph_info(primal_data, f"Q (Simple Quadrangulation, {n_primal} vertices)")
+        print_graph_info(primal_data, f"Q (Simple Quadrangulation, {primal_vertex_count} vertices)")
 
-        adj = dual_data["adjacency"]
-        degrees = [len(neighbors) for neighbors in adj.values()]
-        if degrees and all(d == 4 for d in degrees):
+        adjacency_list = dual_data["adjacency_list"]
+        degrees = [len(neighbors) for neighbors in adjacency_list.values()]
+        is_4_regular = degrees and all(degree == 4 for degree in degrees)
+        if is_4_regular:
             print("  [OK] 모든 정점의 차수가 4 (4-regular)")
 
         # Loop 체크
         has_loop = False
-        for v, neighbors in adj.items():
-            if v in neighbors:
+        for vertex, neighbors in adjacency_list.items():
+            if vertex in neighbors:
                 has_loop = True
                 break
         if not has_loop:
@@ -202,16 +203,16 @@ def main():
         # Double edge 체크
         from collections import Counter
         has_double_edge = False
-        for v, neighbors in adj.items():
-            cnt = Counter(neighbors)
-            if any(c > 1 for c in cnt.values()):
+        for vertex, neighbors in adjacency_list.items():
+            neighbor_count = Counter(neighbors)
+            if any(count > 1 for count in neighbor_count.values()):
                 has_double_edge = True
                 break
         if has_double_edge:
             print("  [INFO] Double edge 존재 (multigraph)")
 
         # 사용자 입력 대기
-        if i < len(primal_graphs):
+        if graph_idx < len(primal_graphs):
             response = input("\n다음 구조? (Enter/q): ")
             if response.lower() == 'q':
                 break

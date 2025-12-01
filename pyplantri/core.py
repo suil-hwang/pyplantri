@@ -224,20 +224,20 @@ class GraphConverter:
     @staticmethod
     def parse_ascii_to_edge_map(
         ascii_line: str,
-        one_based: bool = False
+        is_one_based: bool = False
     ) -> Dict[Tuple[int, int], int]:
         """
         ASCII 출력을 Edge Multiplicity Map으로 변환
 
-        plantri의 ASCII 출력을 (u, v) -> count 형태의 딕셔너리로 변환합니다.
-        Multigraph에서 두 정점 사이에 여러 간선이 있을 경우 count > 1입니다.
+        plantri의 ASCII 출력을 (u, v) -> multiplicity 형태의 딕셔너리로 변환합니다.
+        Multigraph에서 두 정점 사이에 여러 간선이 있을 경우 multiplicity > 1입니다.
 
         Args:
             ascii_line: plantri ASCII 출력 문자열 (예: "5 b,acc,bbded,cc,c")
-            one_based: True면 정점 번호가 1부터 시작, False면 0부터 시작 (ILP는 보통 0)
+            is_one_based: True면 정점 번호가 1부터 시작, False면 0부터 시작 (ILP는 보통 0)
 
         Returns:
-            dict: {(u, v): count} 형태. u < v 보장 (canonical edge).
+            dict: {(u, v): multiplicity} 형태. u < v 보장 (canonical edge).
 
         Examples:
             >>> GraphConverter.parse_ascii_to_edge_map("4 bcd,acd,abd,abc")
@@ -247,41 +247,41 @@ class GraphConverter:
         if not parts or not parts[0].isdigit():
             return {}
 
-        n = int(parts[0])
+        vertex_count = int(parts[0])
         if len(parts) < 2:
             return {}
 
-        adj_str = parts[1]
-        vertex_lists = adj_str.split(",")
+        adjacency_str = parts[1]
+        vertex_neighbor_lists = adjacency_str.split(",")
 
-        edge_map: Dict[Tuple[int, int], int] = defaultdict(int)
-        offset = 0 if one_based else 1  # plantri 'a'는 1번째 정점을 의미
+        edge_multiplicity: Dict[Tuple[int, int], int] = defaultdict(int)
+        index_offset = 0 if is_one_based else 1  # plantri 'a'는 1번째 정점을 의미
 
-        for u_idx, neighbors_str in enumerate(vertex_lists):
-            u = u_idx + (1 if one_based else 0)
+        for vertex_idx, neighbors_str in enumerate(vertex_neighbor_lists):
+            source_vertex = vertex_idx + (1 if is_one_based else 0)
             for char in neighbors_str:
-                v_raw = ord(char) - ord('a') + 1
-                v = v_raw - offset
+                target_vertex_raw = ord(char) - ord('a') + 1
+                target_vertex = target_vertex_raw - index_offset
 
                 # Canonical edge key (u < v) - 한 방향만 카운트
-                # plantri는 양방향 모두 나열하므로 u < v인 경우만 카운트
-                if u < v:
-                    edge_map[(u, v)] += 1
-                # u > v인 경우는 이미 반대 방향에서 카운트됨, 스킵
+                # plantri는 양방향 모두 나열하므로 source < target인 경우만 카운트
+                if source_vertex < target_vertex:
+                    edge_multiplicity[(source_vertex, target_vertex)] += 1
+                # source > target인 경우는 이미 반대 방향에서 카운트됨, 스킵
 
-        return dict(edge_map)
+        return dict(edge_multiplicity)
 
     @staticmethod
     def parse_ascii_to_adjacency_list(
         ascii_line: str,
-        one_based: bool = False
+        is_one_based: bool = False
     ) -> Dict[int, List[int]]:
         """
         ASCII 출력을 인접 리스트로 변환 (중복 포함)
 
         Args:
             ascii_line: plantri ASCII 출력 문자열
-            one_based: True면 정점 번호가 1부터 시작
+            is_one_based: True면 정점 번호가 1부터 시작
 
         Returns:
             dict: {vertex: [neighbors]} 형태. 중복 간선은 리스트에 여러 번 등장.
@@ -293,33 +293,33 @@ class GraphConverter:
         if len(parts) < 2:
             return {}
 
-        adj_str = parts[1]
-        vertex_lists = adj_str.split(",")
+        adjacency_str = parts[1]
+        vertex_neighbor_lists = adjacency_str.split(",")
 
-        adjacency: Dict[int, List[int]] = {}
-        offset = 0 if one_based else 1
+        adjacency_list: Dict[int, List[int]] = {}
+        index_offset = 0 if is_one_based else 1
 
-        for u_idx, neighbors_str in enumerate(vertex_lists):
-            u = u_idx + (1 if one_based else 0)
-            neighbors = [ord(c) - ord('a') + 1 - offset for c in neighbors_str]
-            adjacency[u] = neighbors
+        for vertex_idx, neighbors_str in enumerate(vertex_neighbor_lists):
+            vertex = vertex_idx + (1 if is_one_based else 0)
+            neighbors = [ord(c) - ord('a') + 1 - index_offset for c in neighbors_str]
+            adjacency_list[vertex] = neighbors
 
-        return adjacency
+        return adjacency_list
 
     @staticmethod
     def to_adjacency_matrix(
-        edge_map: Dict[Tuple[int, int], int],
-        n_vertices: int
+        edge_multiplicity: Dict[Tuple[int, int], int],
+        vertex_count: int
     ):
         """
-        Edge map을 인접 행렬(numpy)로 변환
+        Edge multiplicity map을 인접 행렬(numpy)로 변환
 
         Args:
-            edge_map: {(u, v): count} 형태의 edge map
-            n_vertices: 정점 수
+            edge_multiplicity: {(u, v): multiplicity} 형태의 edge map
+            vertex_count: 정점 수
 
         Returns:
-            numpy.ndarray: n_vertices x n_vertices 인접 행렬
+            numpy.ndarray: vertex_count x vertex_count 인접 행렬
 
         Raises:
             ImportError: numpy가 설치되지 않은 경우
@@ -329,53 +329,53 @@ class GraphConverter:
                 "numpy가 필요합니다. 'pip install numpy'로 설치하세요."
             )
 
-        adj = np.zeros((n_vertices, n_vertices), dtype=int)
-        for (u, v), count in edge_map.items():
-            adj[u, v] = count
-            adj[v, u] = count
-        return adj
+        adjacency_matrix = np.zeros((vertex_count, vertex_count), dtype=int)
+        for (source, target), multiplicity in edge_multiplicity.items():
+            adjacency_matrix[source, target] = multiplicity
+            adjacency_matrix[target, source] = multiplicity
+        return adjacency_matrix
 
     @staticmethod
-    def get_graph_stats(edge_map: Dict[Tuple[int, int], int], n_vertices: int) -> dict:
+    def get_graph_stats(edge_multiplicity: Dict[Tuple[int, int], int], vertex_count: int) -> dict:
         """
         그래프 통계 정보 반환
 
         Args:
-            edge_map: {(u, v): count} 형태의 edge map
-            n_vertices: 정점 수
+            edge_multiplicity: {(u, v): multiplicity} 형태의 edge map
+            vertex_count: 정점 수
 
         Returns:
             dict: 그래프 통계 정보
-                - n_vertices: 정점 수
-                - n_edges: 총 간선 수 (중복 포함)
-                - single_edges: 단일 간선 수
-                - double_edges: 이중 간선 수 (digon)
+                - vertex_count: 정점 수
+                - edge_count: 총 간선 수 (중복 포함)
+                - single_edge_count: 단일 간선 수
+                - double_edge_count: 이중 간선 수 (digon)
                 - degrees: 각 정점의 차수 리스트
                 - is_regular: 정규 그래프 여부
                 - regularity: 정규 그래프일 경우 차수
         """
-        degrees = [0] * n_vertices
-        single_edges = 0
-        double_edges = 0
-        total_edges = 0
+        degrees = [0] * vertex_count
+        single_edge_count = 0
+        double_edge_count = 0
+        total_edge_count = 0
 
-        for (u, v), count in edge_map.items():
-            degrees[u] += count
-            degrees[v] += count
-            total_edges += count
-            if count == 1:
-                single_edges += 1
-            elif count == 2:
-                double_edges += 1
+        for (source, target), multiplicity in edge_multiplicity.items():
+            degrees[source] += multiplicity
+            degrees[target] += multiplicity
+            total_edge_count += multiplicity
+            if multiplicity == 1:
+                single_edge_count += 1
+            elif multiplicity == 2:
+                double_edge_count += 1
 
         is_regular = len(set(degrees)) == 1 if degrees else False
         regularity = degrees[0] if is_regular and degrees else None
 
         return {
-            "n_vertices": n_vertices,
-            "n_edges": total_edges,
-            "single_edges": single_edges,
-            "double_edges": double_edges,
+            "vertex_count": vertex_count,
+            "edge_count": total_edge_count,
+            "single_edge_count": single_edge_count,
+            "double_edge_count": double_edge_count,
             "degrees": degrees,
             "is_regular": is_regular,
             "regularity": regularity,
@@ -383,27 +383,27 @@ class GraphConverter:
 
     @staticmethod
     def to_gurobi_start_dict(
-        edge_map: Dict[Tuple[int, int], int],
+        edge_multiplicity: Dict[Tuple[int, int], int],
         var_prefix: str = "x"
     ) -> Dict[str, int]:
         """
         Gurobi MIP Start용 딕셔너리 생성
 
         Args:
-            edge_map: {(u, v): count} 형태의 edge map
+            edge_multiplicity: {(u, v): multiplicity} 형태의 edge map
             var_prefix: 변수 이름 prefix (기본값: "x")
 
         Returns:
             dict: {"x[0,1]": 1, "x[0,2]": 2, ...} 형태의 딕셔너리
 
         Examples:
-            >>> edge_map = {(0, 1): 1, (0, 2): 2}
-            >>> GraphConverter.to_gurobi_start_dict(edge_map)
+            >>> edge_multiplicity = {(0, 1): 1, (0, 2): 2}
+            >>> GraphConverter.to_gurobi_start_dict(edge_multiplicity)
             {'x[0,1]': 1, 'x[0,2]': 2}
         """
         return {
-            f"{var_prefix}[{u},{v}]": count
-            for (u, v), count in edge_map.items()
+            f"{var_prefix}[{source},{target}]": multiplicity
+            for (source, target), multiplicity in edge_multiplicity.items()
         }
 
 
