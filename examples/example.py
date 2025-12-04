@@ -228,5 +228,5 @@ if __name__ == "__main__":
 # pip install -e .
 # pip uninstall pyplantri
 
-# python examples/example.py 3  # Q*: 3정점, Q: 5정점
-# python examples/example.py 4  # Q*: 6정점, Q: 8정점
+# python examples/example.py 3  
+# python examples/example.py 4

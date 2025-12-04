@@ -19,9 +19,37 @@ except ImportError:
     _HAS_NUMPY = False
 
 
-# plantri 실행 파일 경로
-_BIN_DIR = Path(__file__).parent / "bin"
-_PLANTRI_EXE = _BIN_DIR / ("plantri.exe" if os.name == "nt" else "plantri")
+# plantri 실행 파일 경로 탐색
+def _find_plantri_exe() -> Path:
+    """plantri 실행 파일 경로를 찾습니다."""
+    exe_name = "plantri.exe" if os.name == "nt" else "plantri"
+    
+    # 1. 패키지 내 bin 폴더 (설치된 경우)
+    pkg_bin = Path(__file__).parent / "bin" / exe_name
+    if pkg_bin.exists():
+        return pkg_bin
+    
+    # 2. scikit-build-core 빌드 폴더 (editable 설치, 개발 모드)
+    project_root = Path(__file__).parent.parent
+    build_dir = project_root / "build"
+    if build_dir.exists():
+        # 빌드 태그 폴더 탐색 (예: cp311-cp311-win_amd64)
+        for tag_dir in build_dir.iterdir():
+            if tag_dir.is_dir():
+                # Release 폴더 (Visual Studio 빌드)
+                release_exe = tag_dir / "Release" / exe_name
+                if release_exe.exists():
+                    return release_exe
+                # MinGW/Unix 빌드
+                direct_exe = tag_dir / exe_name
+                if direct_exe.exists():
+                    return direct_exe
+    
+    # 3. 기본 경로 반환 (에러 메시지용)
+    return Path(__file__).parent / "bin" / exe_name
+
+
+_PLANTRI_EXE = _find_plantri_exe()
 
 
 class PlantriError(Exception):

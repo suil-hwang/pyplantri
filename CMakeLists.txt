@@ -11,6 +11,5 @@ if(UNIX)
     target_link_libraries(plantri m)
 endif()
 
-# 설치 경로 설정
-install(TARGETS plantri
-        RUNTIME DESTINATION .)
+# 실행 파일을 bin 폴더에 설치 (scikit-build-core가 wheel.install-dir과 결합)
+install(TARGETS plantri RUNTIME DESTINATION .)

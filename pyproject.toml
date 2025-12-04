@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "cmake>=3.15"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.8"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "pyplantri"
@@ -33,9 +33,20 @@ dev = ["pytest", "pytest-cov"]
 [project.urls]
 Homepage = "https://github.com/suil-hwang/pyplantri"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["pyplantri*"]
+[tool.scikit-build]
+# CMake 빌드 설정
+cmake.build-type = "Release"
 
-[tool.setuptools.package-data]
-pyplantri = ["bin/*", "bin/**/*"]
+# Windows에서 MinGW 사용 시 설정
+cmake.args = []
+
+# plantri.exe를 pyplantri/bin에 설치
+wheel.install-dir = "pyplantri/bin"
+
+# Python 패키지 자동 포함
+wheel.packages = ["pyplantri"]
+
+# Editable 설치 설정
+editable.mode = "redirect"
+editable.rebuild = true
+build-dir = "build/{wheel_tag}"
