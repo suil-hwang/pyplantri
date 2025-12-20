@@ -5,27 +5,28 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "pyplantri"
 version = "0.1.0"
-description = "Python wrapper for plantri - planar graph generator"
+description = "Python wrapper for plantri - Simple Quadrangulation on Sphere (SQS) enumeration"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+license = {text = "MIT"}
 authors = [
     {name = "Suil Hwang", email = "av600md@gmail.com"}
 ]
-keywords = ["graph", "planar", "triangulation", "quadrangulation", "plantri"]
+keywords = ["graph", "planar", "quadrangulation", "plantri", "SQS", "enumeration"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
+dependencies = ["numpy", "scipy"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
@@ -34,19 +35,11 @@ dev = ["pytest", "pytest-cov"]
 Homepage = "https://github.com/suil-hwang/pyplantri"
 
 [tool.scikit-build]
-# CMake 빌드 설정
 cmake.build-type = "Release"
-
-# Windows에서 MinGW 사용 시 설정
 cmake.args = []
-
-# plantri.exe를 pyplantri/bin에 설치
-wheel.install-dir = "pyplantri/bin"
-
-# Python 패키지 자동 포함
-wheel.packages = ["pyplantri"]
-
-# Editable 설치 설정
+wheel.install-dir = "src/pyplantri/bin"
+wheel.packages = ["src/pyplantri"]
 editable.mode = "redirect"
 editable.rebuild = true
 build-dir = "build/{wheel_tag}"
+
