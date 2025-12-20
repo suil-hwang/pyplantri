@@ -62,7 +62,7 @@ CMake automatically builds plantri during installation.
 
 ## Usage
 
-### Basic Usage (SQSEnumerator)
+### Basic Usage
 
 ```python
 from pyplantri import SQSEnumerator
@@ -79,47 +79,6 @@ for primal, dual in sqs.generate_pairs(4):  # Q*: 4 vertices, Q: 6 vertices
 # Count only
 count = sqs.count(4)
 print(f"Number of non-isomorphic structures for n=4: {count}")
-```
-
-### ILP-Ready Graphs (PlantriGraph)
-
-For ILP solvers and numerical analysis, use `PlantriGraph` which provides:
-
-- **0-based indexing** (Python standard)
-- **Face extraction** (including digons)
-- **CW/CCW neighbor access**
-- **Graph validation**
-
-```python
-from pyplantri import enumerate_plantri_graphs, iter_plantri_graphs
-
-# Enumerate all 6-vertex 4-regular planar multigraphs
-graphs = enumerate_plantri_graphs(6)
-
-for graph in graphs:
-    print(f"Graph #{graph.graph_id}")
-    print(f"  Vertices: {graph.num_vertices}")
-    print(f"  Edges: {graph.num_simple_edges} unique, {graph.num_edges} total")
-    print(f"  Faces: {graph.num_faces}")
-    print(f"  Double edges: {graph.double_edges}")
-
-    # Access CW-ordered neighbors (0-based)
-    for v in range(graph.num_vertices):
-        neighbors = graph.get_neighbors_cw(v)
-        print(f"    Vertex {v}: {neighbors}")
-
-    # Get consecutive pairs for ILP constraints
-    pairs = graph.get_consecutive_pairs(0)
-    print(f"  Consecutive pairs at v=0: {pairs}")
-
-    # Validate graph invariants
-    is_valid, errors = graph.validate()
-    print(f"  Valid: {is_valid}")
-
-# Memory-efficient iterator for large n
-for graph in iter_plantri_graphs(12):
-    # Process one graph at a time
-    pass
 ```
 
 ### Graph Conversion Utilities
@@ -225,56 +184,6 @@ print(output.decode())
 | 12               | 14         | 15,882               |
 | 13               | 15         | 77,185               |
 | 14               | 16         | 393,075              |
-
-## Project Structure
-
-```
-pyplantri/
-├── CMakeLists.txt              # CMake build configuration
-├── pyproject.toml              # Project metadata (numpy, scipy deps)
-├── README.md
-├── LICENSE                     # MIT License
-├── build/                      # CMake build output (auto-generated)
-│   └── cpXXX-win_amd64/
-│       └── Release/
-│           └── plantri.exe
-└── src/
-    ├── plantri/                # C source
-    │   ├── plantri.c
-    │   └── LICENSE-2.0.txt     # Apache 2.0 (plantri)
-    └── pyplantri/              # Python package
-        ├── __init__.py         # Public API exports
-        ├── core.py             # Core classes:
-        │                       #   - Plantri (executable wrapper)
-        │                       #   - SQSEnumerator (graph enumeration)
-        │                       #   - GraphConverter (format conversion)
-        │                       #   - PlantriError (exception)
-        ├── ilp_bridge.py       # ILP integration:
-        │                       #   - PlantriGraph (immutable dataclass)
-        │                       #   - enumerate_plantri_graphs()
-        │                       #   - iter_plantri_graphs()
-        │                       #   - save/load_graphs_to_cache()
-        └── example.py          # Interactive CLI example
-```
-
-### Public API
-
-```python
-from pyplantri import (
-    # Core
-    Plantri,              # Plantri executable wrapper
-    PlantriError,         # Exception class
-    SQSEnumerator,        # SQS graph pair generator
-    GraphConverter,       # Format conversion utilities
-
-    # ILP Bridge
-    PlantriGraph,         # Immutable 4-regular graph dataclass
-    enumerate_plantri_graphs,  # List all graphs
-    iter_plantri_graphs,       # Memory-efficient iterator
-    save_graphs_to_cache,      # Save to JSON/pickle
-    load_graphs_from_cache,    # Load from cache
-)
-```
 
 ## License
 
