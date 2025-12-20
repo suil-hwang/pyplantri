@@ -1,235 +1,464 @@
 # src/pyplantri/ilp_bridge.py
-import argparse
+"""ILP Bridge module for SQS Assignment problems.
+
+This module provides structured graph objects and utilities for integrating
+plantri-generated 4-regular planar multigraphs with ILP solvers.
+
+All vertex indices are 0-based. Adjacency lists maintain CW (clockwise) order.
+
+Example:
+    >>> from pyplantri.ilp_bridge import enumerate_plantri_graphs, PlantriGraph
+    >>> graphs = enumerate_plantri_graphs(6)
+    >>> for graph in graphs:
+    ...     print(f"Graph {graph.graph_id}: {graph.num_edges} edges")
+"""
 import json
-from typing import List, Dict, Tuple, Optional
-from .core import SQSEnumerator, GraphConverter
+from dataclasses import dataclass
+from typing import Dict, FrozenSet, Iterator, List, Optional, Tuple
+
+from .core import GraphConverter, SQSEnumerator
 
 
-def enumerate_sqs_graphs(
-    dual_vertex_count: int,
-    should_show_matrix: bool = False,
-    max_graph_count: Optional[int] = None
-) -> List[Tuple]:
+@dataclass(frozen=True)
+class PlantriGraph:
+    """Immutable 4-regular planar multigraph from plantri.
+
+    All indices are 0-based. Adjacency list neighbor order is CW (clockwise).
+
+    Attributes:
+        num_vertices: Number of vertices (= n).
+        edges: Sorted edge tuples ((u, v) with u < v).
+        edge_multiplicity: Mapping from edge to multiplicity (1 or 2).
+        embedding: Mapping from vertex to CW-ordered neighbor tuple.
+        faces: Tuple of face vertex tuples (including digons).
+        graph_id: Unique identifier within the same n.
+
+    Example:
+        >>> graph = enumerate_plantri_graphs(4)[0]
+        >>> graph.num_vertices
+        4
+        >>> graph.is_4_regular
+        True
     """
-    SQS (Simple Quadrangulation on Sphere) 및 Dual Graph 열거
 
-    plantri 옵션: -q -c2 -m2 -T
-    - -q: Simple quadrangulation (primal에 multi-edge 없음)
-    - -c2: 2-connected
-    - -m2: minimum degree 2
-    - -T: double_code 출력 (CW 순서)
-    → Dual: 4-edge-connected quartic multigraph (double edge 허용, loop 없음)
-    
-    출력되는 인접 리스트의 이웃 순서는 CW (시계방향) 순서입니다.
+    num_vertices: int
+    edges: Tuple[Tuple[int, int], ...]
+    edge_multiplicity: Dict[Tuple[int, int], int]
+    embedding: Dict[int, Tuple[int, ...]]
+    faces: Tuple[Tuple[int, ...], ...]
+    graph_id: int = 0
+
+    @property
+    def num_edges(self) -> int:
+        """Total edge count including multiplicity."""
+        return sum(self.edge_multiplicity.values())
+
+    @property
+    def num_simple_edges(self) -> int:
+        """Unique edge count (without multiplicity)."""
+        return len(self.edges)
+
+    @property
+    def num_faces(self) -> int:
+        """Face count (should be n + 2 by Euler's formula)."""
+        return len(self.faces)
+
+    @property
+    def double_edges(self) -> FrozenSet[Tuple[int, int]]:
+        """Set of double edges (digons)."""
+        return frozenset(e for e, m in self.edge_multiplicity.items() if m == 2)
+
+    @property
+    def single_edges(self) -> FrozenSet[Tuple[int, int]]:
+        """Set of single edges."""
+        return frozenset(e for e, m in self.edge_multiplicity.items() if m == 1)
+
+    @property
+    def is_4_regular(self) -> bool:
+        """Whether all vertices have degree 4."""
+        return all(len(neighbors) == 4 for neighbors in self.embedding.values())
+
+    @property
+    def is_loop_free(self) -> bool:
+        """Whether graph has no self-loops."""
+        return all(v not in neighbors for v, neighbors in self.embedding.items())
+
+    def get_neighbors_cw(self, vertex: int) -> Tuple[int, ...]:
+        """Gets CW-ordered neighbors of a vertex.
+
+        Args:
+            vertex: Vertex index (0-based).
+
+        Returns:
+            Tuple of neighbor indices in clockwise order.
+        """
+        return self.embedding[vertex]
+
+    def get_neighbors_ccw(self, vertex: int) -> Tuple[int, ...]:
+        """Gets CCW-ordered neighbors of a vertex.
+
+        Args:
+            vertex: Vertex index (0-based).
+
+        Returns:
+            Tuple of neighbor indices in counter-clockwise order.
+        """
+        return tuple(reversed(self.embedding[vertex]))
+
+    def get_consecutive_pairs(
+        self, vertex: int, ccw: bool = False
+    ) -> List[Tuple[int, int]]:
+        """Gets consecutive neighbor pairs for cyclic order constraints.
+
+        Useful for ILP assignment constraints that require checking
+        consecutive pairs around a vertex.
+
+        Args:
+            vertex: Center vertex (0-based).
+            ccw: If True, returns CCW pairs; otherwise CW pairs.
+
+        Returns:
+            List of (neighbor_i, neighbor_j) consecutive pairs.
+
+        Example:
+            >>> graph.get_consecutive_pairs(0)
+            [(1, 2), (2, 3), (3, 0), (0, 1)]
+        """
+        neighbors = self.get_neighbors_ccw(vertex) if ccw else self.get_neighbors_cw(vertex)
+        n = len(neighbors)
+        return [(neighbors[i], neighbors[(i + 1) % n]) for i in range(n)]
+
+    def validate(self) -> Tuple[bool, List[str]]:
+        """Validates graph invariants.
+
+        Checks:
+            - 4-regularity
+            - Edge formula: s + 2d = 2n
+            - Face count: n + 2
+            - No self-loops
+
+        Returns:
+            Tuple of (is_valid, list of error messages).
+        """
+        errors = []
+
+        # Check 4-regularity
+        for v in range(self.num_vertices):
+            if v not in self.embedding:
+                errors.append(f"Vertex {v} missing from embedding")
+                continue
+            if len(self.embedding[v]) != 4:
+                errors.append(
+                    f"Vertex {v} has degree {len(self.embedding[v])}, expected 4"
+                )
+
+        # Check edge formula: s + 2d = 2n
+        s = len(self.single_edges)
+        d = len(self.double_edges)
+        expected = 2 * self.num_vertices
+        actual = s + 2 * d
+        if actual != expected:
+            errors.append(f"Edge formula: s + 2d = {actual}, expected {expected}")
+
+        # Check face count: n + 2
+        expected_faces = self.num_vertices + 2
+        if self.num_faces != expected_faces:
+            errors.append(f"Face count: {self.num_faces}, expected {expected_faces}")
+
+        # Check no self-loops
+        for v, neighbors in self.embedding.items():
+            if v in neighbors:
+                errors.append(f"Self-loop at vertex {v}")
+
+        return len(errors) == 0, errors
+
+    def to_dict(self) -> Dict:
+        """Converts to dictionary for JSON serialization.
+
+        Returns:
+            Dictionary representation of the graph.
+        """
+        return {
+            "num_vertices": self.num_vertices,
+            "edges": list(self.edges),
+            "edge_multiplicity": {
+                f"{u},{v}": m for (u, v), m in self.edge_multiplicity.items()
+            },
+            "embedding": {str(v): list(neighbors) for v, neighbors in self.embedding.items()},
+            "faces": [list(f) for f in self.faces],
+            "graph_id": self.graph_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "PlantriGraph":
+        """Creates PlantriGraph from dictionary.
+
+        Args:
+            data: Dictionary from to_dict() or JSON.
+
+        Returns:
+            PlantriGraph instance.
+        """
+        return cls(
+            num_vertices=data["num_vertices"],
+            edges=tuple(tuple(e) for e in data["edges"]),
+            edge_multiplicity={
+                tuple(map(int, k.split(","))): v
+                for k, v in data["edge_multiplicity"].items()
+            },
+            embedding={
+                int(v): tuple(neighbors) for v, neighbors in data["embedding"].items()
+            },
+            faces=tuple(tuple(f) for f in data["faces"]),
+            graph_id=data.get("graph_id", 0),
+        )
+
+
+
+def _build_plantri_graph(
+    dual_data: Dict,
+    graph_id: int,
+) -> PlantriGraph:
+    """Builds PlantriGraph from SQS dual data.
 
     Args:
-        dual_vertex_count: Q*의 정점 수
-        should_show_matrix: True면 인접 행렬도 출력
-        max_graph_count: 출력할 최대 그래프 수 (None이면 전체)
-        
-    Returns:
-        [(edge_multiplicity, stats, primal_data, dual_data), ...] 리스트
-    """
-    primal_vertex_count = dual_vertex_count + 2  # Euler 공식
+        dual_data: Dual graph data from SQSEnumerator.
+        graph_id: Unique graph identifier.
 
-    print(f"{'='*60}")
-    print(f"SQS Enumeration (Primal & Dual Graphs)")
-    print(f"{'='*60}")
-    print(f"논문: Samuel Peltier et al. (2021)")
-    print(f"plantri 옵션: -q -c2 -m2 -T (double_code)")
-    print(f"")
-    print(f"Q (Primal):  {primal_vertex_count} vertices (Simple Quadrangulation)")
-    print(f"Q* (Dual):   {dual_vertex_count} vertices (4-regular planar multigraph)")
+    Returns:
+        PlantriGraph instance.
+    """
+    n = dual_data["vertex_count"]
+    adj_list_1based = dual_data["adjacency_list"]
+
+    # Convert to 0-based embedding using GraphConverter
+    embedding = GraphConverter.to_zero_based_embedding(adj_list_1based)
+
+    # Compute edge multiplicity
+    edge_mult: Dict[Tuple[int, int], int] = {}
+    edges_set: set = set()
+
+    for v, neighbors in embedding.items():
+        for u in neighbors:
+            edge = (min(v, u), max(v, u))
+            edges_set.add(edge)
+
+    for edge in edges_set:
+        u, v = edge
+        count = embedding[u].count(v)
+        edge_mult[edge] = count
+
+    edges = tuple(sorted(edges_set))
+
+    # Extract faces using GraphConverter
+    faces = GraphConverter.extract_faces(embedding, edge_mult)
+
+    return PlantriGraph(
+        num_vertices=n,
+        edges=edges,
+        edge_multiplicity=edge_mult,
+        embedding=embedding,
+        faces=faces,
+        graph_id=graph_id,
+    )
+
+
+def enumerate_plantri_graphs(
+    dual_vertex_count: int,
+    max_count: Optional[int] = None,
+    validate: bool = True,
+    verbose: bool = False,
+) -> List[PlantriGraph]:
+    """Enumerates all n-vertex 4-regular planar multigraphs.
+
+    Returns PlantriGraph objects suitable for ILP assignment problems.
+
+    Args:
+        dual_vertex_count: Number of vertices in Q* (Dual) = n.
+        max_count: Maximum number of graphs to return (None for all).
+        validate: If True, validates each graph's invariants.
+        verbose: If True, prints progress information.
+
+    Returns:
+        List of PlantriGraph objects.
+
+    Example:
+        >>> graphs = enumerate_plantri_graphs(6)
+        >>> len(graphs)
+        9
+        >>> graphs[0].num_vertices
+        6
+        >>> graphs[0].validate()
+        (True, [])
+    """
+    n = dual_vertex_count
+
+    if verbose:
+        print(f"[Plantri] Enumerating {n}-vertex 4-regular planar multigraphs...")
 
     sqs = SQSEnumerator()
-    graph_count = 0
-    graphs_data = []
+    graphs = []
 
-    for primal_data, dual_data in sqs.generate_pairs(dual_vertex_count):
-        adjacency_list = dual_data["adjacency_list"]
-        
-        # 인접 리스트에서 edge_multiplicity 생성 (0-based)
-        edge_multiplicity = GraphConverter.adjacency_to_edge_multiplicity(
-            adjacency_list, is_one_based=True
-        )
+    for graph_id, (_, dual_data) in enumerate(sqs.generate_pairs(n)):
+        graph = _build_plantri_graph(dual_data, graph_id)
 
-        # 통계 정보 계산
-        stats = GraphConverter.get_graph_stats(edge_multiplicity, dual_vertex_count)
+        if validate:
+            is_valid, errors = graph.validate()
+            if not is_valid:
+                if verbose:
+                    print(f"  [!] Graph {graph_id} validation failed: {errors}")
+                continue
 
-        # 4-regular 검증
-        if not stats["is_regular"] or stats["regularity"] != 4:
-            continue
+        graphs.append(graph)
 
-        # Loop 검증
-        has_loop = any(vertex in neighbors for vertex, neighbors in adjacency_list.items())
-        if has_loop:
-            print(f"[WARNING] Unexpected loop detected")
-            continue
+        if verbose and (graph_id + 1) % 100 == 0:
+            print(f"  Processed {graph_id + 1} graphs...")
 
-        graph_count += 1
-        graphs_data.append((edge_multiplicity, stats, primal_data, dual_data))
-
-        if max_graph_count and graph_count >= max_graph_count:
+        if max_count and len(graphs) >= max_count:
             break
 
-    print(f"\n총 {len(graphs_data)}개의 비동형 SQS 열거됨")
+    if verbose:
+        print(f"[Plantri] Found {len(graphs)} valid graphs")
 
-    for graph_idx, (edge_multiplicity, stats, primal_data, dual_data) in enumerate(graphs_data, 1):
-        print(f"\n{'#'*60}")
-        print(f"# Solution Candidate #{graph_idx}")
-        print(f"{'#'*60}")
-
-        # Primal 그래프 정보
-        primal_adj = primal_data["adjacency_list"]
-        primal_edge_multiplicity = GraphConverter.adjacency_to_edge_multiplicity(
-            primal_adj, is_one_based=True
-        )
-        primal_stats = GraphConverter.get_graph_stats(
-            primal_edge_multiplicity, primal_data["vertex_count"]
-        )
-
-        print(f"\n[Q (Primal) - Simple Quadrangulation]")
-        print(f"  Vertices: {primal_stats['vertex_count']}")
-        print(f"  Edges: {primal_stats['edge_count']}")
-        print(f"  Adjacency List (CW order, 1-based):")
-        for v in sorted(primal_adj.keys()):
-            neighbors = primal_adj[v]
-            print(f"    {v}: {neighbors}")
-
-        # Dual 그래프 정보
-        print(f"\n[Q* (Dual) - 4-regular Planar Multigraph]")
-        print(f"  Vertices: {stats['vertex_count']}")
-        print(f"  Total Edges: {stats['edge_count']}")
-        print(f"  Single Edges: {stats['single_edge_count']}")
-        print(f"  Double Edges (Digons): {stats['double_edge_count']}")
-        print(f"  Regularity: {stats['regularity']}-regular")
-        print(f"  Loop-free: Yes")
-        dual_adj = dual_data["adjacency_list"]
-        print(f"  Adjacency List (CW order, 1-based):")
-        for v in sorted(dual_adj.keys()):
-            neighbors = dual_adj[v]
-            print(f"    {v}: {neighbors}")
-
-        # Gurobi 스타일 변수 출력 (Dual용)
-        print(f"\n[Gurobi Variable Hints (Dual)]")
-        gurobi_dict = GraphConverter.to_gurobi_start_dict(edge_multiplicity)
-        for var_name, value in sorted(gurobi_dict.items()):
-            print(f"  {var_name}.Start = {value}")
-
-        # 인접 행렬 (옵션)
-        if should_show_matrix:
-            try:
-                print(f"\n[Primal Adjacency Matrix]")
-                primal_matrix = GraphConverter.to_adjacency_matrix(
-                    primal_edge_multiplicity, primal_data["vertex_count"]
-                )
-                print(primal_matrix)
-
-                print(f"\n[Dual Adjacency Matrix]")
-                dual_matrix = GraphConverter.to_adjacency_matrix(edge_multiplicity, dual_vertex_count)
-                print(dual_matrix)
-            except ImportError as e:
-                print(f"\n[Adjacency Matrix] {e}")
-
-    return graphs_data
+    return graphs
 
 
-def export_to_json(graphs_data: List[Tuple], output_filename: str):
-    """
-    그래프 데이터를 JSON 파일로 내보내기
+def iter_plantri_graphs(
+    dual_vertex_count: int,
+    validate: bool = True,
+) -> Iterator[PlantriGraph]:
+    """Memory-efficient iterator for PlantriGraph objects.
+
+    Use this for processing large numbers of graphs without loading
+    all into memory at once.
 
     Args:
-        graphs_data: generate_sqs_dual_graphs()의 반환값
-        output_filename: 출력 파일명
+        dual_vertex_count: Number of vertices in Q* (Dual).
+        validate: If True, skips invalid graphs.
+
+    Yields:
+        PlantriGraph objects one at a time.
+
+    Example:
+        >>> for graph in iter_plantri_graphs(10):
+        ...     process_graph(graph)
     """
-    export_data = []
-    for edge_multiplicity, stats, primal_data, dual_data in graphs_data:
-        # JSON에서 tuple key를 지원하지 않으므로 리스트로 변환
-        edge_list = [
-            {"edge": [source, target], "multiplicity": multiplicity}
-            for (source, target), multiplicity in edge_multiplicity.items()
-        ]
-        export_data.append({
-            "stats": stats,
-            "edges": edge_list,
-            "gurobi_vars": GraphConverter.to_gurobi_start_dict(edge_multiplicity),
-            "primal": primal_data,
-            "dual": dual_data,
-        })
+    sqs = SQSEnumerator()
 
-    with open(output_filename, 'w', encoding='utf-8') as f:
-        json.dump(export_data, f, indent=2, ensure_ascii=False)
+    for graph_id, (_, dual_data) in enumerate(sqs.generate_pairs(dual_vertex_count)):
+        graph = _build_plantri_graph(dual_data, graph_id)
 
-    print(f"\nExported {len(export_data)} graphs to {output_filename}")
+        if validate:
+            is_valid, _ = graph.validate()
+            if not is_valid:
+                continue
+
+        yield graph
 
 
-def main():
+def save_graphs_to_cache(
+    graphs: List[PlantriGraph],
+    filepath: str,
+    use_pickle: bool = False,
+) -> None:
+    """Saves graph list to cache file.
+
+    Args:
+        graphs: List of PlantriGraph objects.
+        filepath: Output file path.
+        use_pickle: If True, uses pickle format; otherwise JSON.
+    """
+    if use_pickle:
+        import pickle
+
+        with open(filepath, "wb") as f:
+            pickle.dump(graphs, f)
+    else:
+        data = [g.to_dict() for g in graphs]
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+
+def load_graphs_from_cache(
+    filepath: str,
+    use_pickle: bool = False,
+) -> List[PlantriGraph]:
+    """Loads graph list from cache file.
+
+    Args:
+        filepath: Input file path.
+        use_pickle: If True, reads pickle format; otherwise JSON.
+
+    Returns:
+        List of PlantriGraph objects.
+    """
+    if use_pickle:
+        import pickle
+
+        with open(filepath, "rb") as f:
+            return pickle.load(f)
+    else:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return [PlantriGraph.from_dict(d) for d in data]
+
+
+def main() -> None:
+    """CLI entry point for plantri graph enumeration."""
+    import argparse
+
     parser = argparse.ArgumentParser(
-        description="SQS (Primal & Dual) 열거 및 ILP Warm Start 형식 변환",
+        description="Enumerate 4-regular planar multigraphs via plantri",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-            논문 기반 성질 (Samuel Peltier et al., 2021):
-            Q* (Dual)는 다음 성질을 만족:
-            1. Planar graph
-            2. Multigraph (double edge 허용)
-            3. Loop 없음
-            4. 4-regular
-
-            plantri 옵션: -q -c2 -m2 -T (double_code)
-            → Dual: 4-edge-connected quartic multigraph
-
-            정점 수 관계:
-            Q (Primal): n + 2 vertices
-            Q* (Dual):  n vertices
-
-            예제:
-            python -m pyplantri.ilp_bridge 6              # Q*: 6정점, Q: 8정점
-            python -m pyplantri.ilp_bridge 6 --show-matrix
-            python -m pyplantri.ilp_bridge 8 --max-graphs 5
-            python -m pyplantri.ilp_bridge 6 --export output.json
-            """,
+Examples:
+    python -m pyplantri.ilp_bridge 6
+    python -m pyplantri.ilp_bridge 8 --max 5
+    python -m pyplantri.ilp_bridge 6 --export cache/n6.json
+    python -m pyplantri.ilp_bridge 6 --show-faces
+        """,
     )
-    parser.add_argument(
-        "n",
-        type=int,
-        help="Q* (Dual)의 정점 수 (최소 3)"
-    )
-    parser.add_argument(
-        "--show-matrix",
-        action="store_true",
-        help="인접 행렬 출력 (numpy 필요)"
-    )
-    parser.add_argument(
-        "--max-graphs",
-        type=int,
-        default=None,
-        help="출력할 최대 그래프 수"
-    )
-    parser.add_argument(
-        "--export",
-        type=str,
-        default=None,
-        metavar="FILE",
-        help="JSON 파일로 내보내기"
-    )
+    parser.add_argument("n", type=int, help="Number of dual vertices (minimum 3)")
+    parser.add_argument("--max", type=int, default=None, help="Maximum graph count")
+    parser.add_argument("--export", type=str, help="Export to JSON cache file")
+    parser.add_argument("--pickle", action="store_true", help="Use pickle format")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--show-faces", action="store_true", help="Display face info")
 
     args = parser.parse_args()
 
-    # Q*의 정점 수 검증: 최소 3 이상
-    dual_vertex_count = args.n
-    if dual_vertex_count < 3:
-        parser.error("n은 최소 3 이상이어야 합니다.")
+    if args.n < 3:
+        parser.error("n must be at least 3.")
 
-    graphs_data = enumerate_sqs_graphs(
-        dual_vertex_count,
-        should_show_matrix=args.show_matrix,
-        max_graph_count=args.max_graphs
+    graphs = enumerate_plantri_graphs(
+        args.n,
+        max_count=args.max,
+        verbose=args.verbose,
     )
 
-    if args.export and graphs_data:
-        export_to_json(graphs_data, args.export)
+    print(f"\nTotal: {len(graphs)} {args.n}-vertex 4-regular planar multigraphs")
 
-    print("\n완료!")
+    for g in graphs:
+        print(f"\n{'='*50}")
+        print(f"Graph #{g.graph_id}")
+        print(f"  Vertices: {g.num_vertices}")
+        print(f"  Edges: {g.num_simple_edges} unique, {g.num_edges} total")
+        print(f"  Double edges: {len(g.double_edges)}")
+        print(f"  Faces: {g.num_faces}")
+
+        print("  Embedding (CW order, 0-based):")
+        for v in range(g.num_vertices):
+            print(f"    {v}: {list(g.embedding[v])}")
+
+        if args.show_faces:
+            print("  Faces:")
+            for i, face in enumerate(g.faces):
+                face_type = "digon" if len(face) == 2 else f"{len(face)}-gon"
+                print(f"    F{i}: {list(face)} ({face_type})")
+
+    if args.export:
+        save_graphs_to_cache(graphs, args.export, use_pickle=args.pickle)
+        print(f"\nExported to {args.export}")
 
 
 if __name__ == "__main__":

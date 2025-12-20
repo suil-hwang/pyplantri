@@ -1,11 +1,25 @@
-# pyplantri/example.py
+# src/pyplantri/example.py
+"""Example script for Simple Quadrangulation on Sphere (SQS) enumeration.
+
+This module provides an interactive CLI for exploring SQS structures,
+displaying both primal (Q) and dual (Q*) graphs.
+
+Usage:
+    python -m pyplantri.example 4
+"""
 import argparse
-from collections import Counter
-from .core import SQSEnumerator
+from typing import Dict, List
+
+from .core import GraphConverter, SQSEnumerator
 
 
-def print_graph_info(graph_data: dict, title: str = "Graph"):
-    """그래프 정보 출력 (인접 리스트는 CW 순서)"""
+def display_graph_info(graph_data: Dict, title: str = "Graph") -> None:
+    """Displays graph information with CW-ordered adjacency list.
+
+    Args:
+        graph_data: Dictionary containing 'vertex_count' and 'adjacency_list'.
+        title: Display title for the graph section.
+    """
     adjacency_list = graph_data["adjacency_list"]
     vertex_count = graph_data["vertex_count"]
     edge_count = sum(len(neighbors) for neighbors in adjacency_list.values()) // 2
@@ -13,118 +27,130 @@ def print_graph_info(graph_data: dict, title: str = "Graph"):
     print(f"\n{'='*50}")
     print(f"{title}")
     print(f"{'='*50}")
-    print(f"정점 수: {vertex_count}")
-    print(f"간선 수: {edge_count}")
-    print(f"\n인접 리스트 (CW 순서):")
+    print(f"Vertices: {vertex_count}")
+    print(f"Edges: {edge_count}")
+    print(f"\nAdjacency List (CW order):")
     for vertex in sorted(adjacency_list.keys()):
         neighbors = " ".join(map(str, adjacency_list[vertex]))
         degree = len(adjacency_list[vertex])
-        print(f"  {vertex}: [{neighbors}] (차수: {degree})")
+        print(f"  {vertex}: [{neighbors}] (degree: {degree})")
 
 
-def main():
+def validate_dual_graph(adjacency_list: Dict[int, List[int]]) -> None:
+    """Validates and prints dual graph properties.
+
+    Checks for 4-regularity, loop-free, and multi-edge properties
+    using GraphConverter utility methods.
+
+    Args:
+        adjacency_list: Dual graph adjacency list (1-indexed).
+    """
+    # 4-regular check
+    if GraphConverter.is_4_regular(adjacency_list):
+        print("  [OK] All vertices have degree 4 (4-regular)")
+
+    # Loop check
+    if GraphConverter.is_loop_free(adjacency_list):
+        print("  [OK] Loop-free")
+
+    # Double edge check using edge multiplicity
+    edge_multiplicity = GraphConverter.adjacency_to_edge_multiplicity(
+        adjacency_list, is_one_based=True
+    )
+    has_double_edge = any(mult > 1 for mult in edge_multiplicity.values())
+    if has_double_edge:
+        print("  [INFO] Contains double edges (multigraph)")
+
+
+def main() -> None:
+    """Main entry point for SQS example CLI."""
     parser = argparse.ArgumentParser(
-        description="Simple Quadrangulation (Q) 및 4-regular planar multigraph (Q*) 생성",
+        description="Generate Simple Quadrangulation (Q) and 4-regular planar multigraph (Q*)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-                논문 기반 성질 (Samuel Peltier et al., 2021):
-                - Q (Primal): Simple quadrangulation (loop/multi-edge 없음)
-                - Q* (Dual): 4-regular planar multigraph (loop 없음, double edge 허용)
+                Based on: Samuel Peltier et al. (2021)
+                - Q (Primal): Simple quadrangulation (no loops/multi-edges)
+                - Q* (Dual): 4-regular planar multigraph (loop-free, double edges allowed)
 
-                plantri 옵션: -q -c2 -m2 -T (double_code)
-                → Dual: 4-edge-connected quartic multigraph
+                plantri options: -q -c2 -m2 -T (double_code)
+                -> Dual: 4-edge-connected quartic multigraph
 
-                정점 수 관계:
-                Q* (Dual)의 정점 수 = n
-                Q (Primal)의 정점 수 = n + 2 (Euler 공식)
-                """
+                Vertex count relationship:
+                Q* (Dual): n vertices
+                Q (Primal): n + 2 vertices (Euler's formula)
+                """,
     )
     parser.add_argument(
         "n",
         type=int,
-        help="Q*(Dual)의 정점 수 (최소 3)"
+        help="Number of vertices in Q* (Dual), minimum 3"
     )
     args = parser.parse_args()
 
     dual_vertex_count = args.n
     if dual_vertex_count < 3:
-        parser.error("n은 최소 3 이상이어야 합니다.")
+        parser.error("n must be at least 3.")
 
-    primal_vertex_count = dual_vertex_count + 2  # Euler 공식
+    primal_vertex_count = dual_vertex_count + 2  # Euler's formula
 
     print("=" * 60)
     print("pyplantri - Simple Quadrangulation (SQS) Generator")
     print("=" * 60)
-    print("\n논문 기반 성질 (Samuel Peltier et al., 2021):")
-    print("  Q:  Simple quadrangulation (loop/multi-edge 없음)")
-    print("  Q*: 4-regular planar multigraph (loop 없음, double edge 허용)")
-    print(f"\nplantri 옵션: -q -c2 -m2 -T (double_code)")
-    print(f"관계: Q*({dual_vertex_count}정점) <- Q({primal_vertex_count}정점)")
+    print("\nBased on: Samuel Peltier et al. (2021)")
+    print("  Q:  Simple quadrangulation (no loops/multi-edges)")
+    print("  Q*: 4-regular planar multigraph (loop-free, double edges allowed)")
+    print(f"\nplantri options: -q -c2 -m2 -T (double_code)")
+    print(f"Relationship: Q*({dual_vertex_count} vertices) <- Q({primal_vertex_count} vertices)")
 
-    print("\n생성 중...")
-
-    # SQSEnumerator를 사용하여 생성
+    # Count first (memory-efficient)
     sqs = SQSEnumerator()
-    graph_pairs = list(sqs.generate_pairs(dual_vertex_count))
+    total_count = sqs.count(dual_vertex_count)
 
-    if not graph_pairs:
-        print(f"n={dual_vertex_count}에 대한 simple quadrangulation이 없습니다.")
+    if total_count == 0:
+        print(f"\nNo simple quadrangulations exist for n={dual_vertex_count}.")
         return
 
-    # 개수 출력 및 진행 여부 확인
-    print(f"\n구성 가능한 비동형 구조: {len(graph_pairs)}개")
-    print(f"  Q* (4-regular multigraph): {dual_vertex_count}정점")
-    print(f"  Q  (Simple Quadrangulation): {primal_vertex_count}정점")
+    print(f"\nNon-isomorphic structures: {total_count}")
+    print(f"  Q* (4-regular multigraph): {dual_vertex_count} vertices")
+    print(f"  Q  (Simple Quadrangulation): {primal_vertex_count} vertices")
 
-    response = input("\n구조를 확인하시겠습니까? (y/n): ")
+    response = input("\nView structures? (y/n): ")
     if response.lower() != 'y':
-        print("종료합니다.")
+        print("Exiting.")
         return
 
-    # 각 그래프 쌍 출력
-    for graph_idx, (primal_data, dual_data) in enumerate(graph_pairs, 1):
+    # Iterate through pairs (memory-efficient)
+    print("\nGenerating...")
+    for pair_index, (primal_data, dual_data) in enumerate(
+        sqs.generate_pairs(dual_vertex_count), start=1
+    ):
         print(f"\n{'#'*60}")
-        print(f"# 구조 {graph_idx}/{len(graph_pairs)}")
+        print(f"# Structure {pair_index}/{total_count}")
         print(f"{'#'*60}")
 
-        # Q* (4-regular multigraph) 먼저 출력
-        print_graph_info(dual_data, f"Q* (4-Regular Planar Multigraph, {dual_vertex_count} vertices)")
+        # Display Q* (4-regular multigraph) first
+        display_graph_info(
+            dual_data,
+            f"Q* (4-Regular Planar Multigraph, {dual_vertex_count} vertices)"
+        )
 
-        # Q (Simple Quadrangulation)
-        print_graph_info(primal_data, f"Q (Simple Quadrangulation, {primal_vertex_count} vertices)")
+        # Display Q (Simple Quadrangulation)
+        display_graph_info(
+            primal_data,
+            f"Q (Simple Quadrangulation, {primal_vertex_count} vertices)"
+        )
 
-        adjacency_list = dual_data["adjacency_list"]
-        degrees = [len(neighbors) for neighbors in adjacency_list.values()]
-        is_4_regular = degrees and all(degree == 4 for degree in degrees)
-        if is_4_regular:
-            print("  [OK] 모든 정점의 차수가 4 (4-regular)")
+        # Validate dual graph properties
+        validate_dual_graph(dual_data["adjacency_list"])
 
-        # Loop 체크
-        has_loop = any(vertex in neighbors for vertex, neighbors in adjacency_list.items())
-        if not has_loop:
-            print("  [OK] Loop 없음")
-
-        # Double edge 체크
-        has_double_edge = False
-        for vertex, neighbors in adjacency_list.items():
-            neighbor_count = Counter(neighbors)
-            if any(count > 1 for count in neighbor_count.values()):
-                has_double_edge = True
-                break
-        if has_double_edge:
-            print("  [INFO] Double edge 존재 (multigraph)")
-
-        # 사용자 입력 대기
-        if graph_idx < len(graph_pairs):
-            response = input("\n다음 구조? (Enter/q): ")
+        # Wait for user input
+        if pair_index < total_count:
+            response = input("\nNext structure? (Enter/q): ")
             if response.lower() == 'q':
                 break
 
-    print("\n완료!")
+    print("\nDone!")
 
 
 if __name__ == "__main__":
     main()
-
-# Usage:
-# python src/pyplantri/example.py 4

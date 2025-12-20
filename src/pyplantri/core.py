@@ -560,6 +560,123 @@ class GraphConverter:
             "regularity": regularity,
         }
 
+    @staticmethod
+    def to_zero_based_embedding(
+        adjacency_list: Dict[int, List[int]],
+    ) -> Dict[int, Tuple[int, ...]]:
+        """Converts 1-based adjacency list to 0-based embedding.
+
+        Args:
+            adjacency_list: Adjacency list from plantri (1-based).
+
+        Returns:
+            0-based embedding dictionary with tuple neighbors.
+
+        Example:
+            >>> adj = {1: [2, 3], 2: [1, 3], 3: [1, 2]}
+            >>> GraphConverter.to_zero_based_embedding(adj)
+            {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+        """
+        embedding: Dict[int, Tuple[int, ...]] = {}
+        for v, neighbors in adjacency_list.items():
+            v_idx = v - 1
+            neighbor_tuple = tuple(u - 1 for u in neighbors)
+            embedding[v_idx] = neighbor_tuple
+        return embedding
+
+
+    @staticmethod
+    def extract_faces(
+        embedding: Dict[int, Tuple[int, ...]],
+        edge_multiplicity: Optional[Dict[Tuple[int, int], int]] = None,
+    ) -> Tuple[Tuple[int, ...], ...]:
+        """Extracts faces from planar embedding using half-edge traversal.
+
+        In a CW embedding, "turning right" traverses face boundaries in CW order.
+
+        Args:
+            embedding: Mapping from vertex to CW neighbors (0-based).
+            edge_multiplicity: Optional edge multiplicities for digon detection.
+
+        Returns:
+            Tuple of face tuples (each face is a vertex sequence).
+
+        Example:
+            >>> embedding = {0: (1, 2), 1: (2, 0), 2: (0, 1)}
+            >>> GraphConverter.extract_faces(embedding)
+            ((0, 1, 2),)
+        """
+        visited_half_edges: set = set()
+        faces = []
+
+        for start_v in embedding:
+            for start_u in embedding[start_v]:
+                half_edge = (start_v, start_u)
+
+                if half_edge in visited_half_edges:
+                    continue
+
+                face = []
+                current, next_v = start_v, start_u
+
+                while True:
+                    visited_half_edges.add((current, next_v))
+                    face.append(current)
+
+                    neighbors = embedding[next_v]
+                    try:
+                        idx = neighbors.index(current)
+                    except ValueError:
+                        break
+
+                    next_next = neighbors[(idx - 1) % len(neighbors)]
+                    current, next_v = next_v, next_next
+
+                    if current == start_v and next_v == start_u:
+                        break
+
+                    if len(face) > len(embedding) * 4:
+                        break
+
+                if len(face) >= 2:
+                    faces.append(tuple(face))
+
+        # Digon faces for double edges
+        if edge_multiplicity:
+            for (u, v), mult in edge_multiplicity.items():
+                if mult == 2:
+                    digon = (u, v)
+                    if digon not in faces and (v, u) not in faces:
+                        faces.append(digon)
+
+        return tuple(faces)
+
+    @staticmethod
+    def is_4_regular(adjacency_list: Dict[int, List[int]]) -> bool:
+        """Checks if graph is 4-regular.
+
+        Args:
+            adjacency_list: Adjacency list (vertex -> neighbors).
+
+        Returns:
+            True if all vertices have degree 4.
+        """
+        if not adjacency_list:
+            return False
+        return all(len(neighbors) == 4 for neighbors in adjacency_list.values())
+
+    @staticmethod
+    def is_loop_free(adjacency_list: Dict[int, List[int]]) -> bool:
+        """Checks if graph has no self-loops.
+
+        Args:
+            adjacency_list: Adjacency list (vertex -> neighbors).
+
+        Returns:
+            True if no vertex has itself as a neighbor.
+        """
+        return all(v not in neighbors for v, neighbors in adjacency_list.items())
+
 
 class SQSEnumerator:
     """Enumerator for Simple Quadrangulation on Sphere (SQS).
