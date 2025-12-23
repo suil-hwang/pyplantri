@@ -109,10 +109,44 @@ gurobi_dict = GraphConverter.to_gurobi_start_dict(edge_mult)
 # {'x[0,1]': 2, 'x[0,2]': 2, 'x[1,2]': 2}
 ```
 
+### ILP Bridge (PlantriGraph)
+
+`PlantriGraph` is an immutable dataclass designed for ILP solvers, containing
+both dual (Q\*) and primal (Q) graph topology with 0-based indexing.
+
+```python
+from pyplantri import enumerate_plantri_graphs, iter_plantri_graphs
+
+# Enumerate all graphs (loads into memory)
+graphs = enumerate_plantri_graphs(6, verbose=True)
+
+for g in graphs:
+    print(f"Graph #{g.graph_id}")
+    print(f"  Vertices: {g.num_vertices}, Faces: {g.num_faces}")
+    print(f"  Single edges: {len(g.single_edges)}, Double edges: {len(g.double_edges)}")
+
+    # Embedding is 0-based, CW order
+    for v in range(g.num_vertices):
+        print(f"  Vertex {v}: {g.get_neighbors_cw(v)}")
+
+    # Validate graph invariants
+    is_valid, errors = g.validate()
+    print(f"  Valid: {is_valid}")
+
+# Memory-efficient iterator (for large n)
+for g in iter_plantri_graphs(8):
+    # Process one graph at a time
+    pass
+```
+
 ### Caching for Large Datasets
 
 ```python
-from pyplantri import save_graphs_to_cache, load_graphs_from_cache
+from pyplantri import (
+    enumerate_plantri_graphs,
+    save_graphs_to_cache,
+    load_graphs_from_cache,
+)
 
 # Save to JSON cache
 graphs = enumerate_plantri_graphs(10)

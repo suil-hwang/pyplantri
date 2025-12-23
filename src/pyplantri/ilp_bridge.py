@@ -1,17 +1,4 @@
 # src/pyplantri/ilp_bridge.py
-"""ILP Bridge module for SQS Assignment problems.
-
-This module provides structured graph objects and utilities for integrating
-plantri-generated 4-regular planar multigraphs with ILP solvers.
-
-All vertex indices are 0-based. Adjacency lists maintain CW (clockwise) order.
-
-Example:
-    >>> from pyplantri.ilp_bridge import enumerate_plantri_graphs, PlantriGraph
-    >>> graphs = enumerate_plantri_graphs(6)
-    >>> for graph in graphs:
-    ...     print(f"Graph {graph.graph_id}: {graph.num_edges} edges")
-"""
 import json
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Iterator, List, Optional, Tuple
@@ -21,24 +8,30 @@ from .core import GraphConverter, SQSEnumerator
 
 @dataclass(frozen=True)
 class PlantriGraph:
-    """Immutable 4-regular planar multigraph from plantri.
+    """Immutable 4-regular planar multigraph with dual and primal topology.
 
-    All indices are 0-based. Adjacency list neighbor order is CW (clockwise).
+    All indices are 0-based. Adjacency list neighbor order is clockwise (CW).
+
+    Dual Graph (Q*):
+        - 4-regular planar multigraph (allows double edges, no loops).
+        - num_vertices = n (dual vertices).
+        - faces = n + 2 (dual faces = primal vertices).
+
+    Primal Graph (Q):
+        - Simple quadrangulation (no loops/multi-edges, all faces are 4-gons).
+        - primal_num_vertices = n + 2 (primal vertices = dual faces).
+        - primal_faces = n (primal faces = dual vertices).
 
     Attributes:
-        num_vertices: Number of vertices (= n).
-        edges: Sorted edge tuples ((u, v) with u < v).
-        edge_multiplicity: Mapping from edge to multiplicity (1 or 2).
-        embedding: Mapping from vertex to CW-ordered neighbor tuple.
-        faces: Tuple of face vertex tuples (including digons).
-        graph_id: Unique identifier within the same n.
-
-    Example:
-        >>> graph = enumerate_plantri_graphs(4)[0]
-        >>> graph.num_vertices
-        4
-        >>> graph.is_4_regular
-        True
+        num_vertices: Number of dual vertices.
+        edges: Tuple of unique edges (u, v) where u < v.
+        edge_multiplicity: Dictionary mapping edges to their multiplicities.
+        embedding: Dictionary mapping vertex to CW-ordered neighbors.
+        faces: Tuple of face tuples (each face is a vertex sequence).
+        primal_num_vertices: Number of primal vertices.
+        primal_embedding: Primal graph embedding.
+        primal_faces: Primal graph faces.
+        graph_id: Unique identifier for this graph.
     """
 
     num_vertices: int
@@ -46,6 +39,11 @@ class PlantriGraph:
     edge_multiplicity: Dict[Tuple[int, int], int]
     embedding: Dict[int, Tuple[int, ...]]
     faces: Tuple[Tuple[int, ...], ...]
+
+    primal_num_vertices: int
+    primal_embedding: Dict[int, Tuple[int, ...]]
+    primal_faces: Tuple[Tuple[int, ...], ...]
+
     graph_id: int = 0
 
     @property
@@ -132,17 +130,16 @@ class PlantriGraph:
         """Validates graph invariants.
 
         Checks:
-            - 4-regularity
-            - Edge formula: s + 2d = 2n
-            - Face count: n + 2
-            - No self-loops
+            - 4-regularity.
+            - Edge formula: s + 2d = 2n.
+            - Face count: n + 2.
+            - No self-loops.
 
         Returns:
             Tuple of (is_valid, list of error messages).
         """
         errors = []
 
-        # Check 4-regularity
         for v in range(self.num_vertices):
             if v not in self.embedding:
                 errors.append(f"Vertex {v} missing from embedding")
@@ -152,7 +149,6 @@ class PlantriGraph:
                     f"Vertex {v} has degree {len(self.embedding[v])}, expected 4"
                 )
 
-        # Check edge formula: s + 2d = 2n
         s = len(self.single_edges)
         d = len(self.double_edges)
         expected = 2 * self.num_vertices
@@ -160,12 +156,10 @@ class PlantriGraph:
         if actual != expected:
             errors.append(f"Edge formula: s + 2d = {actual}, expected {expected}")
 
-        # Check face count: n + 2
         expected_faces = self.num_vertices + 2
         if self.num_faces != expected_faces:
             errors.append(f"Face count: {self.num_faces}, expected {expected_faces}")
 
-        # Check no self-loops
         for v, neighbors in self.embedding.items():
             if v in neighbors:
                 errors.append(f"Self-loop at vertex {v}")
@@ -184,8 +178,16 @@ class PlantriGraph:
             "edge_multiplicity": {
                 f"{u},{v}": m for (u, v), m in self.edge_multiplicity.items()
             },
-            "embedding": {str(v): list(neighbors) for v, neighbors in self.embedding.items()},
+            "embedding": {
+                str(v): list(neighbors) for v, neighbors in self.embedding.items()
+            },
             "faces": [list(f) for f in self.faces],
+            "primal_num_vertices": self.primal_num_vertices,
+            "primal_embedding": {
+                str(v): list(neighbors)
+                for v, neighbors in self.primal_embedding.items()
+            },
+            "primal_faces": [list(f) for f in self.primal_faces],
             "graph_id": self.graph_id,
         }
 
@@ -210,31 +212,38 @@ class PlantriGraph:
                 int(v): tuple(neighbors) for v, neighbors in data["embedding"].items()
             },
             faces=tuple(tuple(f) for f in data["faces"]),
+            primal_num_vertices=data.get("primal_num_vertices", 0),
+            primal_embedding={
+                int(v): tuple(neighbors)
+                for v, neighbors in data.get("primal_embedding", {}).items()
+            },
+            primal_faces=tuple(
+                tuple(f) for f in data.get("primal_faces", [])
+            ),
             graph_id=data.get("graph_id", 0),
         )
 
 
-
 def _build_plantri_graph(
+    primal_data: Dict,
     dual_data: Dict,
     graph_id: int,
 ) -> PlantriGraph:
-    """Builds PlantriGraph from SQS dual data.
+    """Builds PlantriGraph from primal and dual data.
 
     Args:
-        dual_data: Dual graph data from SQSEnumerator.
+        primal_data: Primal graph (Q) data from SQSEnumerator.
+        dual_data: Dual graph (Q*) data from SQSEnumerator.
         graph_id: Unique graph identifier.
 
     Returns:
-        PlantriGraph instance.
+        PlantriGraph instance with both dual and primal topology.
     """
     n = dual_data["vertex_count"]
-    adj_list_1based = dual_data["adjacency_list"]
+    dual_adj_1based = dual_data["adjacency_list"]
 
-    # Convert to 0-based embedding using GraphConverter
-    embedding = GraphConverter.to_zero_based_embedding(adj_list_1based)
+    embedding = GraphConverter.to_zero_based_embedding(dual_adj_1based)
 
-    # Compute edge multiplicity
     edge_mult: Dict[Tuple[int, int], int] = {}
     edges_set: set = set()
 
@@ -249,9 +258,12 @@ def _build_plantri_graph(
         edge_mult[edge] = count
 
     edges = tuple(sorted(edges_set))
-
-    # Extract faces using GraphConverter
     faces = GraphConverter.extract_faces(embedding, edge_mult)
+
+    primal_adj_1based = primal_data["adjacency_list"]
+    primal_num_vertices = primal_data["vertex_count"]
+    primal_embedding = GraphConverter.to_zero_based_embedding(primal_adj_1based)
+    primal_faces = GraphConverter.extract_faces(primal_embedding)
 
     return PlantriGraph(
         num_vertices=n,
@@ -259,6 +271,9 @@ def _build_plantri_graph(
         edge_multiplicity=edge_mult,
         embedding=embedding,
         faces=faces,
+        primal_num_vertices=primal_num_vertices,
+        primal_embedding=primal_embedding,
+        primal_faces=primal_faces,
         graph_id=graph_id,
     )
 
@@ -281,15 +296,6 @@ def enumerate_plantri_graphs(
 
     Returns:
         List of PlantriGraph objects.
-
-    Example:
-        >>> graphs = enumerate_plantri_graphs(6)
-        >>> len(graphs)
-        9
-        >>> graphs[0].num_vertices
-        6
-        >>> graphs[0].validate()
-        (True, [])
     """
     n = dual_vertex_count
 
@@ -299,8 +305,8 @@ def enumerate_plantri_graphs(
     sqs = SQSEnumerator()
     graphs = []
 
-    for graph_id, (_, dual_data) in enumerate(sqs.generate_pairs(n)):
-        graph = _build_plantri_graph(dual_data, graph_id)
+    for graph_id, (primal_data, dual_data) in enumerate(sqs.generate_pairs(n)):
+        graph = _build_plantri_graph(primal_data, dual_data, graph_id)
 
         if validate:
             is_valid, errors = graph.validate()
@@ -338,15 +344,13 @@ def iter_plantri_graphs(
 
     Yields:
         PlantriGraph objects one at a time.
-
-    Example:
-        >>> for graph in iter_plantri_graphs(10):
-        ...     process_graph(graph)
     """
     sqs = SQSEnumerator()
 
-    for graph_id, (_, dual_data) in enumerate(sqs.generate_pairs(dual_vertex_count)):
-        graph = _build_plantri_graph(dual_data, graph_id)
+    for graph_id, (primal_data, dual_data) in enumerate(
+        sqs.generate_pairs(dual_vertex_count)
+    ):
+        graph = _build_plantri_graph(primal_data, dual_data, graph_id)
 
         if validate:
             is_valid, _ = graph.validate()
@@ -409,14 +413,6 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description="Enumerate 4-regular planar multigraphs via plantri",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    python -m pyplantri.ilp_bridge 6
-    python -m pyplantri.ilp_bridge 8 --max 5
-    python -m pyplantri.ilp_bridge 6 --export cache/n6.json
-    python -m pyplantri.ilp_bridge 6 --show-faces
-        """,
     )
     parser.add_argument("n", type=int, help="Number of dual vertices (minimum 3)")
     parser.add_argument("--max", type=int, default=None, help="Maximum graph count")

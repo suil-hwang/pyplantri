@@ -1,12 +1,4 @@
 # src/pyplantri/example.py
-"""Example script for Simple Quadrangulation on Sphere (SQS) enumeration.
-
-This module provides an interactive CLI for exploring SQS structures,
-displaying both primal (Q) and dual (Q*) graphs.
-
-Usage:
-    python -m pyplantri.example 4
-"""
 import argparse
 from typing import Dict, List
 
@@ -39,21 +31,15 @@ def display_graph_info(graph_data: Dict, title: str = "Graph") -> None:
 def validate_dual_graph(adjacency_list: Dict[int, List[int]]) -> None:
     """Validates and prints dual graph properties.
 
-    Checks for 4-regularity, loop-free, and multi-edge properties
-    using GraphConverter utility methods.
-
     Args:
         adjacency_list: Dual graph adjacency list (1-indexed).
     """
-    # 4-regular check
     if GraphConverter.is_4_regular(adjacency_list):
         print("  [OK] All vertices have degree 4 (4-regular)")
 
-    # Loop check
     if GraphConverter.is_loop_free(adjacency_list):
         print("  [OK] Loop-free")
 
-    # Double edge check using edge multiplicity
     edge_multiplicity = GraphConverter.adjacency_to_edge_multiplicity(
         adjacency_list, is_one_based=True
     )
@@ -65,33 +51,16 @@ def validate_dual_graph(adjacency_list: Dict[int, List[int]]) -> None:
 def main() -> None:
     """Main entry point for SQS example CLI."""
     parser = argparse.ArgumentParser(
-        description="Generate Simple Quadrangulation (Q) and 4-regular planar multigraph (Q*)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-                Based on: Samuel Peltier et al. (2021)
-                - Q (Primal): Simple quadrangulation (no loops/multi-edges)
-                - Q* (Dual): 4-regular planar multigraph (loop-free, double edges allowed)
-
-                plantri options: -q -c2 -m2 -T (double_code)
-                -> Dual: 4-edge-connected quartic multigraph
-
-                Vertex count relationship:
-                Q* (Dual): n vertices
-                Q (Primal): n + 2 vertices (Euler's formula)
-                """,
+        description="Generate Simple Quadrangulation (Q) and 4-regular multigraph (Q*)",
     )
-    parser.add_argument(
-        "n",
-        type=int,
-        help="Number of vertices in Q* (Dual), minimum 3"
-    )
+    parser.add_argument("n", type=int, help="Number of vertices in Q* (minimum 3)")
     args = parser.parse_args()
 
     dual_vertex_count = args.n
     if dual_vertex_count < 3:
         parser.error("n must be at least 3.")
 
-    primal_vertex_count = dual_vertex_count + 2  # Euler's formula
+    primal_vertex_count = dual_vertex_count + 2
 
     print("=" * 60)
     print("pyplantri - Simple Quadrangulation (SQS) Generator")
@@ -100,9 +69,8 @@ def main() -> None:
     print("  Q:  Simple quadrangulation (no loops/multi-edges)")
     print("  Q*: 4-regular planar multigraph (loop-free, double edges allowed)")
     print(f"\nplantri options: -q -c2 -m2 -T (double_code)")
-    print(f"Relationship: Q*({dual_vertex_count} vertices) <- Q({primal_vertex_count} vertices)")
+    print(f"Relationship: Q*({dual_vertex_count}) <- Q({primal_vertex_count})")
 
-    # Count first (memory-efficient)
     sqs = SQSEnumerator()
     total_count = sqs.count(dual_vertex_count)
 
@@ -111,15 +79,12 @@ def main() -> None:
         return
 
     print(f"\nNon-isomorphic structures: {total_count}")
-    print(f"  Q* (4-regular multigraph): {dual_vertex_count} vertices")
-    print(f"  Q  (Simple Quadrangulation): {primal_vertex_count} vertices")
 
     response = input("\nView structures? (y/n): ")
     if response.lower() != 'y':
         print("Exiting.")
         return
 
-    # Iterate through pairs (memory-efficient)
     print("\nGenerating...")
     for pair_index, (primal_data, dual_data) in enumerate(
         sqs.generate_pairs(dual_vertex_count), start=1
@@ -128,22 +93,10 @@ def main() -> None:
         print(f"# Structure {pair_index}/{total_count}")
         print(f"{'#'*60}")
 
-        # Display Q* (4-regular multigraph) first
-        display_graph_info(
-            dual_data,
-            f"Q* (4-Regular Planar Multigraph, {dual_vertex_count} vertices)"
-        )
-
-        # Display Q (Simple Quadrangulation)
-        display_graph_info(
-            primal_data,
-            f"Q (Simple Quadrangulation, {primal_vertex_count} vertices)"
-        )
-
-        # Validate dual graph properties
+        display_graph_info(dual_data, f"Q* ({dual_vertex_count} vertices)")
+        display_graph_info(primal_data, f"Q ({primal_vertex_count} vertices)")
         validate_dual_graph(dual_data["adjacency_list"])
 
-        # Wait for user input
         if pair_index < total_count:
             response = input("\nNext structure? (Enter/q): ")
             if response.lower() == 'q':
