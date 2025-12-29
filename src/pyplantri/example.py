@@ -6,12 +6,7 @@ from .core import GraphConverter, SQSEnumerator
 
 
 def display_graph_info(graph_data: Dict, title: str = "Graph") -> None:
-    """Displays graph information with CW-ordered adjacency list.
-
-    Args:
-        graph_data: Dictionary containing 'vertex_count' and 'adjacency_list'.
-        title: Display title for the graph section.
-    """
+    """Displays graph information with CW-ordered adjacency list."""
     adjacency_list = graph_data["adjacency_list"]
     vertex_count = graph_data["vertex_count"]
     edge_count = sum(len(neighbors) for neighbors in adjacency_list.values()) // 2
@@ -29,11 +24,7 @@ def display_graph_info(graph_data: Dict, title: str = "Graph") -> None:
 
 
 def validate_dual_graph(adjacency_list: Dict[int, List[int]]) -> None:
-    """Validates and prints dual graph properties.
-
-    Args:
-        adjacency_list: Dual graph adjacency list (1-indexed).
-    """
+    """Validates and prints dual graph properties."""
     if GraphConverter.is_4_regular(adjacency_list):
         print("  [OK] All vertices have degree 4 (4-regular)")
 

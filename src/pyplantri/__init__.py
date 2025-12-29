@@ -5,7 +5,7 @@ from .core import (
     PlantriError,
     SQSEnumerator,
 )
-from .ilp_bridge import (
+from .graph_enumeration import (
     PlantriGraph,
     enumerate_plantri_graphs,
     iter_plantri_graphs,

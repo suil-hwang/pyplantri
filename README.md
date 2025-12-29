@@ -109,10 +109,10 @@ gurobi_dict = GraphConverter.to_gurobi_start_dict(edge_mult)
 # {'x[0,1]': 2, 'x[0,2]': 2, 'x[1,2]': 2}
 ```
 
-### ILP Bridge (PlantriGraph)
+### Graph Enumeration (PlantriGraph)
 
-`PlantriGraph` is an immutable dataclass designed for ILP solvers, containing
-both dual (Q\*) and primal (Q) graph topology with 0-based indexing.
+`PlantriGraph` is an immutable dataclass containing both dual (Q\*) and primal (Q)
+graph topology with 0-based indexing, suitable for optimization solvers.
 
 ```python
 from pyplantri import enumerate_plantri_graphs, iter_plantri_graphs
@@ -139,47 +139,16 @@ for g in iter_plantri_graphs(8):
     pass
 ```
 
-### Caching for Large Datasets
-
-```python
-from pyplantri import (
-    enumerate_plantri_graphs,
-    save_graphs_to_cache,
-    load_graphs_from_cache,
-)
-
-# Save to JSON cache
-graphs = enumerate_plantri_graphs(10)
-save_graphs_to_cache(graphs, "cache/n10_graphs.json")
-
-# Load from cache
-graphs = load_graphs_from_cache("cache/n10_graphs.json")
-```
-
 ### CLI Usage
 
 ```bash
 # Interactive SQS example
 python -m pyplantri.example 4
 
-# ILP Bridge with face information
-python -m pyplantri.ilp_bridge 6 --show-faces
-python -m pyplantri.ilp_bridge 6 --export output.json
-python -m pyplantri.ilp_bridge 8 --max 5 -v
-```
-
-### Low-level API (Direct Plantri Call)
-
-```python
-from pyplantri import Plantri
-
-plantri = Plantri()
-
-# Generate Simple Quadrangulation and Dual simultaneously (double_code format)
-output = plantri.run(6, options=["-q", "-c2", "-m2", "-T"])
-print(output.decode())
-# Output format: "6 ABCD AE ... 4 AEHB BHGC ..." (primal + dual)
-# Neighbors of each vertex are listed in CW (clockwise) order
+# Graph enumeration with face information
+python -m pyplantri.graph_enumeration 6 --show-faces
+python -m pyplantri.graph_enumeration 6 --export output.json
+python -m pyplantri.graph_enumeration 8 --max 5 -v
 ```
 
 ## plantri Options

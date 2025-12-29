@@ -2,9 +2,9 @@
 import os
 import re
 import subprocess
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterator, List, Literal, Optional, Tuple
+from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -15,20 +15,7 @@ _ORD_A = ord('a')
 
 
 def _find_plantri_exe() -> Path:
-    """Finds the plantri executable path.
-
-    Searches for the plantri executable in the following order:
-        1. Package bin folder (installed package).
-        2. scikit-build-core build folder (editable install).
-        3. Default package path (for error messages).
-
-    Returns:
-        Path to the plantri executable.
-
-    Note:
-        On Windows, the executable is named 'plantri.exe'.
-        On Unix-like systems, it is named 'plantri'.
-    """
+    """Finds the plantri executable path."""
     exe_name = "plantri.exe" if os.name == "nt" else "plantri"
     
     # Package bin folder (installed).
@@ -68,31 +55,10 @@ class PlantriError(Exception):
 
 
 class Plantri:
-    """Wrapper for the plantri executable.
-
-    Provides a Python interface to run plantri and generate various
-    types of planar graphs including triangulations and quadrangulations.
-
-    Attributes:
-        executable: Path to the plantri executable.
-
-    Example:
-        >>> plantri = Plantri()
-        >>> output = plantri.run(8, options=["-q", "-a"])
-        >>> for graph in plantri.generate_graphs(8, graph_type="quadrangulation"):
-        ...     print(graph)
-    """
+    """Wrapper for the plantri executable."""
 
     def __init__(self, executable: Optional[Path] = None) -> None:
-        """Initializes Plantri with the executable path.
-
-        Args:
-            executable: Path to plantri executable. If None, uses the
-                bundled binary from the package.
-
-        Raises:
-            FileNotFoundError: If the plantri executable is not found.
-        """
+        """Initializes Plantri with the executable path."""
         self.executable = Path(executable) if executable else _PLANTRI_EXE
         if not self.executable.exists():
             raise FileNotFoundError(
@@ -106,22 +72,7 @@ class Plantri:
         options: Optional[List[str]] = None,
         output_format: Literal["planar_code", "ascii", "adjacency"] = "planar_code",
     ) -> bytes:
-        """Runs plantri with the given parameters.
-
-        Args:
-            n_vertices: Number of vertices in the graph.
-            options: Additional command-line options (e.g., ["-q", "-c3"]).
-            output_format: Output format type.
-                * "planar_code": Binary planar code (default).
-                * "ascii": Human-readable ASCII format.
-                * "adjacency": Adjacency list format.
-
-        Returns:
-            Raw binary output from plantri.
-
-        Raises:
-            PlantriError: If plantri execution fails.
-        """
+        """Runs plantri with the given parameters."""
         cmd = [str(self.executable)]
 
         if options:
@@ -154,21 +105,7 @@ class Plantri:
         graph_type: Literal["triangulation", "quadrangulation"] = "triangulation",
         connectivity: int = 3,
     ) -> int:
-        """Counts graphs without generating output.
-
-        Args:
-            n_vertices: Number of vertices in the graph.
-            graph_type: Type of graph to count.
-            connectivity: Minimum connectivity requirement.
-
-        Returns:
-            Number of generated graphs.
-
-        Example:
-            >>> plantri = Plantri()
-            >>> plantri.count(8, "triangulation", 3)
-            14
-        """
+        """Counts graphs without generating output."""
         options = ["-u"]  # No stdout output (count only via stderr).
 
         if graph_type == "quadrangulation":
@@ -200,22 +137,7 @@ class Plantri:
         minimum_degree: Optional[int] = None,
         bipartite: bool = False,
     ) -> Iterator[str]:
-        """Generates planar graphs as an iterator.
-
-        Args:
-            n_vertices: Number of vertices in the graph.
-            graph_type: Type of graph to generate.
-                * "triangulation": Triangulated graph (default).
-                * "quadrangulation": Quadrangulated graph.
-                * "cubic": 3-regular graph.
-            connectivity: Minimum connectivity (1, 2, 3, 4, or 5).
-            dual: If True, outputs dual graph.
-            minimum_degree: Minimum vertex degree.
-            bipartite: If True, only generates bipartite graphs.
-
-        Yields:
-            ASCII representation of each graph.
-        """
+        """Generates planar graphs as an iterator."""
         options = ["-a"]  # ASCII output.
 
         if graph_type == "quadrangulation":
@@ -255,17 +177,7 @@ class Plantri:
         connectivity: Optional[int] = None,
         dual: bool = False,
     ) -> bytes:
-        """Generates graphs in planar_code binary format.
-
-        Args:
-            n_vertices: Number of vertices in the graph.
-            graph_type: Type of graph to generate.
-            connectivity: Minimum connectivity requirement.
-            dual: If True, generates dual graph.
-
-        Returns:
-            Binary planar_code data.
-        """
+        """Generates graphs in planar_code binary format."""
         options = []
 
         if graph_type == "quadrangulation":
@@ -279,38 +191,14 @@ class Plantri:
 
 
 class GraphConverter:
-    """Utility for converting plantri output to various formats.
-
-    Provides static methods for converting graph data to formats suitable
-    for ILP solvers, NumPy arrays, and SciPy sparse matrices.
-
-    Example:
-        >>> edge_map = GraphConverter.parse_ascii_to_edge_map("5 b,acc,bbded,cc,c")
-        >>> adj_matrix = GraphConverter.to_adjacency_matrix(edge_map, 5)
-    """
+    """Utility for converting plantri output to various formats."""
 
     @staticmethod
     def parse_ascii_to_edge_map(
         ascii_line: str,
         is_one_based: bool = False
     ) -> Dict[Tuple[int, int], int]:
-        """Converts ASCII output to edge multiplicity map.
-
-        Parses plantri's ASCII output to a {(u, v): multiplicity} dictionary.
-        For multigraphs, multiplicity > 1 when multiple edges exist between
-        vertices.
-
-        Args:
-            ascii_line: Plantri ASCII output string (e.g., "5 b,acc,bbded,cc,c").
-            is_one_based: If True, vertex numbering starts from 1.
-
-        Returns:
-            Dictionary mapping canonical edges (u < v) to their multiplicities.
-
-        Example:
-            >>> GraphConverter.parse_ascii_to_edge_map("4 bcd,acd,abd,abc")
-            {(0, 1): 1, (0, 2): 1, (0, 3): 1, (1, 2): 1, (1, 3): 1, (2, 3): 1}
-        """
+        """Converts ASCII output to edge multiplicity map."""
         parts = ascii_line.strip().split()
         if not parts or not parts[0].isdigit():
             return {}
@@ -339,16 +227,7 @@ class GraphConverter:
         ascii_line: str,
         is_one_based: bool = False
     ) -> Dict[int, List[int]]:
-        """Converts ASCII output to adjacency list.
-
-        Args:
-            ascii_line: Plantri ASCII output string.
-            is_one_based: If True, vertex numbering starts from 1.
-
-        Returns:
-            Dictionary mapping each vertex to its list of neighbors.
-            Multi-edges appear multiple times in the neighbor list.
-        """
+        """Converts ASCII output to adjacency list."""
         parts = ascii_line.strip().split()
         if not parts or not parts[0].isdigit():
             return {}
@@ -375,22 +254,14 @@ class GraphConverter:
         adjacency_list: Dict[int, List[int]],
         is_one_based: bool = True
     ) -> Dict[Tuple[int, int], int]:
-        """Converts adjacency list to edge multiplicity map.
-
-        Args:
-            adjacency_list: Dictionary mapping vertices to neighbor lists.
-            is_one_based: If True, vertex numbering starts from 1.
-
-        Returns:
-            Dictionary mapping canonical edges (u < v) to multiplicities.
-        """
+        """Converts adjacency list to edge multiplicity map."""
         edge_multiplicity: Dict[Tuple[int, int], int] = defaultdict(int)
-        offset = 1 if is_one_based else 0
+        index_offset = 1 if is_one_based else 0
 
         for vertex, neighbors in adjacency_list.items():
             for neighbor in neighbors:
-                u = min(vertex - offset, neighbor - offset)
-                v = max(vertex - offset, neighbor - offset)
+                u = min(vertex - index_offset, neighbor - index_offset)
+                v = max(vertex - index_offset, neighbor - index_offset)
                 edge_multiplicity[(u, v)] += 1
 
         # Divide by 2 since edges are counted from both endpoints.
@@ -400,16 +271,8 @@ class GraphConverter:
     def to_adjacency_matrix(
         edge_multiplicity: Dict[Tuple[int, int], int],
         vertex_count: int
-    ):
-        """Converts edge multiplicity map to dense adjacency matrix.
-
-        Args:
-            edge_multiplicity: Dictionary mapping edges to multiplicities.
-            vertex_count: Number of vertices in the graph.
-
-        Returns:
-            np.ndarray: Symmetric adjacency matrix of shape (V, V).
-        """
+    ) -> np.ndarray:
+        """Converts edge multiplicity map to dense adjacency matrix."""
         if not edge_multiplicity:
             return np.zeros((vertex_count, vertex_count), dtype=np.int32)
 
@@ -430,26 +293,7 @@ class GraphConverter:
         edge_multiplicity: Dict[Tuple[int, int], int],
         vertex_count: int
     ) -> csr_matrix:
-        """Converts edge multiplicity map to CSR sparse matrix.
-
-        Planar graphs satisfy E <= 3V - 6, making sparse matrices
-        memory-efficient. Compatible with scipy.sparse.csgraph algorithms.
-
-        Args:
-            edge_multiplicity: Dictionary mapping edges to multiplicities.
-            vertex_count: Number of vertices in the graph.
-
-        Returns:
-            Symmetric CSR sparse adjacency matrix.
-
-        Example:
-            >>> edge_map = {(0, 1): 2, (1, 2): 1}
-            >>> sparse_mat = GraphConverter.to_sparse_adjacency_matrix(edge_map, 3)
-            >>> sparse_mat.toarray()
-            array([[0, 2, 0],
-                   [2, 0, 1],
-                   [0, 1, 0]], dtype=int32)
-        """
+        """Converts edge multiplicity map to CSR sparse matrix."""
         if not edge_multiplicity:
             return csr_matrix((vertex_count, vertex_count), dtype=np.int32)
 
@@ -472,20 +316,7 @@ class GraphConverter:
         edge_multiplicity: Dict[Tuple[int, int], int],
         var_prefix: str = "x"
     ) -> Dict[str, int]:
-        """Creates a Gurobi MIP start dictionary.
-
-        Args:
-            edge_multiplicity: Dictionary mapping edges to multiplicities.
-            var_prefix: Variable name prefix (default: "x").
-
-        Returns:
-            Dictionary mapping variable names to values.
-
-        Example:
-            >>> edge_multiplicity = {(0, 1): 1, (0, 2): 2}
-            >>> GraphConverter.to_gurobi_start_dict(edge_multiplicity)
-            {'x[0,1]': 1, 'x[0,2]': 2}
-        """
+        """Creates a Gurobi MIP start dictionary."""
         return {
             f"{var_prefix}[{source},{target}]": multiplicity
             for (source, target), multiplicity in edge_multiplicity.items()
@@ -496,22 +327,7 @@ class GraphConverter:
         edge_multiplicity: Dict[Tuple[int, int], int],
         vertex_count: int
     ) -> dict:
-        """Computes graph statistics from edge multiplicity map.
-
-        Args:
-            edge_multiplicity: Dictionary mapping edges to multiplicities.
-            vertex_count: Number of vertices in the graph.
-
-        Returns:
-            Dictionary containing:
-                - vertex_count: Number of vertices.
-                - edge_count: Total edges (including multi-edges).
-                - single_edge_count: Number of single edges.
-                - double_edge_count: Number of double edges (digons).
-                - degrees: List of vertex degrees.
-                - is_regular: Whether graph is regular.
-                - regularity: Degree if regular, else None.
-        """
+        """Computes graph statistics from edge multiplicity map."""
         degrees = [0] * vertex_count
         single_edge_count = 0
         double_edge_count = 0
@@ -543,24 +359,12 @@ class GraphConverter:
     def to_zero_based_embedding(
         adjacency_list: Dict[int, List[int]],
     ) -> Dict[int, Tuple[int, ...]]:
-        """Converts 1-based adjacency list to 0-based embedding.
-
-        Args:
-            adjacency_list: Adjacency list from plantri (1-based).
-
-        Returns:
-            0-based embedding dictionary with tuple neighbors.
-
-        Example:
-            >>> adj = {1: [2, 3], 2: [1, 3], 3: [1, 2]}
-            >>> GraphConverter.to_zero_based_embedding(adj)
-            {0: (1, 2), 1: (0, 2), 2: (0, 1)}
-        """
+        """Converts 1-based adjacency list to 0-based embedding."""
         embedding: Dict[int, Tuple[int, ...]] = {}
-        for v, neighbors in adjacency_list.items():
-            v_idx = v - 1
+        for vertex, neighbors in adjacency_list.items():
+            vertex_idx = vertex - 1
             neighbor_tuple = tuple(u - 1 for u in neighbors)
-            embedding[v_idx] = neighbor_tuple
+            embedding[vertex_idx] = neighbor_tuple
         return embedding
 
 
@@ -569,23 +373,7 @@ class GraphConverter:
         embedding: Dict[int, Tuple[int, ...]],
         edge_multiplicity: Optional[Dict[Tuple[int, int], int]] = None,
     ) -> Tuple[Tuple[int, ...], ...]:
-        """Extracts faces from planar embedding using half-edge traversal.
-
-        In a clockwise (CW) embedding, "turning right" traverses face
-        boundaries in clockwise order.
-
-        Args:
-            embedding: Mapping from vertex to CW neighbors (0-based).
-            edge_multiplicity: Optional edge multiplicities for digon detection.
-
-        Returns:
-            Tuple of face tuples (each face is a vertex sequence).
-
-        Example:
-            >>> embedding = {0: (1, 2), 1: (2, 0), 2: (0, 1)}
-            >>> GraphConverter.extract_faces(embedding)
-            ((0, 1, 2),)
-        """
+        """Extracts faces from planar embedding using half-edge traversal."""
         visited_half_edges: set = set()
         faces = []
 
@@ -624,8 +412,8 @@ class GraphConverter:
 
         # Add digon faces for double edges.
         if edge_multiplicity:
-            for (u, v), mult in edge_multiplicity.items():
-                if mult == 2:
+            for (u, v), multiplicity in edge_multiplicity.items():
+                if multiplicity == 2:
                     digon = (u, v)
                     if digon not in faces and (v, u) not in faces:
                         faces.append(digon)
@@ -634,54 +422,19 @@ class GraphConverter:
 
     @staticmethod
     def is_4_regular(adjacency_list: Dict[int, List[int]]) -> bool:
-        """Checks if graph is 4-regular.
-
-        Args:
-            adjacency_list: Adjacency list (vertex -> neighbors).
-
-        Returns:
-            True if all vertices have degree 4.
-        """
+        """Checks if graph is 4-regular."""
         if not adjacency_list:
             return False
         return all(len(neighbors) == 4 for neighbors in adjacency_list.values())
 
     @staticmethod
     def is_loop_free(adjacency_list: Dict[int, List[int]]) -> bool:
-        """Checks if graph has no self-loops.
-
-        Args:
-            adjacency_list: Adjacency list (vertex -> neighbors).
-
-        Returns:
-            True if no vertex has itself as a neighbor.
-        """
+        """Checks if graph has no self-loops."""
         return all(v not in neighbors for v, neighbors in adjacency_list.items())
 
 
 class SQSEnumerator:
-    """Enumerator for Simple Quadrangulation on Sphere (SQS).
-
-    Generates primal-dual pairs where:
-        - Q (Primal): Simple quadrangulation (no loops/multi-edges).
-        - Q* (Dual): 4-regular planar multigraph (no loops, double edges allowed).
-
-    Uses plantri options: ``-q -c2 -m2 -T`` (double_code format).
-
-    The adjacency list neighbor order is clockwise (CW).
-
-    Attributes:
-        OPTIONS: Plantri command-line options for SQS enumeration.
-
-    Example:
-        >>> sqs = SQSEnumerator()
-        >>> for primal, dual in sqs.generate_pairs(4):
-        ...     print(f"Q: {primal['vertex_count']} vertices")
-        ...     print(f"Q*: {dual['vertex_count']} vertices")
-
-    References:
-        Samuel Peltier et al. (2021): SQS theory and algorithms.
-    """
+    """Enumerator for Simple Quadrangulation on Sphere (SQS)."""
 
     OPTIONS = ["-q", "-c2", "-m2", "-T"]
 
@@ -693,43 +446,18 @@ class SQSEnumerator:
         self,
         dual_vertex_count: int
     ) -> Iterator[Tuple[Dict, Dict]]:
-        """Generates primal (Q) and dual (Q*) graph pairs.
-
-        Args:
-            dual_vertex_count: Number of vertices in Q* (minimum 3).
-
-        Yields:
-            Tuple of (primal_data, dual_data) where each contains:
-                - vertex_count: Number of vertices.
-                - adjacency_list: {vertex: [neighbors]} in CW order.
-        """
+        """Generates primal (Q) and dual (Q*) graph pairs."""
         for line in self.iter_raw(dual_vertex_count):
             primal, dual = self.parse_double_code(line)
             if primal["adjacency_list"] and dual["adjacency_list"]:
                 yield primal, dual
 
     def count(self, dual_vertex_count: int) -> int:
-        """Counts the number of non-isomorphic SQS structures.
-
-        Args:
-            dual_vertex_count: Number of vertices in Q* (dual).
-
-        Returns:
-            Number of non-isomorphic simple quadrangulations.
-        """
+        """Counts the number of non-isomorphic SQS structures."""
         return sum(1 for _ in self.iter_raw(dual_vertex_count))
 
     def iter_raw(self, dual_vertex_count: int) -> Iterator[str]:
-        """Generates raw double_code output lines.
-
-        Memory-efficient generator for raw plantri output.
-
-        Args:
-            dual_vertex_count: Number of vertices in Q* (minimum 3).
-
-        Yields:
-            Raw double_code output line for each graph.
-        """
+        """Generates raw double_code output lines."""
         # Euler's formula: primal vertices = dual vertices + 2.
         primal_vertex_count = dual_vertex_count + 2
         output = self._plantri.run(primal_vertex_count, self.OPTIONS)
@@ -741,26 +469,7 @@ class SQSEnumerator:
 
     @staticmethod
     def parse_double_code(double_code_line: str) -> Tuple[Dict, Dict]:
-        """Parses plantri double_code output to adjacency lists.
-
-        The double_code format encodes both primal and dual graphs:
-            ``"6 ABCD BAEF CAGB DHEC EFDG GHFA 4 AEB BFCA CGDE DHGF"``
-
-        Format specification:
-            - Edge names: A, B, C, ... (uppercase letters).
-            - First number: primal vertex count.
-            - Following tokens: edges around each primal vertex (CW order).
-            - Second number: dual vertex count.
-            - Following tokens: edges around each dual vertex (CW order).
-
-        Args:
-            double_code_line: Plantri double_code format string.
-
-        Returns:
-            Tuple of (primal_data, dual_data) where each contains:
-                - vertex_count: Number of vertices.
-                - adjacency_list: {vertex: [neighbors]} in CW order.
-        """
+        """Parses plantri double_code output to adjacency lists."""
         parts = double_code_line.strip().split()
         if len(parts) < 2:
             empty: Dict = {"vertex_count": 0, "adjacency_list": {}}
@@ -808,18 +517,7 @@ class SQSEnumerator:
     def _build_adjacency_from_edge_lists(
         edge_lists: List[str]
     ) -> Dict[int, List[int]]:
-        """Builds adjacency list from edge lists (preserving CW order).
-
-        Each edge appears at exactly two vertices (its endpoints).
-        This method uses edge names to identify connected vertices.
-
-        Args:
-            edge_lists: List like ["ABCD", "BAEF", "CAGB", ...].
-                Each string contains edges around a vertex (1-indexed) in CW order.
-
-        Returns:
-            Adjacency list mapping vertex to neighbor list.
-        """
+        """Builds adjacency list from edge lists (preserving CW order)."""
         # Track which vertices each edge appears at.
         edge_to_vertices: Dict[str, List[int]] = defaultdict(list)
 
@@ -827,8 +525,8 @@ class SQSEnumerator:
             for edge_name in edges_str:
                 edge_to_vertices[edge_name].append(vertex_idx)
 
-        # Precompute loop edges using Counter for O(n) complexity.
-        loop_edges: set[str] = {
+        # Precompute loop edges for O(n) complexity.
+        loop_edges: Set[str] = {
             edge_name
             for edge_name, vertices in edge_to_vertices.items()
             if len(vertices) == 2 and vertices[0] == vertices[1]
