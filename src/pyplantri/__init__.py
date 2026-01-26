@@ -3,12 +3,12 @@ from .core import (
     GraphConverter,
     Plantri,
     PlantriError,
-    SQSEnumerator,
+    QuadrangulationEnumerator,
 )
-from .ilp_bridge import (
-    PlantriGraph,
-    enumerate_plantri_graphs,
-    iter_plantri_graphs,
+from .plane_graph import (
+    PlaneGraph,
+    enumerate_plane_graphs,
+    iter_plane_graphs,
     load_graphs_from_cache,
     save_graphs_to_cache,
 )
@@ -19,11 +19,11 @@ __all__ = [
     "Plantri",
     "PlantriError",
     "GraphConverter",
-    "SQSEnumerator",
-    # ILP Bridge
-    "PlantriGraph",
-    "enumerate_plantri_graphs",
-    "iter_plantri_graphs",
+    "QuadrangulationEnumerator",
+    # Plane Graph
+    "PlaneGraph",
+    "enumerate_plane_graphs",
+    "iter_plane_graphs",
     "save_graphs_to_cache",
     "load_graphs_from_cache",
 ]

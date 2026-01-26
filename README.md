@@ -2,11 +2,23 @@
 
 A Python wrapper for [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) to enumerate **Simple Quadrangulations on a Sphere (SQS)**.
 
-Given the dual vertex count `n`, it enumerates all **non-isomorphic Primal and Dual graphs**.
+Given the dual vertex count `n`, it enumerates all **non-isomorphic Primal and Dual plane graphs**.
+
+## Terminology: Planar Graph vs Plane Graph
+
+| Term             | Definition                                                                                  |
+| ---------------- | ------------------------------------------------------------------------------------------- |
+| **Planar graph** | A graph that _can be_ embedded on a sphere/plane without edge crossings (abstract property) |
+| **Plane graph**  | A planar graph _with a fixed embedding_ — cyclic edge ordering at each vertex is specified  |
+
+> "A **plane graph** is a planar graph together with a crossing-free drawing."
+> — Brinkmann & McKay, "Fast generation of planar graphs" (2007)
+
+**plantri generates plane graphs**, not just planar graphs. The output includes the combinatorial embedding (clockwise neighbor ordering), which fully determines the topological structure.
 
 ## What is plantri?
 
-[plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) is a C program for fast enumeration of planar graphs.
+[plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) is a C program for fast enumeration of plane graphs.
 
 - **Authors**: Gunnar Brinkmann (University of Ghent), Brendan McKay (Australian National University)
 - **Key Feature**: Outputs exactly one representative from each isomorphism class without storing them
@@ -15,39 +27,50 @@ Given the dual vertex count `n`, it enumerates all **non-isomorphic Primal and D
 
 This package wraps plantri's **Simple Quadrangulation** enumeration functionality for use in Python.
 
-### Related Paper
+### Related Papers
 
 - G. Brinkmann, S. Greenberg, C. Greenhill, B. D. McKay, R. Thomas and P. Wollan, **"Generation of simple quadrangulations of the sphere"**, Discrete Mathematics, 305 (2005) 33-54. [PDF](https://users.cecs.anu.edu.au/~bdm/papers/plantri-full.pdf)
+- G. Brinkmann and B. D. McKay, **"Fast generation of planar graphs"**, MATCH Commun. Math. Comput. Chem., 58 (2007) 323-357.
 
 ## SQS and Dual Graph
 
 ### Q (Primal) - Simple Quadrangulation
 
-- Planar graph where every face is a quadrilateral
+- **Plane graph** where every face is a quadrilateral
 - Simple graph (no loops, no multi-edges)
 - Vertex count: `n + 2`
 
-### Q\* (Dual) - 4-regular Planar Multigraph
+### Q\* (Dual) - 4-regular Plane Multigraph
 
-| Property     | Description                               |
-| ------------ | ----------------------------------------- |
-| Planar graph | Embeddable on a plane                     |
-| Multigraph   | Double edges allowed                      |
-| Loop-free    | No loops (since Q has no degree-1 vertex) |
-| 4-regular    | Every vertex has exactly degree 4         |
+| Property    | Description                                          |
+| ----------- | ---------------------------------------------------- |
+| Plane graph | Embedded on a sphere with fixed cyclic edge ordering |
+| Multigraph  | Double edges allowed                                 |
+| Loop-free   | No loops (since Q has no degree-1 vertex)            |
+| 4-regular   | Every vertex has exactly degree 4                    |
 
 ### Vertex Count Relationship (Euler's Formula)
 
-| Graph          | Description                             | Vertices |
-| -------------- | --------------------------------------- | -------- |
-| **Q\*** (Dual) | 4-regular planar multigraph (loop-free) | n        |
-| **Q** (Primal) | Simple Quadrangulation                  | n + 2    |
+For plane graphs: `V - E + F = 2`
 
-**Input Rule:** The input `n` to `SQSEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
+| Graph          | Description                            | Vertices |
+| -------------- | -------------------------------------- | -------- |
+| **Q\*** (Dual) | 4-regular plane multigraph (loop-free) | n        |
+| **Q** (Primal) | Simple Quadrangulation                 | n + 2    |
 
-### Adjacency List Order
+**Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
 
-The neighbor order in the output `adjacency_list` is **CW (Clockwise)** order. This is because plantri's `-T` (double_code) option lists edges around each vertex in clockwise order in the planar embedding.
+### Adjacency List Order (Combinatorial Embedding)
+
+The neighbor order in the output `adjacency_list` represents the **cyclic order** of edges at each vertex, given in **clockwise (CW)** direction. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
+
+plantri's `-T` (double_code) option outputs edges in clockwise order around each vertex.
+
+The combinatorial embedding uniquely determines:
+
+- Face boundaries (via half-edge traversal)
+- Topological structure on the sphere
+- Dual graph structure
 
 ## Installation
 
@@ -65,19 +88,20 @@ CMake automatically builds plantri during installation.
 ### Basic Usage
 
 ```python
-from pyplantri import SQSEnumerator
+from pyplantri import QuadrangulationEnumerator
 
-sqs = SQSEnumerator()
+enumerator = QuadrangulationEnumerator()
 
-# Enumerate all non-isomorphic structures
-for primal, dual in sqs.generate_pairs(4):  # Q*: 4 vertices, Q: 6 vertices
+# Enumerate all non-isomorphic plane graph structures
+for primal, dual in enumerator.generate_pairs(4):  # Q*: 4 vertices, Q: 6 vertices
     print(f"Q (Primal): {primal['vertex_count']} vertices")
     print(f"Q* (Dual): {dual['vertex_count']} vertices")
     # adjacency_list is in CW (clockwise) order, 1-indexed
+    # This ordering defines the combinatorial embedding
     print(f"  Dual adjacency list: {dual['adjacency_list']}")
 
 # Count only
-count = sqs.count(4)
+count = enumerator.count(4)
 print(f"Number of non-isomorphic structures for n=4: {count}")
 ```
 
@@ -91,7 +115,7 @@ adj_1based = {1: [2, 2, 3, 3], 2: [1, 1, 3, 3], 3: [1, 1, 2, 2]}
 embedding = GraphConverter.to_zero_based_embedding(adj_1based)
 # {0: (1, 1, 2, 2), 1: (0, 0, 2, 2), 2: (0, 0, 1, 1)}
 
-# Extract faces from embedding
+# Extract faces from embedding (uses the combinatorial embedding)
 edge_mult = GraphConverter.adjacency_to_edge_multiplicity(adj_1based, is_one_based=True)
 faces = GraphConverter.extract_faces(embedding, edge_mult)
 
@@ -109,23 +133,24 @@ gurobi_dict = GraphConverter.to_gurobi_start_dict(edge_mult)
 # {'x[0,1]': 2, 'x[0,2]': 2, 'x[1,2]': 2}
 ```
 
-### ILP Bridge (PlantriGraph)
+### Plane Graph Enumeration (PlaneGraph)
 
-`PlantriGraph` is an immutable dataclass designed for ILP solvers, containing
-both dual (Q\*) and primal (Q) graph topology with 0-based indexing.
+`PlaneGraph` is an immutable dataclass representing a **plane graph** — a planar graph
+with a fixed combinatorial embedding. Contains both dual (Q\*) and primal (Q) topology
+with 0-based indexing, suitable for optimization solvers.
 
 ```python
-from pyplantri import enumerate_plantri_graphs, iter_plantri_graphs
+from pyplantri import enumerate_plane_graphs, iter_plane_graphs
 
-# Enumerate all graphs (loads into memory)
-graphs = enumerate_plantri_graphs(6, verbose=True)
+# Enumerate all plane graphs (loads into memory)
+graphs = enumerate_plane_graphs(6, verbose=True)
 
 for g in graphs:
     print(f"Graph #{g.graph_id}")
     print(f"  Vertices: {g.num_vertices}, Faces: {g.num_faces}")
     print(f"  Single edges: {len(g.single_edges)}, Double edges: {len(g.double_edges)}")
 
-    # Embedding is 0-based, CW order
+    # Embedding is 0-based, CW order (defines the plane graph structure)
     for v in range(g.num_vertices):
         print(f"  Vertex {v}: {g.get_neighbors_cw(v)}")
 
@@ -134,26 +159,9 @@ for g in graphs:
     print(f"  Valid: {is_valid}")
 
 # Memory-efficient iterator (for large n)
-for g in iter_plantri_graphs(8):
-    # Process one graph at a time
+for g in iter_plane_graphs(8):
+    # Process one plane graph at a time
     pass
-```
-
-### Caching for Large Datasets
-
-```python
-from pyplantri import (
-    enumerate_plantri_graphs,
-    save_graphs_to_cache,
-    load_graphs_from_cache,
-)
-
-# Save to JSON cache
-graphs = enumerate_plantri_graphs(10)
-save_graphs_to_cache(graphs, "cache/n10_graphs.json")
-
-# Load from cache
-graphs = load_graphs_from_cache("cache/n10_graphs.json")
 ```
 
 ### CLI Usage
@@ -162,24 +170,10 @@ graphs = load_graphs_from_cache("cache/n10_graphs.json")
 # Interactive SQS example
 python -m pyplantri.example 4
 
-# ILP Bridge with face information
-python -m pyplantri.ilp_bridge 6 --show-faces
-python -m pyplantri.ilp_bridge 6 --export output.json
-python -m pyplantri.ilp_bridge 8 --max 5 -v
-```
-
-### Low-level API (Direct Plantri Call)
-
-```python
-from pyplantri import Plantri
-
-plantri = Plantri()
-
-# Generate Simple Quadrangulation and Dual simultaneously (double_code format)
-output = plantri.run(6, options=["-q", "-c2", "-m2", "-T"])
-print(output.decode())
-# Output format: "6 ABCD AE ... 4 AEHB BHGC ..." (primal + dual)
-# Neighbors of each vertex are listed in CW (clockwise) order
+# Plane graph enumeration with face information
+python -m pyplantri.plane_graph 6 --show-faces
+python -m pyplantri.plane_graph 6 --export output.json
+python -m pyplantri.plane_graph 8 --max 5 -v
 ```
 
 ## plantri Options
@@ -199,10 +193,10 @@ print(output.decode())
 - `-q`: Simple quadrangulation (no multi-edges in primal)
 - `-c2`: 2-connected
 - `-m2`: Minimum degree 2
-- `-T`: double_code output (primal + dual simultaneously, CW order)
-- → Dual: 4-edge-connected quartic multigraph (double edges allowed, loop-free)
+- `-T`: double_code output (primal + dual simultaneously, CW order for embedding)
+- → Dual: 2-connected 4-regular plane multigraph (double edges allowed, loop-free)
 
-## Number of Non-isomorphic Graphs by n
+## Number of Non-isomorphic Plane Graphs by n
 
 | n (Q\* vertices) | Q vertices | Non-isomorphic count |
 | ---------------- | ---------- | -------------------- |

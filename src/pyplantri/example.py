@@ -2,16 +2,11 @@
 import argparse
 from typing import Dict, List
 
-from .core import GraphConverter, SQSEnumerator
+from .core import GraphConverter, QuadrangulationEnumerator
 
 
 def display_graph_info(graph_data: Dict, title: str = "Graph") -> None:
-    """Displays graph information with CW-ordered adjacency list.
-
-    Args:
-        graph_data: Dictionary containing 'vertex_count' and 'adjacency_list'.
-        title: Display title for the graph section.
-    """
+    """Displays graph information with CW-ordered adjacency list."""
     adjacency_list = graph_data["adjacency_list"]
     vertex_count = graph_data["vertex_count"]
     edge_count = sum(len(neighbors) for neighbors in adjacency_list.values()) // 2
@@ -29,11 +24,7 @@ def display_graph_info(graph_data: Dict, title: str = "Graph") -> None:
 
 
 def validate_dual_graph(adjacency_list: Dict[int, List[int]]) -> None:
-    """Validates and prints dual graph properties.
-
-    Args:
-        adjacency_list: Dual graph adjacency list (1-indexed).
-    """
+    """Validates and prints dual graph properties."""
     if GraphConverter.is_4_regular(adjacency_list):
         print("  [OK] All vertices have degree 4 (4-regular)")
 
@@ -71,8 +62,8 @@ def main() -> None:
     print(f"\nplantri options: -q -c2 -m2 -T (double_code)")
     print(f"Relationship: Q*({dual_vertex_count}) <- Q({primal_vertex_count})")
 
-    sqs = SQSEnumerator()
-    total_count = sqs.count(dual_vertex_count)
+    enumerator = QuadrangulationEnumerator()
+    total_count = enumerator.count(dual_vertex_count)
 
     if total_count == 0:
         print(f"\nNo simple quadrangulations exist for n={dual_vertex_count}.")
@@ -87,7 +78,7 @@ def main() -> None:
 
     print("\nGenerating...")
     for pair_index, (primal_data, dual_data) in enumerate(
-        sqs.generate_pairs(dual_vertex_count), start=1
+        enumerator.generate_pairs(dual_vertex_count), start=1
     ):
         print(f"\n{'#'*60}")
         print(f"# Structure {pair_index}/{total_count}")
