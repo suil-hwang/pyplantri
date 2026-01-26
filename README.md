@@ -4,18 +4,6 @@ A Python wrapper for [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) to e
 
 Given the dual vertex count `n`, it enumerates all **non-isomorphic Primal and Dual plane graphs**.
 
-## Terminology: Planar Graph vs Plane Graph
-
-| Term             | Definition                                                                                  |
-| ---------------- | ------------------------------------------------------------------------------------------- |
-| **Planar graph** | A graph that _can be_ embedded on a sphere/plane without edge crossings (abstract property) |
-| **Plane graph**  | A planar graph _with a fixed embedding_ — cyclic edge ordering at each vertex is specified  |
-
-> "A **plane graph** is a planar graph together with a crossing-free drawing."
-> — Brinkmann & McKay, "Fast generation of planar graphs" (2007)
-
-**plantri generates plane graphs**, not just planar graphs. The output includes the combinatorial embedding (clockwise neighbor ordering), which fully determines the topological structure.
-
 ## What is plantri?
 
 [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) is a C program for fast enumeration of plane graphs.
@@ -82,119 +70,6 @@ pip install -e .
 ```
 
 CMake automatically builds plantri during installation.
-
-## Usage
-
-### Basic Usage
-
-```python
-from pyplantri import QuadrangulationEnumerator
-
-enumerator = QuadrangulationEnumerator()
-
-# Enumerate all non-isomorphic plane graph structures
-for primal, dual in enumerator.generate_pairs(4):  # Q*: 4 vertices, Q: 6 vertices
-    print(f"Q (Primal): {primal['vertex_count']} vertices")
-    print(f"Q* (Dual): {dual['vertex_count']} vertices")
-    # adjacency_list is in CW (clockwise) order, 1-indexed
-    # This ordering defines the combinatorial embedding
-    print(f"  Dual adjacency list: {dual['adjacency_list']}")
-
-# Count only
-count = enumerator.count(4)
-print(f"Number of non-isomorphic structures for n=4: {count}")
-```
-
-### Graph Conversion Utilities
-
-```python
-from pyplantri import GraphConverter
-
-# Convert 1-based adjacency list to 0-based embedding
-adj_1based = {1: [2, 2, 3, 3], 2: [1, 1, 3, 3], 3: [1, 1, 2, 2]}
-embedding = GraphConverter.to_zero_based_embedding(adj_1based)
-# {0: (1, 1, 2, 2), 1: (0, 0, 2, 2), 2: (0, 0, 1, 1)}
-
-# Extract faces from embedding (uses the combinatorial embedding)
-edge_mult = GraphConverter.adjacency_to_edge_multiplicity(adj_1based, is_one_based=True)
-faces = GraphConverter.extract_faces(embedding, edge_mult)
-
-# Check graph properties
-GraphConverter.is_4_regular(adj_1based)  # True
-GraphConverter.is_loop_free(adj_1based)  # True
-
-# Convert to NumPy/SciPy matrices
-import numpy as np
-adj_matrix = GraphConverter.to_adjacency_matrix(edge_mult, vertex_count=3)
-sparse_matrix = GraphConverter.to_sparse_adjacency_matrix(edge_mult, vertex_count=3)
-
-# Generate Gurobi MIP start dictionary
-gurobi_dict = GraphConverter.to_gurobi_start_dict(edge_mult)
-# {'x[0,1]': 2, 'x[0,2]': 2, 'x[1,2]': 2}
-```
-
-### Plane Graph Enumeration (PlaneGraph)
-
-`PlaneGraph` is an immutable dataclass representing a **plane graph** — a planar graph
-with a fixed combinatorial embedding. Contains both dual (Q\*) and primal (Q) topology
-with 0-based indexing, suitable for optimization solvers.
-
-```python
-from pyplantri import enumerate_plane_graphs, iter_plane_graphs
-
-# Enumerate all plane graphs (loads into memory)
-graphs = enumerate_plane_graphs(6, verbose=True)
-
-for g in graphs:
-    print(f"Graph #{g.graph_id}")
-    print(f"  Vertices: {g.num_vertices}, Faces: {g.num_faces}")
-    print(f"  Single edges: {len(g.single_edges)}, Double edges: {len(g.double_edges)}")
-
-    # Embedding is 0-based, CW order (defines the plane graph structure)
-    for v in range(g.num_vertices):
-        print(f"  Vertex {v}: {g.get_neighbors_cw(v)}")
-
-    # Validate graph invariants
-    is_valid, errors = g.validate()
-    print(f"  Valid: {is_valid}")
-
-# Memory-efficient iterator (for large n)
-for g in iter_plane_graphs(8):
-    # Process one plane graph at a time
-    pass
-```
-
-### CLI Usage
-
-```bash
-# Interactive SQS example
-python -m pyplantri.example 4
-
-# Plane graph enumeration with face information
-python -m pyplantri.plane_graph 6 --show-faces
-python -m pyplantri.plane_graph 6 --export output.json
-python -m pyplantri.plane_graph 8 --max 5 -v
-```
-
-## plantri Options
-
-| Option | Description                     | Notes                       |
-| ------ | ------------------------------- | --------------------------- |
-| `-q`   | Simple quadrangulation          | **Recommended** (SQS)       |
-| `-Q`   | General quadrangulation         | Dual may have loops         |
-| `-d`   | Output dual graph               |                             |
-| `-a`   | ASCII output (vertex-based)     |                             |
-| `-T`   | double_code output (edge-based) | **Recommended** primal+dual |
-| `-c2`  | 2-connected                     | Use with `-q`               |
-| `-m2`  | Minimum degree 2                | Use with `-q`               |
-
-**Options for SQS enumeration: `-q -c2 -m2 -T`**
-
-- `-q`: Simple quadrangulation (no multi-edges in primal)
-- `-c2`: 2-connected
-- `-m2`: Minimum degree 2
-- `-T`: double_code output (primal + dual simultaneously, CW order for embedding)
-- → Dual: 2-connected 4-regular plane multigraph (double edges allowed, loop-free)
 
 ## Number of Non-isomorphic Plane Graphs by n
 
