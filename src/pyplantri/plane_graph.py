@@ -1,8 +1,4 @@
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
 # src/pyplantri/plane_graph.py
-========
-# src/pyplantri/graph_enumeration.py
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
 import json
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Iterator, List, Optional, Tuple
@@ -165,13 +161,8 @@ class PlaneGraph:
         }
 
     @classmethod
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
     def from_dict(cls, data: Dict) -> "PlaneGraph":
         """Creates PlaneGraph from dictionary."""
-========
-    def from_dict(cls, data: Dict) -> "PlantriGraph":
-        """Creates PlantriGraph from dictionary."""
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
         # Parse edges as explicit 2-tuples for type safety.
         parsed_edges: List[Tuple[int, int]] = [
             (int(e[0]), int(e[1])) for e in data["edges"]
@@ -206,13 +197,8 @@ def _build_plane_graph(
     primal_data: Dict,
     dual_data: Dict,
     graph_id: int,
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
 ) -> PlaneGraph:
     """Builds PlaneGraph from primal and dual data."""
-========
-) -> PlantriGraph:
-    """Builds PlantriGraph from primal and dual data."""
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
     dual_vertex_count = dual_data["vertex_count"]
     dual_adj_1based = dual_data["adjacency_list"]
 
@@ -239,11 +225,7 @@ def _build_plane_graph(
     primal_embedding = GraphConverter.to_zero_based_embedding(primal_adj_1based)
     primal_faces = GraphConverter.extract_faces(primal_embedding)
 
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
     return PlaneGraph(
-========
-    return PlantriGraph(
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
         num_vertices=dual_vertex_count,
         edges=edges,
         edge_multiplicity=edge_multiplicity,
@@ -261,11 +243,7 @@ def enumerate_plane_graphs(
     max_count: Optional[int] = None,
     validate: bool = True,
     verbose: bool = False,
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
 ) -> List[PlaneGraph]:
-========
-) -> List[PlantriGraph]:
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
     """Enumerates all n-vertex 4-regular planar multigraphs."""
     if verbose:
         print(f"[Plantri] Enumerating {dual_vertex_count}-vertex 4-regular planar multigraphs...")
@@ -273,13 +251,8 @@ def enumerate_plane_graphs(
     enumerator = QuadrangulationEnumerator()
     graphs = []
 
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
     for graph_id, (primal_data, dual_data) in enumerate(enumerator.generate_pairs(dual_vertex_count)):
         graph = _build_plane_graph(primal_data, dual_data, graph_id)
-========
-    for graph_id, (primal_data, dual_data) in enumerate(sqs.generate_pairs(dual_vertex_count)):
-        graph = _build_plantri_graph(primal_data, dual_data, graph_id)
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
 
         if validate:
             is_valid, errors = graph.validate()
@@ -305,15 +278,9 @@ def enumerate_plane_graphs(
 def iter_plane_graphs(
     dual_vertex_count: int,
     validate: bool = True,
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
 ) -> Iterator[PlaneGraph]:
     """Iterates over PlaneGraph objects."""
     enumerator = QuadrangulationEnumerator()
-========
-) -> Iterator[PlantriGraph]:
-    """Iterator for PlantriGraph objects."""
-    sqs = SQSEnumerator()
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
 
     for graph_id, (primal_data, dual_data) in enumerate(
         enumerator.generate_pairs(dual_vertex_count)
@@ -348,11 +315,7 @@ def save_graphs_to_cache(
 def load_graphs_from_cache(
     filepath: str,
     use_pickle: bool = False,
-<<<<<<<< HEAD:src/pyplantri/plane_graph.py
 ) -> List[PlaneGraph]:
-========
-) -> List[PlantriGraph]:
->>>>>>>> 6629cc5d93d5af385c5870792b3efb3822a84f10:src/pyplantri/graph_enumeration.py
     """Loads graph list from cache file."""
     if use_pickle:
         import pickle
