@@ -104,6 +104,7 @@ class Plantri:
         n_vertices: int,
         graph_type: Literal["triangulation", "quadrangulation"] = "triangulation",
         connectivity: int = 3,
+        timeout: float = 3600.0,
     ) -> int:
         """Counts graphs without generating output."""
         options = ["-u"]  # No stdout output (count only via stderr).
@@ -118,15 +119,48 @@ class Plantri:
                 [str(self.executable)] + options + [str(n_vertices)],
                 capture_output=True,
                 text=True,
+                timeout=timeout,
             )
-            # Parse count from stderr (e.g., "1 graphs written to stdout").
+
+            # Check exit code
+            if result.returncode != 0:
+                raise PlantriError(
+                    f"plantri exited with code {result.returncode}.\n"
+                    f"stderr: {result.stderr}\nstdout: {result.stdout}"
+                )
+
+            # Parse count from stderr (e.g., "1 graphs written to stdout" or "1 quadrangulations generated").
             for line in result.stderr.split("\n"):
-                match = re.search(r"(\d+)\s+graph", line.lower())
+                match = re.search(r"(\d+)\s+(?:graph|triangulation|quadrangulation)", line.lower())
                 if match:
                     return int(match.group(1))
-        except Exception:
-            pass
-        return 0
+
+            # If we reach here, parsing failed
+            raise PlantriError(
+                f"Could not parse graph count from plantri output.\n"
+                f"stderr: {result.stderr}\nstdout: {result.stdout}"
+            )
+
+        except subprocess.TimeoutExpired as e:
+            raise PlantriError(
+                f"plantri execution timed out after {timeout} seconds "
+                f"for n={n_vertices}, graph_type={graph_type}"
+            ) from e
+
+        except FileNotFoundError as e:
+            raise PlantriError(
+                f"plantri executable not found at {self.executable}"
+            ) from e
+
+        except PlantriError:
+            # Re-raise our own errors
+            raise
+
+        except Exception as e:
+            # Catch-all for unexpected errors
+            raise PlantriError(
+                f"Unexpected error during plantri execution: {type(e).__name__}: {e}"
+            ) from e
 
     def generate_graphs(
         self,
@@ -137,10 +171,7 @@ class Plantri:
         minimum_degree: Optional[int] = None,
         bipartite: bool = False,
     ) -> Iterator[str]:
-        """Generates plane graphs as an iterator.
-
-        Plane graphs have a fixed embedding (cyclic edge ordering).
-        """
+        """Generates plane graphs as an iterator."""
         options = ["-a"]  # ASCII output.
 
         if graph_type == "quadrangulation":
@@ -424,6 +455,64 @@ class GraphConverter:
         return tuple(faces)
 
     @staticmethod
+    def extract_faces_with_twins(
+        embedding: Dict[int, Tuple[int, ...]],
+        twin_map: Dict[Tuple[int, int], Tuple[int, int]],
+    ) -> Tuple[Tuple[int, ...], ...]:
+        """Extract faces accurately using position-based half-edge traversal."""
+        visited: set = set()
+        faces: List[Tuple[int, ...]] = []
+
+        # Calculate max iterations for infinite loop detection
+        if not embedding:
+            return tuple(faces)
+
+        max_iterations = len(embedding) * max(
+            len(neighbors) for neighbors in embedding.values()
+        )
+
+        for v in sorted(embedding.keys()):
+            deg_v = len(embedding[v])
+            for i in range(deg_v):
+                if (v, i) in visited:
+                    continue
+
+                face: List[int] = []
+                curr_v, curr_i = v, i
+                iterations = 0
+
+                while (curr_v, curr_i) not in visited:
+                    iterations += 1
+                    if iterations > max_iterations:
+                        raise RuntimeError(
+                            f"Face traversal exceeded {max_iterations} iterations. "
+                            f"Possible infinite loop or invalid twin_map. "
+                            f"Current face: {face}"
+                        )
+
+                    visited.add((curr_v, curr_i))
+                    face.append(curr_v)
+
+                    # Twin
+                    if (curr_v, curr_i) not in twin_map:
+                        raise ValueError(
+                            f"Half-edge ({curr_v}, {curr_i}) not found in twin_map. "
+                            f"Embedding may be invalid or twin_map incomplete. "
+                            f"Face so far: {face}"
+                        )
+                    twin_v, twin_i = twin_map[(curr_v, curr_i)]
+
+                    # Predecessor in CW order
+                    deg = len(embedding[twin_v])
+                    curr_v = twin_v
+                    curr_i = (twin_i - 1) % deg
+
+                if len(face) >= 2:
+                    faces.append(tuple(face))
+
+        return tuple(faces)
+
+    @staticmethod
     def is_4_regular(adjacency_list: Dict[int, List[int]]) -> bool:
         """Checks if graph is 4-regular."""
         if not adjacency_list:
@@ -473,10 +562,10 @@ class QuadrangulationEnumerator:
 
     @staticmethod
     def parse_double_code(double_code_line: str) -> Tuple[Dict, Dict]:
-        """Parses plantri double_code output to adjacency lists."""
+        """Parses plantri double_code output to adjacency lists with twin maps."""
         parts = double_code_line.strip().split()
         if len(parts) < 2:
-            empty: Dict = {"vertex_count": 0, "adjacency_list": {}}
+            empty: Dict = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
             return empty, empty
 
         # Parse primal graph.
@@ -491,7 +580,7 @@ class QuadrangulationEnumerator:
 
         # Parse dual graph.
         if idx >= len(parts):
-            empty = {"vertex_count": 0, "adjacency_list": {}}
+            empty = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
             return empty, empty
 
         dual_vertex_count = int(parts[idx])
@@ -502,17 +591,23 @@ class QuadrangulationEnumerator:
             dual_edge_lists.append(parts[idx])
             idx += 1
 
-        # Build adjacency lists from edge name mappings.
-        primal_adj = QuadrangulationEnumerator._build_adjacency_from_edge_lists(primal_edge_lists)
-        dual_adj = QuadrangulationEnumerator._build_adjacency_from_edge_lists(dual_edge_lists)
+        # Build adjacency lists AND twin maps from edge name mappings.
+        primal_adj, primal_twins = (
+            QuadrangulationEnumerator._build_adjacency_and_twins(primal_edge_lists)
+        )
+        dual_adj, dual_twins = (
+            QuadrangulationEnumerator._build_adjacency_and_twins(dual_edge_lists)
+        )
 
         primal_data = {
             "vertex_count": primal_vertex_count,
-            "adjacency_list": primal_adj
+            "adjacency_list": primal_adj,
+            "twin_map": primal_twins,
         }
         dual_data = {
             "vertex_count": dual_vertex_count,
-            "adjacency_list": dual_adj
+            "adjacency_list": dual_adj,
+            "twin_map": dual_twins,
         }
 
         return primal_data, dual_data
@@ -552,3 +647,44 @@ class QuadrangulationEnumerator:
                             adjacency_list[vertex_idx].append(other_vertex)
 
         return dict(adjacency_list)
+
+    @staticmethod
+    def _build_adjacency_and_twins(
+        edge_lists: List[str],
+    ) -> Tuple[Dict[int, List[int]], Dict[Tuple[int, int], Tuple[int, int]]]:
+        """Builds adjacency list AND half-edge twin mapping from edge lists."""
+        # Collect (vertex, position) pairs where each edge name appears.
+        edge_name_to_half_edges: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+        adjacency: Dict[int, List[int]] = defaultdict(list)
+
+        for vertex_idx, edges_str in enumerate(edge_lists, start=1):
+            for pos, edge_name in enumerate(edges_str):
+                edge_name_to_half_edges[edge_name].append((vertex_idx, pos))
+
+        # Build adjacency list (same logic as before).
+        for vertex_idx, edges_str in enumerate(edge_lists, start=1):
+            for edge_name in edges_str:
+                half_edges = edge_name_to_half_edges[edge_name]
+                if len(half_edges) != 2:
+                    # Abnormal edge - plantri output corrupted or invalid
+                    raise ValueError(
+                        f"Edge '{edge_name}' appears {len(half_edges)} times "
+                        f"(expected 2). Invalid plantri output or corrupted data."
+                    )
+                (v1, _), (v2, _) = half_edges
+                if v1 == v2 == vertex_idx:
+                    # Loop edge
+                    adjacency[vertex_idx].append(vertex_idx)
+                else:
+                    # Regular edge
+                    other_v = v2 if v1 == vertex_idx else v1
+                    adjacency[vertex_idx].append(other_v)
+
+        # Twin mapping: match two half-edges sharing the same edge name.
+        twin_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        for edge_name, half_edges in edge_name_to_half_edges.items():
+            if len(half_edges) == 2:
+                twin_map[half_edges[0]] = half_edges[1]
+                twin_map[half_edges[1]] = half_edges[0]
+
+        return dict(adjacency), twin_map
