@@ -7,7 +7,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, Iterator, List, Literal, Optional, Set, Tuple, Union, overload
 
 import numpy as np
 
@@ -647,6 +647,34 @@ def save_graphs_to_cache(
     return filepath
 
 
+# Type alias for numpy cache return type
+NumpyCacheData = Dict[str, Any]  # {"embeddings": ndarray, "edge_multiplicity": ndarray, "graph_ids": ndarray}
+
+
+@overload
+def load_graphs_from_cache(
+    filepath: Union[str, Path],
+    *,
+    max_count: Optional[int] = None,
+    use_json: bool = False,
+    use_numpy: Literal[True],
+    trusted: bool = False,
+    safe_mode: bool = True,
+) -> Tuple[NumpyCacheData, CacheMetadata]: ...
+
+
+@overload
+def load_graphs_from_cache(
+    filepath: Union[str, Path],
+    *,
+    max_count: Optional[int] = None,
+    use_json: bool = False,
+    use_numpy: Literal[False] = False,
+    trusted: bool = False,
+    safe_mode: bool = True,
+) -> Tuple[List[PlaneGraph], CacheMetadata]: ...
+
+
 def load_graphs_from_cache(
     filepath: Union[str, Path],
     *,
@@ -655,7 +683,7 @@ def load_graphs_from_cache(
     use_numpy: bool = False,
     trusted: bool = False,
     safe_mode: bool = True,
-) -> Tuple[List[PlaneGraph], CacheMetadata]:
+) -> Union[Tuple[NumpyCacheData, CacheMetadata], Tuple[List[PlaneGraph], CacheMetadata]]:
     """Load graphs from cache file with security checks."""
     filepath = Path(filepath)
     if not filepath.exists():
@@ -672,7 +700,7 @@ def load_graphs_from_cache(
             graph_count=num_graphs,
             pickle_protocol=0,
         )
-        return data, metadata  # type: ignore
+        return data, metadata
     elif use_json:
         return _load_json(filepath, max_count)
     else:
