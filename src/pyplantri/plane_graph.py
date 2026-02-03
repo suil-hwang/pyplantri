@@ -7,9 +7,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterator, List, Literal, Optional, Set, Tuple, Union, overload
-
-import numpy as np
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple, Union
 
 from .core import GraphConverter, QuadrangulationEnumerator
 
@@ -34,15 +32,15 @@ class PlaneGraph:
         - Planar graph: A graph that CAN be embedded in the plane (abstract).
         - Plane graph: A planar graph WITH a fixed embedding (concrete).
 
-    This class represents an immutable 4-regular plane multigraph containing
-    both dual (Q*) and primal (Q) topology. All indices are 0-based.
+    This class represents an immutable 4-regular plane multigraph (dual graph Q*).
+    Primal graph data is computed lazily on demand. All indices are 0-based.
 
     Dual Graph (Q*):
         - 4-regular plane multigraph (allows double edges, no loops).
         - num_vertices = n (dual vertices).
         - faces = n + 2 (dual faces = primal vertices).
 
-    Primal Graph (Q):
+    Primal Graph (Q) - computed lazily:
         - Simple quadrangulation (no loops/multi-edges, all faces are 4-gons).
         - primal_num_vertices = n + 2 (primal vertices = dual faces).
         - primal_faces = n (primal faces = dual vertices).
@@ -53,12 +51,46 @@ class PlaneGraph:
     edge_multiplicity: Dict[Tuple[int, int], int]
     embedding: Dict[int, Tuple[int, ...]]  # CW cyclic order at each vertex
     faces: Tuple[Tuple[int, ...], ...]
-
-    primal_num_vertices: int
-    primal_embedding: Dict[int, Tuple[int, ...]]
-    primal_faces: Tuple[Tuple[int, ...], ...]
-
     graph_id: int = 0
+
+    @property
+    def primal_num_vertices(self) -> int:
+        """Number of primal vertices (= num_faces by Euler's formula)."""
+        return len(self.faces)
+
+    @property
+    def primal_faces(self) -> Tuple[Tuple[int, ...], ...]:
+        """Primal faces (= dual vertices, computed lazily)."""
+        # Each dual vertex becomes a primal face
+        # The primal face contains the dual faces (indices) adjacent to the dual vertex
+        return tuple(
+            tuple(sorted(set(
+                face_idx
+                for face_idx, face in enumerate(self.faces)
+                if v in face
+            )))
+            for v in range(self.num_vertices)
+        )
+
+    @property
+    def primal_embedding(self) -> Dict[int, Tuple[int, ...]]:
+        """Primal embedding (cyclic order at each primal vertex, computed lazily)."""
+        # Primal vertices = dual faces
+        # For each primal vertex (face), get adjacent primal vertices in cyclic order
+        embedding: Dict[int, Tuple[int, ...]] = {}
+        for face_idx, face in enumerate(self.faces):
+            # Adjacent primal vertices are faces sharing an edge with this face
+            neighbors: List[int] = []
+            for i, v in enumerate(face):
+                next_v = face[(i + 1) % len(face)]
+                # Find the other face sharing edge (v, next_v)
+                for other_idx, other_face in enumerate(self.faces):
+                    if other_idx != face_idx:
+                        if v in other_face and next_v in other_face:
+                            neighbors.append(other_idx)
+                            break
+            embedding[face_idx] = tuple(neighbors)
+        return embedding
 
     @property
     def num_edges(self) -> int:
@@ -141,9 +173,13 @@ class PlaneGraph:
 
         return len(errors) == 0, errors
 
-    def to_dict(self) -> Dict:
-        """Converts to dictionary for JSON serialization."""
-        return {
+    def to_dict(self, include_primal: bool = False) -> Dict:
+        """Converts to dictionary for JSON serialization.
+
+        Args:
+            include_primal: If True, include computed primal data (slower).
+        """
+        result = {
             "num_vertices": self.num_vertices,
             "edges": list(self.edges),
             "edge_multiplicity": {
@@ -153,14 +189,16 @@ class PlaneGraph:
                 str(v): list(neighbors) for v, neighbors in self.embedding.items()
             },
             "faces": [list(f) for f in self.faces],
-            "primal_num_vertices": self.primal_num_vertices,
-            "primal_embedding": {
-                str(v): list(neighbors)
-                for v, neighbors in self.primal_embedding.items()
-            },
-            "primal_faces": [list(f) for f in self.primal_faces],
             "graph_id": self.graph_id,
         }
+        if include_primal:
+            result["primal_num_vertices"] = self.primal_num_vertices
+            result["primal_embedding"] = {
+                str(v): list(neighbors)
+                for v, neighbors in self.primal_embedding.items()
+            }
+            result["primal_faces"] = [list(f) for f in self.primal_faces]
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict) -> "PlaneGraph":
@@ -183,14 +221,6 @@ class PlaneGraph:
                 int(v): tuple(neighbors) for v, neighbors in data["embedding"].items()
             },
             faces=tuple(tuple(f) for f in data["faces"]),
-            primal_num_vertices=data.get("primal_num_vertices", 0),
-            primal_embedding={
-                int(v): tuple(neighbors)
-                for v, neighbors in data.get("primal_embedding", {}).items()
-            },
-            primal_faces=tuple(
-                tuple(f) for f in data.get("primal_faces", [])
-            ),
             graph_id=data.get("graph_id", 0),
         )
 
@@ -238,21 +268,13 @@ def _build_plane_graph(
     else:
         faces = GraphConverter.extract_faces(embedding, edge_multiplicity)
 
-    # Primal is a simple graph, use original extract_faces.
-    primal_adj_1based = primal_data["adjacency_list"]
-    primal_num_vertices = primal_data["vertex_count"]
-    primal_embedding = GraphConverter.to_zero_based_embedding(primal_adj_1based)
-    primal_faces = GraphConverter.extract_faces(primal_embedding)
-
+    # Primal data is now computed lazily via properties
     return PlaneGraph(
         num_vertices=dual_vertex_count,
         edges=edges,
         edge_multiplicity=edge_multiplicity,
         embedding=embedding,
         faces=faces,
-        primal_num_vertices=primal_num_vertices,
-        primal_embedding=primal_embedding,
-        primal_faces=primal_faces,
         graph_id=graph_id,
     )
 
@@ -542,204 +564,6 @@ def _load_json(
     return graphs, metadata
 
 
-# NumPy format constants
-_NUMPY_VERTEX_DTYPE = np.uint16  # Supports up to 65535 vertices (uint8 only supports 255)
-_NUMPY_MULT_DTYPE = np.uint8     # Edge multiplicity (1 or 2)
-_NUMPY_FACE_PADDING = 65535      # Padding value for faces array
-
-
-def _embedding_to_numpy(graph: "PlaneGraph") -> np.ndarray:
-    """Convert single PlaneGraph embedding to numpy array."""
-    num_vertices = graph.num_vertices
-    result = np.zeros((num_vertices, 4), dtype=_NUMPY_VERTEX_DTYPE)
-    for v in range(num_vertices):
-        result[v] = graph.embedding[v]
-    return result
-
-
-def _embeddings_to_numpy(graphs: List["PlaneGraph"]) -> np.ndarray:
-    """Convert list of PlaneGraphs to batched numpy array."""
-    if not graphs:
-        return np.zeros((0, 0, 4), dtype=_NUMPY_VERTEX_DTYPE)
-    num_graphs = len(graphs)
-    num_vertices = graphs[0].num_vertices
-    result = np.zeros((num_graphs, num_vertices, 4), dtype=_NUMPY_VERTEX_DTYPE)
-    for i, graph in enumerate(graphs):
-        result[i] = _embedding_to_numpy(graph)
-    return result
-
-
-def _edge_multiplicity_to_numpy(graph: "PlaneGraph") -> np.ndarray:
-    """Convert edge_multiplicity to adjacency matrix."""
-    n = graph.num_vertices
-    result = np.zeros((n, n), dtype=_NUMPY_MULT_DTYPE)
-    for (u, v), mult in graph.edge_multiplicity.items():
-        result[u, v] = mult
-        result[v, u] = mult
-    return result
-
-
-def _faces_to_numpy(graphs: List["PlaneGraph"]) -> tuple[np.ndarray, np.ndarray]:
-    """Convert faces to numpy arrays with padding."""
-    if not graphs:
-        return (
-            np.zeros((0, 0, 0), dtype=_NUMPY_VERTEX_DTYPE),
-            np.zeros((0, 0), dtype=_NUMPY_VERTEX_DTYPE),
-        )
-
-    num_graphs = len(graphs)
-    num_faces = len(graphs[0].faces)  # n + 2 by Euler's formula
-    max_face_length = max(len(f) for g in graphs for f in g.faces)
-
-    faces = np.full(
-        (num_graphs, num_faces, max_face_length),
-        _NUMPY_FACE_PADDING,
-        dtype=_NUMPY_VERTEX_DTYPE,
-    )
-    face_lengths = np.zeros((num_graphs, num_faces), dtype=_NUMPY_VERTEX_DTYPE)
-
-    for i, graph in enumerate(graphs):
-        for j, face in enumerate(graph.faces):
-            face_len = len(face)
-            faces[i, j, :face_len] = face
-            face_lengths[i, j] = face_len
-
-    return faces, face_lengths
-
-
-def _save_numpy(
-    graphs: List["PlaneGraph"],
-    filepath: Path,
-    compressed: bool,
-) -> None:
-    """Save graphs to NumPy structured format (.npz)."""
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    save_fn = np.savez_compressed if compressed else np.savez
-
-    if not graphs:
-        save_fn(
-            filepath,
-            embeddings=np.zeros((0, 0, 4), dtype=_NUMPY_VERTEX_DTYPE),
-            edge_multiplicity=np.zeros((0, 0, 0), dtype=_NUMPY_MULT_DTYPE),
-            graph_ids=np.zeros((0,), dtype=np.uint32),
-            faces=np.zeros((0, 0, 0), dtype=_NUMPY_VERTEX_DTYPE),
-            face_lengths=np.zeros((0, 0), dtype=_NUMPY_VERTEX_DTYPE),
-        )
-        return
-
-    num_graphs = len(graphs)
-    num_vertices = graphs[0].num_vertices
-
-    embeddings = _embeddings_to_numpy(graphs)
-    graph_ids = np.array([g.graph_id for g in graphs], dtype=np.uint32)
-    edge_mult = np.zeros((num_graphs, num_vertices, num_vertices), dtype=_NUMPY_MULT_DTYPE)
-    for i, graph in enumerate(graphs):
-        edge_mult[i] = _edge_multiplicity_to_numpy(graph)
-
-    faces, face_lengths = _faces_to_numpy(graphs)
-
-    save_fn(
-        filepath,
-        embeddings=embeddings,
-        edge_multiplicity=edge_mult,
-        graph_ids=graph_ids,
-        faces=faces,
-        face_lengths=face_lengths,
-    )
-
-
-def _load_numpy(filepath: Path) -> Dict[str, Any]:
-    """Load graphs from NumPy structured format (.npz)."""
-    with np.load(filepath) as data:
-        result = {
-            "embeddings": data["embeddings"],
-            "edge_multiplicity": data["edge_multiplicity"],
-            "graph_ids": data["graph_ids"],
-        }
-        # v2 format includes faces
-        if "faces" in data and "face_lengths" in data:
-            result["faces"] = data["faces"]
-            result["face_lengths"] = data["face_lengths"]
-        return result
-
-
-def numpy_to_plane_graphs(data: Dict[str, Any]) -> List["PlaneGraph"]:
-    """Convert numpy arrays back to PlaneGraph objects.
-
-    Args:
-        data: Dict with keys 'embeddings', 'edge_multiplicity', 'graph_ids',
-              and optionally 'faces', 'face_lengths' (v2 format).
-
-    Returns:
-        List of PlaneGraph objects.
-    """
-    embeddings = data["embeddings"]
-    edge_mult_arrays = data["edge_multiplicity"]
-    graph_ids = data["graph_ids"]
-
-    # Check for v2 format with pre-stored faces
-    faces_array = data.get("faces")
-    face_lengths_array = data.get("face_lengths")
-    has_faces = faces_array is not None and face_lengths_array is not None
-
-    num_graphs = embeddings.shape[0]
-    if num_graphs == 0:
-        return []
-
-    num_vertices = embeddings.shape[1]
-    graphs: List[PlaneGraph] = []
-
-    # Pre-compute number of faces if available
-    num_faces = face_lengths_array.shape[1] if has_faces else 0
-
-    for i in range(num_graphs):
-        # Convert embedding using tolist() - much faster than iterating with int()
-        emb_list = embeddings[i].tolist()
-        embedding = {v: tuple(emb_list[v]) for v in range(num_vertices)}
-
-        # Use np.nonzero for vectorized edge_multiplicity extraction
-        edge_mult_matrix = edge_mult_arrays[i]
-        u_idx, v_idx = np.nonzero(np.triu(edge_mult_matrix, k=1))
-        edge_multiplicity = {
-            (int(u), int(v)): int(edge_mult_matrix[u, v])
-            for u, v in zip(u_idx, v_idx)
-        }
-
-        # Build edges using extend instead of append loop
-        edges: List[Tuple[int, int]] = []
-        for (u, v), mult in edge_multiplicity.items():
-            edges.extend([(u, v)] * mult)
-
-        # Get faces - either from stored data or compute
-        if has_faces:
-            # Type narrowing for linter
-            assert faces_array is not None and face_lengths_array is not None
-            # Use tolist() for faster conversion
-            face_lens = face_lengths_array[i].tolist()
-            faces_data = faces_array[i].tolist()
-            faces = tuple(
-                tuple(faces_data[j][:face_lens[j]])
-                for j in range(num_faces)
-            )
-        else:
-            # Compute faces from embedding (slow path for v1 format)
-            faces = GraphConverter.extract_faces(embedding, edge_multiplicity)
-
-        # Create PlaneGraph with dummy primal data (not stored in numpy format)
-        graph = PlaneGraph(
-            num_vertices=num_vertices,
-            edges=tuple(edges),
-            edge_multiplicity=edge_multiplicity,
-            embedding=embedding,
-            faces=faces,
-            primal_num_vertices=num_vertices + 2,
-            primal_embedding={},
-            primal_faces=(),
-            graph_id=int(graph_ids[i]),
-        )
-        graphs.append(graph)
-
-    return graphs
 
 
 def save_graphs_to_cache(
@@ -750,14 +574,11 @@ def save_graphs_to_cache(
     compress: bool = True,
     compress_level: int = 6,
     use_json: bool = False,
-    use_numpy: bool = False,
 ) -> Path:
     """Save graph list to cache file with atomic write."""
     filepath = Path(filepath)
 
-    if use_numpy:
-        _save_numpy(graphs, filepath, compressed=compress)
-    elif use_json:
+    if use_json:
         _save_json(graphs, filepath, dual_vertex_count)
     else:
         _save_pickle(graphs, filepath, dual_vertex_count, compress, compress_level)
@@ -771,61 +592,20 @@ def save_graphs_to_cache(
     return filepath
 
 
-# Type alias for numpy cache return type
-NumpyCacheData = Dict[str, Any]  # {"embeddings": ndarray, "edge_multiplicity": ndarray, "graph_ids": ndarray}
-
-
-@overload
 def load_graphs_from_cache(
     filepath: Union[str, Path],
     *,
     max_count: Optional[int] = None,
     use_json: bool = False,
-    use_numpy: Literal[True],
     trusted: bool = False,
     safe_mode: bool = True,
-) -> Tuple[NumpyCacheData, CacheMetadata]: ...
-
-
-@overload
-def load_graphs_from_cache(
-    filepath: Union[str, Path],
-    *,
-    max_count: Optional[int] = None,
-    use_json: bool = False,
-    use_numpy: Literal[False] = False,
-    trusted: bool = False,
-    safe_mode: bool = True,
-) -> Tuple[List[PlaneGraph], CacheMetadata]: ...
-
-
-def load_graphs_from_cache(
-    filepath: Union[str, Path],
-    *,
-    max_count: Optional[int] = None,
-    use_json: bool = False,
-    use_numpy: bool = False,
-    trusted: bool = False,
-    safe_mode: bool = True,
-) -> Union[Tuple[NumpyCacheData, CacheMetadata], Tuple[List[PlaneGraph], CacheMetadata]]:
+) -> Tuple[List[PlaneGraph], CacheMetadata]:
     """Load graphs from cache file with security checks."""
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"Cache file not found: {filepath}")
 
-    if use_numpy:
-        data = _load_numpy(filepath)
-        # Return numpy data with minimal metadata
-        num_graphs = len(data["embeddings"])
-        metadata = CacheMetadata(
-            format_version=_CACHE_FORMAT_VERSION,
-            pyplantri_version=_get_version(),
-            dual_vertex_count=data["embeddings"].shape[1] if num_graphs > 0 else 0,
-            graph_count=num_graphs,
-            pickle_protocol=0,
-        )
-        return data, metadata
-    elif use_json:
+    if use_json:
         return _load_json(filepath, max_count)
     else:
         if not trusted:
@@ -833,7 +613,7 @@ def load_graphs_from_cache(
                 "pickle file loading requires trusted=True. "
                 "pickle.load() can execute arbitrary code, so only use "
                 "with files from trusted sources. "
-                "Safer alternative: use_json=True or use_numpy=True"
+                "Safer alternative: use_json=True"
             )
         return _load_pickle(filepath, max_count, safe_mode)
 
