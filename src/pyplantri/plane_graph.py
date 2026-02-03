@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 class SecurityWarning(UserWarning):
     """Warning for security-related issues in pickle deserialization."""
 
-    pass
-
 
 @dataclass(frozen=True, slots=True)
 class PlaneGraph:
@@ -246,7 +244,7 @@ def _build_plane_graph(
     }
 
     edge_multiplicity: Dict[Tuple[int, int], int] = {}
-    unique_edges: set = set()
+    unique_edges: Set[Tuple[int, int]] = set()
 
     for v, neighbors in embedding.items():
         for u in neighbors:
@@ -545,7 +543,6 @@ def _load_json(
     with open(filepath, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
-    # Extract metadata.
     raw_meta = payload.get("metadata", {})
     metadata = CacheMetadata(
         format_version=raw_meta.get("format_version", 0),
@@ -562,7 +559,6 @@ def _load_json(
 
     graphs = [PlaneGraph.from_dict(d) for d in raw_graphs]
     return graphs, metadata
-
 
 
 
