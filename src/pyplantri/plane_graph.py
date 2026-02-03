@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple, Union
 
+import numpy as np
+
 from .core import GraphConverter, QuadrangulationEnumerator
 
 logger = logging.getLogger(__name__)
@@ -540,6 +542,82 @@ def _load_json(
     return graphs, metadata
 
 
+def _embedding_to_numpy(graph: "PlaneGraph") -> np.ndarray:
+    """Convert single PlaneGraph embedding to numpy array."""
+    num_vertices = graph.num_vertices
+    result = np.zeros((num_vertices, 4), dtype=np.uint8)
+    for v in range(num_vertices):
+        result[v] = graph.embedding[v]
+    return result
+
+
+def _embeddings_to_numpy(graphs: List["PlaneGraph"]) -> np.ndarray:
+    """Convert list of PlaneGraphs to batched numpy array."""
+    if not graphs:
+        return np.zeros((0, 0, 4), dtype=np.uint8)
+    num_graphs = len(graphs)
+    num_vertices = graphs[0].num_vertices
+    result = np.zeros((num_graphs, num_vertices, 4), dtype=np.uint8)
+    for i, graph in enumerate(graphs):
+        result[i] = _embedding_to_numpy(graph)
+    return result
+
+
+def _edge_multiplicity_to_numpy(graph: "PlaneGraph") -> np.ndarray:
+    """Convert edge_multiplicity to adjacency matrix."""
+    n = graph.num_vertices
+    result = np.zeros((n, n), dtype=np.uint8)
+    for (u, v), mult in graph.edge_multiplicity.items():
+        result[u, v] = mult
+        result[v, u] = mult
+    return result
+
+
+def _save_numpy(
+    graphs: List["PlaneGraph"],
+    filepath: Path,
+    compressed: bool,
+) -> None:
+    """Save graphs to NumPy structured format (.npz)."""
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    save_fn = np.savez_compressed if compressed else np.savez
+
+    if not graphs:
+        save_fn(
+            filepath,
+            embeddings=np.zeros((0, 0, 4), dtype=np.uint8),
+            edge_multiplicity=np.zeros((0, 0, 0), dtype=np.uint8),
+            graph_ids=np.zeros((0,), dtype=np.uint32),
+        )
+        return
+
+    num_graphs = len(graphs)
+    num_vertices = graphs[0].num_vertices
+
+    embeddings = _embeddings_to_numpy(graphs)
+    graph_ids = np.array([g.graph_id for g in graphs], dtype=np.uint32)
+    edge_mult = np.zeros((num_graphs, num_vertices, num_vertices), dtype=np.uint8)
+    for i, graph in enumerate(graphs):
+        edge_mult[i] = _edge_multiplicity_to_numpy(graph)
+
+    save_fn(
+        filepath,
+        embeddings=embeddings,
+        edge_multiplicity=edge_mult,
+        graph_ids=graph_ids,
+    )
+
+
+def _load_numpy(filepath: Path) -> Dict[str, Any]:
+    """Load graphs from NumPy structured format (.npz)."""
+    data = np.load(filepath)
+    return {
+        "embeddings": data["embeddings"],
+        "edge_multiplicity": data["edge_multiplicity"],
+        "graph_ids": data["graph_ids"],
+    }
+
+
 def save_graphs_to_cache(
     graphs: List[PlaneGraph],
     filepath: Union[str, Path],
@@ -548,11 +626,14 @@ def save_graphs_to_cache(
     compress: bool = True,
     compress_level: int = 6,
     use_json: bool = False,
+    use_numpy: bool = False,
 ) -> Path:
     """Save graph list to cache file with atomic write."""
     filepath = Path(filepath)
 
-    if use_json:
+    if use_numpy:
+        _save_numpy(graphs, filepath, compressed=compress)
+    elif use_json:
         _save_json(graphs, filepath, dual_vertex_count)
     else:
         _save_pickle(graphs, filepath, dual_vertex_count, compress, compress_level)
@@ -571,6 +652,7 @@ def load_graphs_from_cache(
     *,
     max_count: Optional[int] = None,
     use_json: bool = False,
+    use_numpy: bool = False,
     trusted: bool = False,
     safe_mode: bool = True,
 ) -> Tuple[List[PlaneGraph], CacheMetadata]:
@@ -579,7 +661,19 @@ def load_graphs_from_cache(
     if not filepath.exists():
         raise FileNotFoundError(f"Cache file not found: {filepath}")
 
-    if use_json:
+    if use_numpy:
+        data = _load_numpy(filepath)
+        # Return numpy data with minimal metadata
+        num_graphs = len(data["embeddings"])
+        metadata = CacheMetadata(
+            format_version=_CACHE_FORMAT_VERSION,
+            pyplantri_version=_get_version(),
+            dual_vertex_count=data["embeddings"].shape[1] if num_graphs > 0 else 0,
+            graph_count=num_graphs,
+            pickle_protocol=0,
+        )
+        return data, metadata  # type: ignore
+    elif use_json:
         return _load_json(filepath, max_count)
     else:
         if not trusted:
@@ -587,7 +681,7 @@ def load_graphs_from_cache(
                 "pickle file loading requires trusted=True. "
                 "pickle.load() can execute arbitrary code, so only use "
                 "with files from trusted sources. "
-                "Safer alternative: use_json=True"
+                "Safer alternative: use_json=True or use_numpy=True"
             )
         return _load_pickle(filepath, max_count, safe_mode)
 
