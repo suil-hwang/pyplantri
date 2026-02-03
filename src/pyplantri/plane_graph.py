@@ -689,40 +689,38 @@ def numpy_to_plane_graphs(data: Dict[str, Any]) -> List["PlaneGraph"]:
     num_vertices = embeddings.shape[1]
     graphs: List[PlaneGraph] = []
 
+    # Pre-compute number of faces if available
+    num_faces = face_lengths_array.shape[1] if has_faces else 0
+
     for i in range(num_graphs):
-        # Convert embedding array to dict
-        embedding: Dict[int, Tuple[int, ...]] = {}
-        for v in range(num_vertices):
-            neighbors = tuple(int(x) for x in embeddings[i, v])
-            embedding[v] = neighbors
+        # Convert embedding using tolist() - much faster than iterating with int()
+        emb_list = embeddings[i].tolist()
+        embedding = {v: tuple(emb_list[v]) for v in range(num_vertices)}
 
-        # Convert edge_multiplicity matrix to dict
-        edge_multiplicity: Dict[Tuple[int, int], int] = {}
+        # Use np.nonzero for vectorized edge_multiplicity extraction
         edge_mult_matrix = edge_mult_arrays[i]
-        for u in range(num_vertices):
-            for v in range(u + 1, num_vertices):
-                mult = int(edge_mult_matrix[u, v])
-                if mult > 0:
-                    edge_multiplicity[(u, v)] = mult
+        u_idx, v_idx = np.nonzero(np.triu(edge_mult_matrix, k=1))
+        edge_multiplicity = {
+            (int(u), int(v)): int(edge_mult_matrix[u, v])
+            for u, v in zip(u_idx, v_idx)
+        }
 
-        # Build edges from edge_multiplicity
+        # Build edges using extend instead of append loop
         edges: List[Tuple[int, int]] = []
         for (u, v), mult in edge_multiplicity.items():
-            for _ in range(mult):
-                edges.append((u, v))
+            edges.extend([(u, v)] * mult)
 
         # Get faces - either from stored data or compute
         if has_faces:
             # Type narrowing for linter
             assert faces_array is not None and face_lengths_array is not None
-            # Reconstruct faces from stored arrays (fast path)
-            num_faces = face_lengths_array.shape[1]
-            faces_list: List[Tuple[int, ...]] = []
-            for j in range(num_faces):
-                face_len = int(face_lengths_array[i, j])
-                face = tuple(int(x) for x in faces_array[i, j, :face_len])
-                faces_list.append(face)
-            faces = tuple(faces_list)
+            # Use tolist() for faster conversion
+            face_lens = face_lengths_array[i].tolist()
+            faces_data = faces_array[i].tolist()
+            faces = tuple(
+                tuple(faces_data[j][:face_lens[j]])
+                for j in range(num_faces)
+            )
         else:
             # Compute faces from embedding (slow path for v1 format)
             faces = GraphConverter.extract_faces(embedding, edge_multiplicity)
