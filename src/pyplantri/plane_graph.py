@@ -2,6 +2,8 @@
 import gzip
 import json
 import logging
+import multiprocessing
+import os
 import pickle
 import tempfile
 import warnings
@@ -9,9 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple, Union
 
-from .core import GraphConverter, QuadrangulationEnumerator
+from .core import GraphConverter, QuadrangulationEnumerator, Plantri
 
 logger = logging.getLogger(__name__)
+
+# Constants for optimized parsing
+_ORD_A = ord('a')
 
 
 class SecurityWarning(UserWarning):
@@ -308,6 +313,189 @@ def iter_plane_graphs(
                 continue
 
         yield graph
+
+
+def _parse_double_code_fast(line: str) -> Tuple[Dict, Dict]:
+    """Optimized parser for plantri double_code output."""
+    parts = line.split()
+    if len(parts) < 2:
+        empty: Dict = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
+        return empty, empty
+
+    # Parse primal graph
+    primal_vertex_count = int(parts[0])
+    idx = 1
+    primal_edge_lists = []
+    while idx < len(parts) and not parts[idx][0].isdigit():
+        primal_edge_lists.append(parts[idx])
+        idx += 1
+
+    if idx >= len(parts):
+        empty = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
+        return empty, empty
+
+    # Parse dual graph
+    dual_vertex_count = int(parts[idx])
+    idx += 1
+    dual_edge_lists = parts[idx:]
+
+    # Build adjacency and twin maps
+    primal_adj, primal_twins = _build_adjacency_and_twins_fast(primal_edge_lists)
+    dual_adj, dual_twins = _build_adjacency_and_twins_fast(dual_edge_lists)
+
+    return (
+        {"vertex_count": primal_vertex_count, "adjacency_list": primal_adj, "twin_map": primal_twins},
+        {"vertex_count": dual_vertex_count, "adjacency_list": dual_adj, "twin_map": dual_twins},
+    )
+
+
+def _build_adjacency_and_twins_fast(
+    edge_lists: List[str],
+) -> Tuple[Dict[int, List[int]], Dict[Tuple[int, int], Tuple[int, int]]]:
+    """Optimized adjacency + twin map builder (single pass)."""
+    # First pass: collect half-edges for each edge name
+    edge_name_to_half_edges: Dict[str, List[Tuple[int, int]]] = {}
+
+    for vertex_idx, edges_str in enumerate(edge_lists, start=1):
+        for pos, edge_name in enumerate(edges_str):
+            if edge_name not in edge_name_to_half_edges:
+                edge_name_to_half_edges[edge_name] = []
+            edge_name_to_half_edges[edge_name].append((vertex_idx, pos))
+
+    # Second pass: build adjacency list and twin map simultaneously
+    adjacency: Dict[int, List[int]] = {}
+    twin_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
+
+    for vertex_idx, edges_str in enumerate(edge_lists, start=1):
+        neighbors = []
+        for edge_name in edges_str:
+            half_edges = edge_name_to_half_edges[edge_name]
+            if len(half_edges) != 2:
+                raise ValueError(f"Edge '{edge_name}' appears {len(half_edges)} times")
+            (v1, _), (v2, _) = half_edges
+            if v1 == v2 == vertex_idx:
+                neighbors.append(vertex_idx)  # Loop
+            else:
+                neighbors.append(v2 if v1 == vertex_idx else v1)
+        adjacency[vertex_idx] = neighbors
+
+    # Twin mapping
+    for half_edges in edge_name_to_half_edges.values():
+        if len(half_edges) == 2:
+            twin_map[half_edges[0]] = half_edges[1]
+            twin_map[half_edges[1]] = half_edges[0]
+
+    return adjacency, twin_map
+
+
+def _process_graph_chunk(args: Tuple[List[str], int, bool]) -> List[PlaneGraph]:
+    """Process a chunk of raw lines into PlaneGraph objects."""
+    lines, start_id, validate = args
+    graphs = []
+
+    for i, line in enumerate(lines):
+        graph_id = start_id + i
+        try:
+            primal_data, dual_data = _parse_double_code_fast(line)
+            if not primal_data["adjacency_list"] or not dual_data["adjacency_list"]:
+                continue
+
+            graph = _build_plane_graph(primal_data, dual_data, graph_id)
+
+            if validate:
+                is_valid, _ = graph.validate()
+                if not is_valid:
+                    continue
+
+            graphs.append(graph)
+        except Exception:
+            continue  # Skip invalid graphs
+
+    return graphs
+
+
+def enumerate_plane_graphs_parallel(
+    dual_vertex_count: int,
+    max_count: Optional[int] = None,
+    validate: bool = True,
+    verbose: bool = False,
+    n_workers: Optional[int] = None,
+    chunk_size: int = 10000,
+) -> List[PlaneGraph]:
+    """Parallel enumeration of plane graphs."""
+    if n_workers is None:
+        n_workers = os.cpu_count() or 4
+
+    if verbose:
+        print(f"[Plantri] Parallel enumeration (n={dual_vertex_count}, workers={n_workers})...")
+
+    # Step 1: Run plantri and collect raw output
+    primal_vertex_count = dual_vertex_count + 2
+    plantri = Plantri()
+    output = plantri.run(primal_vertex_count, QuadrangulationEnumerator.OPTIONS)
+
+    # Parse raw lines
+    raw_lines = [
+        line for line in output.decode(errors="replace").split("\n")
+        if line.strip() and line[0].isdigit()
+    ]
+
+    if verbose:
+        print(f"[Plantri] {len(raw_lines)} raw graphs from plantri")
+
+    if not raw_lines:
+        return []
+
+    # For small inputs, use sequential processing
+    if len(raw_lines) < chunk_size * 2 or n_workers <= 1:
+        if verbose:
+            print("[Plantri] Using sequential processing (small input)")
+        return enumerate_plane_graphs(dual_vertex_count, max_count, validate, verbose=False)
+
+    # Step 2: Split into chunks for parallel processing
+    chunks = []
+    start_id = 0
+    for i in range(0, len(raw_lines), chunk_size):
+        chunk_lines = raw_lines[i:i + chunk_size]
+        chunks.append((chunk_lines, start_id, validate))
+        start_id += len(chunk_lines)
+
+    if verbose:
+        print(f"[Plantri] Processing {len(chunks)} chunks...")
+
+    # Step 3: Parallel processing
+    all_graphs: List[PlaneGraph] = []
+
+    # Use spawn context for Windows compatibility
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=n_workers) as pool:
+        results = pool.map(_process_graph_chunk, chunks)
+
+    for chunk_graphs in results:
+        all_graphs.extend(chunk_graphs)
+        if max_count and len(all_graphs) >= max_count:
+            all_graphs = all_graphs[:max_count]
+            break
+
+    # Re-assign graph_ids sequentially
+    for i, graph in enumerate(all_graphs):
+        # PlaneGraph is frozen, so we need to create new instances
+        all_graphs[i] = PlaneGraph(
+            num_vertices=graph.num_vertices,
+            edges=graph.edges,
+            edge_multiplicity=graph.edge_multiplicity,
+            embedding=graph.embedding,
+            faces=graph.faces,
+            primal_num_vertices=graph.primal_num_vertices,
+            primal_embedding=graph.primal_embedding,
+            primal_faces=graph.primal_faces,
+            graph_id=i,
+        )
+
+    if verbose:
+        print(f"[Plantri] Found {len(all_graphs)} valid graphs")
+
+    return all_graphs
 
 
 # Cache format version. Increment when PlaneGraph fields change.
