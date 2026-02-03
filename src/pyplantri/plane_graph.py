@@ -414,6 +414,15 @@ def _process_graph_chunk(args: Tuple[List[str], int, bool]) -> List[PlaneGraph]:
     return graphs
 
 
+@dataclass
+class EnumerationTiming:
+    """Timing breakdown for enumeration."""
+    plantri_s: float
+    parse_build_s: float
+    total_s: float
+    graph_count: int
+
+
 def enumerate_plane_graphs_parallel(
     dual_vertex_count: int,
     max_count: Optional[int] = None,
@@ -421,8 +430,12 @@ def enumerate_plane_graphs_parallel(
     verbose: bool = False,
     n_workers: Optional[int] = None,
     chunk_size: int = 10000,
-) -> List[PlaneGraph]:
+    return_timing: bool = False,
+) -> Union[List[PlaneGraph], Tuple[List[PlaneGraph], EnumerationTiming]]:
     """Parallel enumeration of plane graphs."""
+    import time
+    t_start = time.perf_counter()
+
     if n_workers is None:
         n_workers = os.cpu_count() or 4
 
@@ -433,6 +446,7 @@ def enumerate_plane_graphs_parallel(
     primal_vertex_count = dual_vertex_count + 2
     plantri = Plantri()
     output = plantri.run(primal_vertex_count, QuadrangulationEnumerator.OPTIONS)
+    t_plantri = time.perf_counter() - t_start
 
     # Parse raw lines
     raw_lines = [
@@ -444,13 +458,32 @@ def enumerate_plane_graphs_parallel(
         print(f"[Plantri] {len(raw_lines)} raw graphs from plantri")
 
     if not raw_lines:
+        if return_timing:
+            t_total = time.perf_counter() - t_start
+            timing = EnumerationTiming(
+                plantri_s=t_plantri,
+                parse_build_s=t_total - t_plantri,
+                total_s=t_total,
+                graph_count=0,
+            )
+            return [], timing
         return []
 
     # For small inputs, use sequential processing
     if len(raw_lines) < chunk_size * 2 or n_workers <= 1:
         if verbose:
             print("[Plantri] Using sequential processing (small input)")
-        return enumerate_plane_graphs(dual_vertex_count, max_count, validate, verbose=False)
+        graphs = enumerate_plane_graphs(dual_vertex_count, max_count, validate, verbose=False)
+        if return_timing:
+            t_total = time.perf_counter() - t_start
+            timing = EnumerationTiming(
+                plantri_s=t_plantri,
+                parse_build_s=t_total - t_plantri,
+                total_s=t_total,
+                graph_count=len(graphs),
+            )
+            return graphs, timing
+        return graphs
 
     # Step 2: Split into chunks for parallel processing
     chunks = []
@@ -494,6 +527,16 @@ def enumerate_plane_graphs_parallel(
 
     if verbose:
         print(f"[Plantri] Found {len(all_graphs)} valid graphs")
+
+    if return_timing:
+        t_total = time.perf_counter() - t_start
+        timing = EnumerationTiming(
+            plantri_s=t_plantri,
+            parse_build_s=t_total - t_plantri,
+            total_s=t_total,
+            graph_count=len(all_graphs),
+        )
+        return all_graphs, timing
 
     return all_graphs
 
