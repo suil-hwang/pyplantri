@@ -610,12 +610,12 @@ def _save_numpy(
 
 def _load_numpy(filepath: Path) -> Dict[str, Any]:
     """Load graphs from NumPy structured format (.npz)."""
-    data = np.load(filepath)
-    return {
-        "embeddings": data["embeddings"],
-        "edge_multiplicity": data["edge_multiplicity"],
-        "graph_ids": data["graph_ids"],
-    }
+    with np.load(filepath) as data:
+        return {
+            "embeddings": data["embeddings"],
+            "edge_multiplicity": data["edge_multiplicity"],
+            "graph_ids": data["graph_ids"],
+        }
 
 
 def save_graphs_to_cache(
