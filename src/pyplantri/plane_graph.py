@@ -30,15 +30,15 @@ class PlaneGraph:
         - Planar graph: A graph that CAN be embedded in the plane (abstract).
         - Plane graph: A planar graph WITH a fixed embedding (concrete).
 
-    This class represents an immutable 4-regular plane multigraph (dual graph Q*).
-    Primal graph data is computed lazily on demand. All indices are 0-based.
+    This class represents an immutable 4-regular plane multigraph containing
+    both dual (Q*) and primal (Q) topology. All indices are 0-based.
 
     Dual Graph (Q*):
         - 4-regular plane multigraph (allows double edges, no loops).
         - num_vertices = n (dual vertices).
         - faces = n + 2 (dual faces = primal vertices).
 
-    Primal Graph (Q) - computed lazily:
+    Primal Graph (Q):
         - Simple quadrangulation (no loops/multi-edges, all faces are 4-gons).
         - primal_num_vertices = n + 2 (primal vertices = dual faces).
         - primal_faces = n (primal faces = dual vertices).
@@ -49,46 +49,12 @@ class PlaneGraph:
     edge_multiplicity: Dict[Tuple[int, int], int]
     embedding: Dict[int, Tuple[int, ...]]  # CW cyclic order at each vertex
     faces: Tuple[Tuple[int, ...], ...]
+
+    primal_num_vertices: int
+    primal_embedding: Dict[int, Tuple[int, ...]]
+    primal_faces: Tuple[Tuple[int, ...], ...]
+
     graph_id: int = 0
-
-    @property
-    def primal_num_vertices(self) -> int:
-        """Number of primal vertices (= num_faces by Euler's formula)."""
-        return len(self.faces)
-
-    @property
-    def primal_faces(self) -> Tuple[Tuple[int, ...], ...]:
-        """Primal faces (= dual vertices, computed lazily)."""
-        # Each dual vertex becomes a primal face
-        # The primal face contains the dual faces (indices) adjacent to the dual vertex
-        return tuple(
-            tuple(sorted(set(
-                face_idx
-                for face_idx, face in enumerate(self.faces)
-                if v in face
-            )))
-            for v in range(self.num_vertices)
-        )
-
-    @property
-    def primal_embedding(self) -> Dict[int, Tuple[int, ...]]:
-        """Primal embedding (cyclic order at each primal vertex, computed lazily)."""
-        # Primal vertices = dual faces
-        # For each primal vertex (face), get adjacent primal vertices in cyclic order
-        embedding: Dict[int, Tuple[int, ...]] = {}
-        for face_idx, face in enumerate(self.faces):
-            # Adjacent primal vertices are faces sharing an edge with this face
-            neighbors: List[int] = []
-            for i, v in enumerate(face):
-                next_v = face[(i + 1) % len(face)]
-                # Find the other face sharing edge (v, next_v)
-                for other_idx, other_face in enumerate(self.faces):
-                    if other_idx != face_idx:
-                        if v in other_face and next_v in other_face:
-                            neighbors.append(other_idx)
-                            break
-            embedding[face_idx] = tuple(neighbors)
-        return embedding
 
     @property
     def num_edges(self) -> int:
@@ -171,13 +137,9 @@ class PlaneGraph:
 
         return len(errors) == 0, errors
 
-    def to_dict(self, include_primal: bool = False) -> Dict:
-        """Converts to dictionary for JSON serialization.
-
-        Args:
-            include_primal: If True, include computed primal data (slower).
-        """
-        result = {
+    def to_dict(self) -> Dict:
+        """Converts to dictionary for JSON serialization."""
+        return {
             "num_vertices": self.num_vertices,
             "edges": list(self.edges),
             "edge_multiplicity": {
@@ -187,16 +149,14 @@ class PlaneGraph:
                 str(v): list(neighbors) for v, neighbors in self.embedding.items()
             },
             "faces": [list(f) for f in self.faces],
-            "graph_id": self.graph_id,
-        }
-        if include_primal:
-            result["primal_num_vertices"] = self.primal_num_vertices
-            result["primal_embedding"] = {
+            "primal_num_vertices": self.primal_num_vertices,
+            "primal_embedding": {
                 str(v): list(neighbors)
                 for v, neighbors in self.primal_embedding.items()
-            }
-            result["primal_faces"] = [list(f) for f in self.primal_faces]
-        return result
+            },
+            "primal_faces": [list(f) for f in self.primal_faces],
+            "graph_id": self.graph_id,
+        }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "PlaneGraph":
@@ -219,6 +179,14 @@ class PlaneGraph:
                 int(v): tuple(neighbors) for v, neighbors in data["embedding"].items()
             },
             faces=tuple(tuple(f) for f in data["faces"]),
+            primal_num_vertices=data.get("primal_num_vertices", 0),
+            primal_embedding={
+                int(v): tuple(neighbors)
+                for v, neighbors in data.get("primal_embedding", {}).items()
+            },
+            primal_faces=tuple(
+                tuple(f) for f in data.get("primal_faces", [])
+            ),
             graph_id=data.get("graph_id", 0),
         )
 
@@ -266,13 +234,21 @@ def _build_plane_graph(
     else:
         faces = GraphConverter.extract_faces(embedding, edge_multiplicity)
 
-    # Primal data is now computed lazily via properties
+    # Primal is a simple graph, use original extract_faces.
+    primal_adj_1based = primal_data["adjacency_list"]
+    primal_num_vertices = primal_data["vertex_count"]
+    primal_embedding = GraphConverter.to_zero_based_embedding(primal_adj_1based)
+    primal_faces = GraphConverter.extract_faces(primal_embedding)
+
     return PlaneGraph(
         num_vertices=dual_vertex_count,
         edges=edges,
         edge_multiplicity=edge_multiplicity,
         embedding=embedding,
         faces=faces,
+        primal_num_vertices=primal_num_vertices,
+        primal_embedding=primal_embedding,
+        primal_faces=primal_faces,
         graph_id=graph_id,
     )
 
