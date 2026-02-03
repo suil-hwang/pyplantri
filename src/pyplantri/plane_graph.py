@@ -542,10 +542,16 @@ def _load_json(
     return graphs, metadata
 
 
+# NumPy format constants
+_NUMPY_VERTEX_DTYPE = np.uint16  # Supports up to 65535 vertices (uint8 only supports 255)
+_NUMPY_MULT_DTYPE = np.uint8     # Edge multiplicity (1 or 2)
+_NUMPY_FACE_PADDING = 65535      # Padding value for faces array
+
+
 def _embedding_to_numpy(graph: "PlaneGraph") -> np.ndarray:
     """Convert single PlaneGraph embedding to numpy array."""
     num_vertices = graph.num_vertices
-    result = np.zeros((num_vertices, 4), dtype=np.uint8)
+    result = np.zeros((num_vertices, 4), dtype=_NUMPY_VERTEX_DTYPE)
     for v in range(num_vertices):
         result[v] = graph.embedding[v]
     return result
@@ -554,10 +560,10 @@ def _embedding_to_numpy(graph: "PlaneGraph") -> np.ndarray:
 def _embeddings_to_numpy(graphs: List["PlaneGraph"]) -> np.ndarray:
     """Convert list of PlaneGraphs to batched numpy array."""
     if not graphs:
-        return np.zeros((0, 0, 4), dtype=np.uint8)
+        return np.zeros((0, 0, 4), dtype=_NUMPY_VERTEX_DTYPE)
     num_graphs = len(graphs)
     num_vertices = graphs[0].num_vertices
-    result = np.zeros((num_graphs, num_vertices, 4), dtype=np.uint8)
+    result = np.zeros((num_graphs, num_vertices, 4), dtype=_NUMPY_VERTEX_DTYPE)
     for i, graph in enumerate(graphs):
         result[i] = _embedding_to_numpy(graph)
     return result
@@ -566,11 +572,39 @@ def _embeddings_to_numpy(graphs: List["PlaneGraph"]) -> np.ndarray:
 def _edge_multiplicity_to_numpy(graph: "PlaneGraph") -> np.ndarray:
     """Convert edge_multiplicity to adjacency matrix."""
     n = graph.num_vertices
-    result = np.zeros((n, n), dtype=np.uint8)
+    result = np.zeros((n, n), dtype=_NUMPY_MULT_DTYPE)
     for (u, v), mult in graph.edge_multiplicity.items():
         result[u, v] = mult
         result[v, u] = mult
     return result
+
+
+def _faces_to_numpy(graphs: List["PlaneGraph"]) -> tuple[np.ndarray, np.ndarray]:
+    """Convert faces to numpy arrays with padding."""
+    if not graphs:
+        return (
+            np.zeros((0, 0, 0), dtype=_NUMPY_VERTEX_DTYPE),
+            np.zeros((0, 0), dtype=_NUMPY_VERTEX_DTYPE),
+        )
+
+    num_graphs = len(graphs)
+    num_faces = len(graphs[0].faces)  # n + 2 by Euler's formula
+    max_face_length = max(len(f) for g in graphs for f in g.faces)
+
+    faces = np.full(
+        (num_graphs, num_faces, max_face_length),
+        _NUMPY_FACE_PADDING,
+        dtype=_NUMPY_VERTEX_DTYPE,
+    )
+    face_lengths = np.zeros((num_graphs, num_faces), dtype=_NUMPY_VERTEX_DTYPE)
+
+    for i, graph in enumerate(graphs):
+        for j, face in enumerate(graph.faces):
+            face_len = len(face)
+            faces[i, j, :face_len] = face
+            face_lengths[i, j] = face_len
+
+    return faces, face_lengths
 
 
 def _save_numpy(
@@ -585,9 +619,11 @@ def _save_numpy(
     if not graphs:
         save_fn(
             filepath,
-            embeddings=np.zeros((0, 0, 4), dtype=np.uint8),
-            edge_multiplicity=np.zeros((0, 0, 0), dtype=np.uint8),
+            embeddings=np.zeros((0, 0, 4), dtype=_NUMPY_VERTEX_DTYPE),
+            edge_multiplicity=np.zeros((0, 0, 0), dtype=_NUMPY_MULT_DTYPE),
             graph_ids=np.zeros((0,), dtype=np.uint32),
+            faces=np.zeros((0, 0, 0), dtype=_NUMPY_VERTEX_DTYPE),
+            face_lengths=np.zeros((0, 0), dtype=_NUMPY_VERTEX_DTYPE),
         )
         return
 
@@ -596,26 +632,116 @@ def _save_numpy(
 
     embeddings = _embeddings_to_numpy(graphs)
     graph_ids = np.array([g.graph_id for g in graphs], dtype=np.uint32)
-    edge_mult = np.zeros((num_graphs, num_vertices, num_vertices), dtype=np.uint8)
+    edge_mult = np.zeros((num_graphs, num_vertices, num_vertices), dtype=_NUMPY_MULT_DTYPE)
     for i, graph in enumerate(graphs):
         edge_mult[i] = _edge_multiplicity_to_numpy(graph)
+
+    faces, face_lengths = _faces_to_numpy(graphs)
 
     save_fn(
         filepath,
         embeddings=embeddings,
         edge_multiplicity=edge_mult,
         graph_ids=graph_ids,
+        faces=faces,
+        face_lengths=face_lengths,
     )
 
 
 def _load_numpy(filepath: Path) -> Dict[str, Any]:
     """Load graphs from NumPy structured format (.npz)."""
     with np.load(filepath) as data:
-        return {
+        result = {
             "embeddings": data["embeddings"],
             "edge_multiplicity": data["edge_multiplicity"],
             "graph_ids": data["graph_ids"],
         }
+        # v2 format includes faces
+        if "faces" in data and "face_lengths" in data:
+            result["faces"] = data["faces"]
+            result["face_lengths"] = data["face_lengths"]
+        return result
+
+
+def numpy_to_plane_graphs(data: Dict[str, Any]) -> List["PlaneGraph"]:
+    """Convert numpy arrays back to PlaneGraph objects.
+
+    Args:
+        data: Dict with keys 'embeddings', 'edge_multiplicity', 'graph_ids',
+              and optionally 'faces', 'face_lengths' (v2 format).
+
+    Returns:
+        List of PlaneGraph objects.
+    """
+    embeddings = data["embeddings"]
+    edge_mult_arrays = data["edge_multiplicity"]
+    graph_ids = data["graph_ids"]
+
+    # Check for v2 format with pre-stored faces
+    faces_array = data.get("faces")
+    face_lengths_array = data.get("face_lengths")
+    has_faces = faces_array is not None and face_lengths_array is not None
+
+    num_graphs = embeddings.shape[0]
+    if num_graphs == 0:
+        return []
+
+    num_vertices = embeddings.shape[1]
+    graphs: List[PlaneGraph] = []
+
+    for i in range(num_graphs):
+        # Convert embedding array to dict
+        embedding: Dict[int, Tuple[int, ...]] = {}
+        for v in range(num_vertices):
+            neighbors = tuple(int(x) for x in embeddings[i, v])
+            embedding[v] = neighbors
+
+        # Convert edge_multiplicity matrix to dict
+        edge_multiplicity: Dict[Tuple[int, int], int] = {}
+        edge_mult_matrix = edge_mult_arrays[i]
+        for u in range(num_vertices):
+            for v in range(u + 1, num_vertices):
+                mult = int(edge_mult_matrix[u, v])
+                if mult > 0:
+                    edge_multiplicity[(u, v)] = mult
+
+        # Build edges from edge_multiplicity
+        edges: List[Tuple[int, int]] = []
+        for (u, v), mult in edge_multiplicity.items():
+            for _ in range(mult):
+                edges.append((u, v))
+
+        # Get faces - either from stored data or compute
+        if has_faces:
+            # Type narrowing for linter
+            assert faces_array is not None and face_lengths_array is not None
+            # Reconstruct faces from stored arrays (fast path)
+            num_faces = face_lengths_array.shape[1]
+            faces_list: List[Tuple[int, ...]] = []
+            for j in range(num_faces):
+                face_len = int(face_lengths_array[i, j])
+                face = tuple(int(x) for x in faces_array[i, j, :face_len])
+                faces_list.append(face)
+            faces = tuple(faces_list)
+        else:
+            # Compute faces from embedding (slow path for v1 format)
+            faces = GraphConverter.extract_faces(embedding, edge_multiplicity)
+
+        # Create PlaneGraph with dummy primal data (not stored in numpy format)
+        graph = PlaneGraph(
+            num_vertices=num_vertices,
+            edges=tuple(edges),
+            edge_multiplicity=edge_multiplicity,
+            embedding=embedding,
+            faces=faces,
+            primal_num_vertices=num_vertices + 2,
+            primal_embedding={},
+            primal_faces=(),
+            graph_id=int(graph_ids[i]),
+        )
+        graphs.append(graph)
+
+    return graphs
 
 
 def save_graphs_to_cache(

@@ -10,6 +10,7 @@ from .plane_graph import (
     enumerate_plane_graphs,
     iter_plane_graphs,
     load_graphs_from_cache,
+    numpy_to_plane_graphs,
     save_graphs_to_cache,
 )
 
@@ -26,4 +27,5 @@ __all__ = [
     "iter_plane_graphs",
     "save_graphs_to_cache",
     "load_graphs_from_cache",
+    "numpy_to_plane_graphs",
 ]
