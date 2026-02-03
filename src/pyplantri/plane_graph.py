@@ -22,7 +22,7 @@ class SecurityWarning(UserWarning):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PlaneGraph:
     """Plane graph (embedded planar graph) with fixed combinatorial embedding.
 
