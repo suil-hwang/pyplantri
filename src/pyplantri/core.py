@@ -407,50 +407,98 @@ class GraphConverter:
         embedding: Dict[int, Tuple[int, ...]],
         edge_multiplicity: Optional[Dict[Tuple[int, int], int]] = None,
     ) -> Tuple[Tuple[int, ...], ...]:
-        """Extracts faces from plane graph embedding using half-edge traversal."""
-        visited_half_edges: set = set()
-        faces = []
+        """Extracts faces from a 0-based embedding.
+
+        Notes:
+        - Without explicit edge labels/twin_map, parallel half-edges are ambiguous.
+          This implementation tracks half-edges by position and applies safeguards
+          to avoid pathological loops.
+        - If `edge_multiplicity` is omitted, it is inferred from the embedding so
+          digons from parallel edges are still included.
+        """
+        if not embedding:
+            return tuple()
+
+        # Infer multiplicities when not provided so digons are still recovered.
+        effective_multiplicity: Dict[Tuple[int, int], int]
+        if edge_multiplicity is None:
+            raw_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+            for v, neighbors in embedding.items():
+                for u in neighbors:
+                    edge = (min(v, u), max(v, u))
+                    raw_counts[edge] += 1
+            effective_multiplicity = {
+                edge: count // 2 for edge, count in raw_counts.items()
+            }
+        else:
+            effective_multiplicity = edge_multiplicity
+
+        visited_half_edges: Set[Tuple[int, int]] = set()  # (vertex, local slot index)
+        faces: List[Tuple[int, ...]] = []
+
+        total_half_edges = sum(len(neighbors) for neighbors in embedding.values())
+        max_face_steps = max(4, total_half_edges)
 
         for start_v in embedding:
-            for start_u in embedding[start_v]:
-                half_edge = (start_v, start_u)
-
-                if half_edge in visited_half_edges:
+            for start_i in range(len(embedding[start_v])):
+                if (start_v, start_i) in visited_half_edges:
                     continue
 
-                face = []
-                current, next_v = start_v, start_u
+                face: List[int] = []
+                current_v = start_v
+                current_i = start_i
+                steps = 0
 
                 while True:
-                    visited_half_edges.add((current, next_v))
-                    face.append(current)
+                    half_edge = (current_v, current_i)
+                    if half_edge in visited_half_edges:
+                        break
 
-                    neighbors = embedding[next_v]
+                    visited_half_edges.add(half_edge)
+                    face.append(current_v)
+
+                    next_v = embedding[current_v][current_i]
+                    next_neighbors = embedding.get(next_v)
+                    if not next_neighbors:
+                        break
+
+                    # Ambiguous for parallel edges, but deterministic.
                     try:
-                        idx = neighbors.index(current)
+                        incoming_idx = next_neighbors.index(current_v)
                     except ValueError:
                         break
 
-                    next_next = neighbors[(idx - 1) % len(neighbors)]
-                    current, next_v = next_v, next_next
-
-                    if current == start_v and next_v == start_u:
+                    next_next_v = next_neighbors[(incoming_idx - 1) % len(next_neighbors)]
+                    try:
+                        next_i = embedding[next_v].index(next_next_v)
+                    except ValueError:
                         break
 
-                    # Guard against infinite loops.
-                    if len(face) > len(embedding) * 4:
+                    current_v, current_i = next_v, next_i
+
+                    if current_v == start_v and current_i == start_i:
+                        break
+
+                    steps += 1
+                    if steps > max_face_steps:
                         break
 
                 if len(face) >= 2:
                     faces.append(tuple(face))
 
-        # Add digon faces for double edges.
-        if edge_multiplicity:
-            for (u, v), multiplicity in edge_multiplicity.items():
-                if multiplicity == 2:
-                    digon = (u, v)
-                    if digon not in faces and (v, u) not in faces:
-                        faces.append(digon)
+        # Drop malformed non-digon loops (repeated vertices) from ambiguous fallback.
+        cleaned_faces: List[Tuple[int, ...]] = []
+        for face in faces:
+            if len(face) == 2 or len(set(face)) == len(face):
+                cleaned_faces.append(face)
+        faces = cleaned_faces
+
+        # Add digon faces for parallel edges.
+        for (u, v), multiplicity in effective_multiplicity.items():
+            if multiplicity >= 2:
+                digon = (u, v)
+                if digon not in faces and (v, u) not in faces:
+                    faces.append(digon)
 
         return tuple(faces)
 
