@@ -407,15 +407,7 @@ class GraphConverter:
         embedding: Dict[int, Tuple[int, ...]],
         edge_multiplicity: Optional[Dict[Tuple[int, int], int]] = None,
     ) -> Tuple[Tuple[int, ...], ...]:
-        """Extracts faces from a 0-based embedding.
-
-        Notes:
-        - Without explicit edge labels/twin_map, parallel half-edges are ambiguous.
-          This implementation tracks half-edges by position and applies safeguards
-          to avoid pathological loops.
-        - If `edge_multiplicity` is omitted, it is inferred from the embedding so
-          digons from parallel edges are still included.
-        """
+        """Extracts faces from a 0-based embedding."""
         if not embedding:
             return tuple()
 
