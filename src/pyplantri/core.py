@@ -611,7 +611,7 @@ class QuadrangulationEnumerator:
     @staticmethod
     def parse_double_code(double_code_line: str) -> Tuple[Dict, Dict]:
         """Parses plantri double_code output to adjacency lists with twin maps."""
-        parts = double_code_line.strip().split()
+        parts = double_code_line.split()
         if len(parts) < 2:
             empty: Dict = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
             return empty, empty
@@ -622,7 +622,7 @@ class QuadrangulationEnumerator:
         # Collect primal vertex edge lists.
         idx = 1
         primal_edge_lists = []
-        while idx < len(parts) and not parts[idx].isdigit():
+        while idx < len(parts) and not parts[idx][0].isdigit():
             primal_edge_lists.append(parts[idx])
             idx += 1
 
@@ -634,10 +634,7 @@ class QuadrangulationEnumerator:
         dual_vertex_count = int(parts[idx])
         idx += 1
 
-        dual_edge_lists = []
-        while idx < len(parts):
-            dual_edge_lists.append(parts[idx])
-            idx += 1
+        dual_edge_lists = parts[idx:]
 
         # Build adjacency lists AND twin maps from edge name mappings.
         primal_adj, primal_twins = (
@@ -661,78 +658,44 @@ class QuadrangulationEnumerator:
         return primal_data, dual_data
 
     @staticmethod
-    def _build_adjacency_from_edge_lists(
-        edge_lists: List[str]
-    ) -> Dict[int, List[int]]:
-        """Builds adjacency list from edge lists (preserving CW order)."""
-        # Track which vertices each edge appears at.
-        edge_to_vertices: Dict[str, List[int]] = defaultdict(list)
-
-        for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            for edge_name in edges_str:
-                edge_to_vertices[edge_name].append(vertex_idx)
-
-        # Precompute loop edges for O(n) complexity.
-        loop_edges: Set[str] = {
-            edge_name
-            for edge_name, vertices in edge_to_vertices.items()
-            if len(vertices) == 2 and vertices[0] == vertices[1]
-        }
-
-        # Build adjacency list.
-        adjacency_list: Dict[int, List[int]] = defaultdict(list)
-
-        for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            for edge_name in edges_str:
-                vertices = edge_to_vertices[edge_name]
-                if edge_name in loop_edges:
-                    # Loop edge: add self.
-                    adjacency_list[vertex_idx].append(vertex_idx)
-                else:
-                    # Regular edge: add the other endpoint.
-                    for other_vertex in vertices:
-                        if other_vertex != vertex_idx:
-                            adjacency_list[vertex_idx].append(other_vertex)
-
-        return dict(adjacency_list)
-
-    @staticmethod
     def _build_adjacency_and_twins(
         edge_lists: List[str],
     ) -> Tuple[Dict[int, List[int]], Dict[Tuple[int, int], Tuple[int, int]]]:
         """Builds adjacency list AND half-edge twin mapping from edge lists."""
         # Collect (vertex, position) pairs where each edge name appears.
-        edge_name_to_half_edges: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
-        adjacency: Dict[int, List[int]] = defaultdict(list)
-
+        edge_name_to_half_edges: Dict[str, List[Tuple[int, int]]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             for pos, edge_name in enumerate(edges_str):
-                edge_name_to_half_edges[edge_name].append((vertex_idx, pos))
+                slots = edge_name_to_half_edges.get(edge_name)
+                if slots is None:
+                    edge_name_to_half_edges[edge_name] = [(vertex_idx, pos)]
+                else:
+                    slots.append((vertex_idx, pos))
 
-        # Build adjacency list (same logic as before).
+        # Build adjacency list.
+        adjacency: Dict[int, List[int]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
+            neighbors: List[int] = []
             for edge_name in edges_str:
-                half_edges = edge_name_to_half_edges[edge_name]
-                if len(half_edges) != 2:
-                    # Abnormal edge - plantri output corrupted or invalid
+                half_edges = edge_name_to_half_edges.get(edge_name)
+                if half_edges is None or len(half_edges) != 2:
                     raise ValueError(
-                        f"Edge '{edge_name}' appears {len(half_edges)} times "
+                        f"Edge '{edge_name}' appears "
+                        f"{0 if half_edges is None else len(half_edges)} times "
                         f"(expected 2). Invalid plantri output or corrupted data."
                     )
                 (v1, _), (v2, _) = half_edges
                 if v1 == v2 == vertex_idx:
-                    # Loop edge
-                    adjacency[vertex_idx].append(vertex_idx)
+                    neighbors.append(vertex_idx)  # Loop edge
                 else:
-                    # Regular edge
-                    other_v = v2 if v1 == vertex_idx else v1
-                    adjacency[vertex_idx].append(other_v)
+                    neighbors.append(v2 if v1 == vertex_idx else v1)
+            adjacency[vertex_idx] = neighbors
 
         # Twin mapping: match two half-edges sharing the same edge name.
         twin_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
-        for edge_name, half_edges in edge_name_to_half_edges.items():
+        for half_edges in edge_name_to_half_edges.values():
             if len(half_edges) == 2:
                 twin_map[half_edges[0]] = half_edges[1]
                 twin_map[half_edges[1]] = half_edges[0]
 
-        return dict(adjacency), twin_map
+        return adjacency, twin_map

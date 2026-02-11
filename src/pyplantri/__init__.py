@@ -6,8 +6,10 @@ from .core import (
     QuadrangulationEnumerator,
 )
 from .plane_graph import (
+    FilteredEnumerationResult,
     PlaneGraph,
     enumerate_plane_graphs,
+    enumerate_plane_graphs_filtered,
     iter_plane_graphs,
     load_graphs_from_cache,
     save_graphs_to_cache,
@@ -23,6 +25,8 @@ __all__ = [
     # Plane Graph
     "PlaneGraph",
     "enumerate_plane_graphs",
+    "enumerate_plane_graphs_filtered",
+    "FilteredEnumerationResult",
     "iter_plane_graphs",
     "save_graphs_to_cache",
     "load_graphs_from_cache",
