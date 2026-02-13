@@ -48,6 +48,8 @@ For plane graphs: `V - E + F = 2`
 
 **Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
 
+**Input Constraint:** `n >= 3`. Values below 3 are invalid for the quadrangulation enumeration API.
+
 ### Adjacency List Order (Combinatorial Embedding)
 
 The neighbor order in the output `adjacency_list` represents the **cyclic order** of edges at each vertex, given in **clockwise (CW)** direction. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
