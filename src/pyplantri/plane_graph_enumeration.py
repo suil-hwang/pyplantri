@@ -170,11 +170,11 @@ def iter_plane_graphs(
         yield graph
 
 
-def _iter_raw_double_code_lines(output: bytes) -> Iterator[str]:
+def _iter_raw_double_code_lines(output: bytes) -> Iterator[bytes]:
     """Yield valid double_code lines from plantri raw output."""
-    for line in output.decode(errors="replace").splitlines():
+    for line in output.splitlines():
         stripped = line.strip()
-        if stripped and stripped[0].isdigit():
+        if stripped and 48 <= stripped[0] <= 57:
             yield stripped
 
 
@@ -213,7 +213,7 @@ def _default_chunk_size(raw_line_count: int) -> int:
 
 
 def _build_graphs_from_raw_lines(
-    raw_lines: Iterable[str],
+    raw_lines: Iterable[Union[str, bytes]],
     *,
     max_count: Optional[int],
     validate: bool,
@@ -253,7 +253,9 @@ def _build_graphs_from_raw_lines(
     return graphs, generated_count
 
 
-def _process_graph_chunk(args: Tuple[List[str], int, bool, bool]) -> List[PlaneGraph]:
+def _process_graph_chunk(
+    args: Tuple[List[Union[str, bytes]], int, bool, bool]
+) -> List[PlaneGraph]:
     """Process a chunk of raw lines into PlaneGraph objects."""
     lines, start_id, validate, include_primal = args
     graphs: List[PlaneGraph] = []

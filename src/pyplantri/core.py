@@ -4,7 +4,7 @@ import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -12,6 +12,11 @@ from scipy.sparse import csr_matrix
 
 # Constant for ASCII character parsing optimization.
 _ORD_A = ord('a')
+
+
+def _is_ascii_digit_byte(value: int) -> bool:
+    """Returns True if value is an ASCII digit byte ('0'..'9')."""
+    return 48 <= value <= 57
 
 
 def _find_plantri_exe() -> Path:
@@ -70,9 +75,22 @@ class Plantri:
         self,
         n_vertices: int,
         options: Optional[List[str]] = None,
-        output_format: Literal["planar_code", "ascii", "adjacency"] = "planar_code",
+        output_format: Literal["planar_code", "ascii"] = "planar_code",
     ) -> bytes:
-        """Runs plantri with the given parameters."""
+        """Runs plantri with the given parameters.
+
+        Supported output formats:
+            - "planar_code" (default binary format)
+            - "ascii" (textual adjacency lists via -a)
+        """
+        if output_format not in ("planar_code", "ascii"):
+            raise ValueError(
+                f"Unsupported output_format={output_format!r}. "
+                "Use 'planar_code' or 'ascii'. "
+                "Note: plantri '-A' is an Apollonian-generation option, "
+                "not an adjacency output format."
+            )
+
         cmd = [str(self.executable)]
 
         if options:
@@ -82,9 +100,6 @@ class Plantri:
         if output_format == "ascii":
             if "-a" not in (options or []):
                 cmd.append("-a")
-        elif output_format == "adjacency":
-            if "-A" not in (options or []):
-                cmd.append("-A")
 
         cmd.append(str(n_vertices))
 
@@ -190,19 +205,34 @@ class Plantri:
 
         output = self.run(n_vertices, options, output_format="ascii")
 
-        # Parse ASCII output.
-        current_graph_lines: List[str] = []
-        for line in output.decode(errors="replace").split("\n"):
-            line = line.rstrip()
-            if line.startswith("Graph"):
+        # Parse text output without UTF-8 assumptions. plantri emits byte labels.
+        # Decode per line with latin-1 only when yielding strings.
+        current_graph_lines: List[bytes] = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            # Legacy format with "Graph ..." headers.
+            if line.startswith(b"Graph"):
                 if current_graph_lines:
-                    yield "\n".join(current_graph_lines)
+                    yield "\n".join(
+                        chunk.decode("latin-1") for chunk in current_graph_lines
+                    )
                 current_graph_lines = [line]
-            elif line:
+                continue
+
+            # Standard plantri -a line: one graph per line, starts with vertex count.
+            if _is_ascii_digit_byte(line[0]) and not current_graph_lines:
+                yield line.decode("latin-1")
+                continue
+
+            # Continuation lines for legacy block formats.
+            if current_graph_lines:
                 current_graph_lines.append(line)
 
         if current_graph_lines:
-            yield "\n".join(current_graph_lines)
+            yield "\n".join(chunk.decode("latin-1") for chunk in current_graph_lines)
 
     def generate_planar_code(
         self,
@@ -588,20 +618,20 @@ class QuadrangulationEnumerator:
         """Counts the number of non-isomorphic SQS structures."""
         return sum(1 for _ in self.iter_raw(dual_vertex_count))
 
-    def iter_raw(self, dual_vertex_count: int) -> Iterator[str]:
-        """Generates raw double_code output lines."""
+    def iter_raw(self, dual_vertex_count: int) -> Iterator[bytes]:
+        """Generates raw double_code output lines as bytes."""
         # Euler's formula for plane graphs: V - E + F = 2
         # For quadrangulations: primal_vertices = dual_vertices + 2
         primal_vertex_count = dual_vertex_count + 2
         output = self._plantri.run(primal_vertex_count, self.OPTIONS)
 
-        for line in output.decode(errors="replace").split("\n"):
+        for line in output.splitlines():
             stripped = line.strip()
-            if stripped and stripped[0].isdigit():
+            if stripped and _is_ascii_digit_byte(stripped[0]):
                 yield stripped
 
     @staticmethod
-    def parse_double_code(double_code_line: str) -> Tuple[Dict, Dict]:
+    def parse_double_code(double_code_line: Union[str, bytes]) -> Tuple[Dict, Dict]:
         """Parses plantri double_code output to adjacency lists with twin maps."""
         parts = double_code_line.split()
         if len(parts) < 2:
@@ -613,8 +643,15 @@ class QuadrangulationEnumerator:
 
         # Collect primal vertex edge lists.
         idx = 1
-        primal_edge_lists = []
-        while idx < len(parts) and not parts[idx][0].isdigit():
+        primal_edge_lists: List[Union[str, bytes]] = []
+        while idx < len(parts):
+            head = parts[idx][0]
+            if isinstance(head, str):
+                is_vertex_count = head.isdigit()
+            else:
+                is_vertex_count = _is_ascii_digit_byte(head)
+            if is_vertex_count:
+                break
             primal_edge_lists.append(parts[idx])
             idx += 1
 
@@ -650,12 +687,21 @@ class QuadrangulationEnumerator:
         return primal_data, dual_data
 
     @staticmethod
+    def _format_edge_name_for_error(edge_name: Union[str, int]) -> str:
+        """Formats an edge label for stable, readable error messages."""
+        if isinstance(edge_name, str):
+            return edge_name
+        if 32 <= edge_name <= 126:
+            return chr(edge_name)
+        return f"0x{edge_name:02x}"
+
+    @staticmethod
     def _build_adjacency_and_twins(
-        edge_lists: List[str],
+        edge_lists: List[Union[str, bytes]],
     ) -> Tuple[Dict[int, List[int]], Dict[Tuple[int, int], Tuple[int, int]]]:
         """Builds adjacency list AND half-edge twin mapping from edge lists."""
         # Collect (vertex, position) pairs where each edge name appears.
-        edge_name_to_half_edges: Dict[str, List[Tuple[int, int]]] = {}
+        edge_name_to_half_edges: Dict[Union[str, int], List[Tuple[int, int]]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             for pos, edge_name in enumerate(edges_str):
                 slots = edge_name_to_half_edges.get(edge_name)
@@ -671,8 +717,11 @@ class QuadrangulationEnumerator:
             for edge_name in edges_str:
                 half_edges = edge_name_to_half_edges.get(edge_name)
                 if half_edges is None or len(half_edges) != 2:
+                    edge_name_str = QuadrangulationEnumerator._format_edge_name_for_error(
+                        edge_name
+                    )
                     raise ValueError(
-                        f"Edge '{edge_name}' appears "
+                        f"Edge '{edge_name_str}' appears "
                         f"{0 if half_edges is None else len(half_edges)} times "
                         f"(expected 2). Invalid plantri output or corrupted data."
                     )
