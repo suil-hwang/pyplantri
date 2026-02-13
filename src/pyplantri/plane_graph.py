@@ -22,6 +22,8 @@ from .plane_graph_enumeration import (
 logger = logging.getLogger(__name__)
 
 Embedding = Tuple[Tuple[int, ...], ...]
+# Accept dict or list at construction time; __post_init__ normalizes to Embedding.
+EmbeddingInput = Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ...]]]
 
 
 class SecurityWarning(UserWarning):
@@ -57,11 +59,11 @@ class PlaneGraph:
     num_vertices: int
     edges: Tuple[Tuple[int, int], ...]
     edge_multiplicity: Dict[Tuple[int, int], int]
-    embedding: Embedding  # CW cyclic order at each vertex
+    embedding: EmbeddingInput  # CW cyclic order at each vertex; normalized in __post_init__
     faces: Tuple[Tuple[int, ...], ...]
 
     primal_num_vertices: int
-    primal_embedding: Embedding
+    primal_embedding: EmbeddingInput  # normalized in __post_init__
     primal_faces: Tuple[Tuple[int, ...], ...]
 
     graph_id: int = 0
