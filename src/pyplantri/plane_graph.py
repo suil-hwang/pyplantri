@@ -7,7 +7,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, Iterator, List, Mapping, Optional, Set, Tuple, Union
 
 from .plane_graph_enumeration import (
     EnumerationTiming,
@@ -28,6 +28,87 @@ EmbeddingInput = Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ..
 
 class SecurityWarning(UserWarning):
     """Warning for security-related issues in pickle deserialization."""
+
+
+class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
+    """Immutable mapping wrapper for edge multiplicities."""
+
+    __slots__ = ("_data", "_items")
+
+    def __init__(
+        self,
+        edge_multiplicity: Union[
+            Mapping[Tuple[int, int], int],
+            List[Tuple[Tuple[int, int], int]],
+            Tuple[Tuple[Tuple[int, int], int], ...],
+        ],
+    ) -> None:
+        if isinstance(edge_multiplicity, FrozenEdgeMultiplicity):
+            self._data = edge_multiplicity._data
+            self._items = edge_multiplicity._items
+            return
+
+        items_iter: Iterator[Tuple[Tuple[int, int], int]]
+        if isinstance(edge_multiplicity, Mapping):
+            items_iter = iter(edge_multiplicity.items())
+        else:
+            items_iter = iter(edge_multiplicity)
+
+        normalized: Dict[Tuple[int, int], int] = {}
+        for raw_edge, raw_multiplicity in items_iter:
+            if not isinstance(raw_edge, tuple) or len(raw_edge) != 2:
+                raise TypeError(
+                    "edge_multiplicity keys must be 2-tuples; "
+                    f"got {raw_edge!r}."
+                )
+            raw_u, raw_v = raw_edge
+            if isinstance(raw_u, bool) or isinstance(raw_v, bool):
+                raise TypeError(
+                    "edge_multiplicity keys must be integer vertex indices; "
+                    f"got {raw_edge!r}."
+                )
+            if isinstance(raw_multiplicity, bool):
+                raise TypeError(
+                    "edge_multiplicity values must be integers; "
+                    f"got {raw_multiplicity!r} on edge {raw_edge!r}."
+                )
+            u = int(raw_u)
+            v = int(raw_v)
+            multiplicity = int(raw_multiplicity)
+            normalized[(u, v)] = multiplicity
+
+        ordered_items = tuple(sorted(normalized.items()))
+        self._items = ordered_items
+        self._data = dict(ordered_items)
+
+    def __getitem__(self, edge: Tuple[int, int]) -> int:
+        return self._data[edge]
+
+    def __iter__(self) -> Iterator[Tuple[int, int]]:
+        for edge, _ in self._items:
+            yield edge
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, FrozenEdgeMultiplicity):
+            return self._items == other._items
+        if isinstance(other, Mapping):
+            return self._data == dict(other.items())
+        return False
+
+    def __hash__(self) -> int:
+        return hash(self._items)
+
+    def __reduce__(self) -> Tuple[Any, Tuple[Tuple[Tuple[int, int], int], ...]]:
+        return (self.__class__, (self._items,))
+
+    def __repr__(self) -> str:
+        return f"FrozenEdgeMultiplicity({dict(self._items)!r})"
+
+    def to_dict(self) -> Dict[Tuple[int, int], int]:
+        return dict(self._items)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,17 +135,21 @@ class PlaneGraph:
         - Simple quadrangulation (no loops/multi-edges, all faces are 4-gons).
         - primal_num_vertices = n + 2 (primal vertices = dual faces).
         - primal_faces = n (primal faces = dual vertices).
+        - dual_vertex_to_primal_face[i] gives primal face index for dual vertex i.
+        - primal_vertex_to_dual_face[j] gives dual face index for primal vertex j.
     """
 
     num_vertices: int
     edges: Tuple[Tuple[int, int], ...]
-    edge_multiplicity: Dict[Tuple[int, int], int]
+    edge_multiplicity: Mapping[Tuple[int, int], int]
     embedding: Embedding  # CW cyclic order at each vertex.
     faces: Tuple[Tuple[int, ...], ...]
 
     primal_num_vertices: int
     primal_embedding: Embedding
     primal_faces: Tuple[Tuple[int, ...], ...]
+    dual_vertex_to_primal_face: Tuple[int, ...] = tuple()
+    primal_vertex_to_dual_face: Tuple[int, ...] = tuple()
 
     graph_id: int = 0
     _double_edges_cache: Optional[FrozenSet[Tuple[int, int]]] = field(
@@ -73,6 +158,57 @@ class PlaneGraph:
     _single_edges_cache: Optional[FrozenSet[Tuple[int, int]]] = field(
         default=None, init=False, repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        """Normalize mutable inputs to immutable internal representations."""
+        object.__setattr__(self, "num_vertices", int(self.num_vertices))
+        object.__setattr__(self, "primal_num_vertices", int(self.primal_num_vertices))
+        object.__setattr__(self, "graph_id", int(self.graph_id))
+
+        normalized_edges = tuple((int(u), int(v)) for u, v in self.edges)
+        object.__setattr__(self, "edges", normalized_edges)
+
+        frozen_edge_multiplicity = (
+            self.edge_multiplicity
+            if isinstance(self.edge_multiplicity, FrozenEdgeMultiplicity)
+            else FrozenEdgeMultiplicity(self.edge_multiplicity)
+        )
+        object.__setattr__(self, "edge_multiplicity", frozen_edge_multiplicity)
+
+        normalized_embedding = self._normalize_embedding(
+            self.embedding,
+            expected_size=self.num_vertices,
+        )
+        object.__setattr__(self, "embedding", normalized_embedding)
+
+        normalized_faces = tuple(
+            tuple(int(v) for v in face)
+            for face in self.faces
+        )
+        object.__setattr__(self, "faces", normalized_faces)
+
+        normalized_primal_embedding = self._normalize_embedding(
+            self.primal_embedding,
+            expected_size=self.primal_num_vertices,
+        )
+        object.__setattr__(self, "primal_embedding", normalized_primal_embedding)
+
+        normalized_primal_faces = tuple(
+            tuple(int(v) for v in face)
+            for face in self.primal_faces
+        )
+        object.__setattr__(self, "primal_faces", normalized_primal_faces)
+
+        object.__setattr__(
+            self,
+            "dual_vertex_to_primal_face",
+            tuple(int(idx) for idx in self.dual_vertex_to_primal_face),
+        )
+        object.__setattr__(
+            self,
+            "primal_vertex_to_dual_face",
+            tuple(int(idx) for idx in self.primal_vertex_to_dual_face),
+        )
 
     @staticmethod
     def _normalize_embedding(
@@ -235,6 +371,11 @@ class PlaneGraph:
                 )
 
         for (u, v), multiplicity in self.edge_multiplicity.items():
+            if u < 0 or v < 0 or u >= self.num_vertices or v >= self.num_vertices:
+                errors.append(
+                    "edge_multiplicity contains out-of-range vertex index: "
+                    f"({u}, {v}) for n={self.num_vertices}"
+                )
             if u > v:
                 errors.append(f"Edge key ({u}, {v}) is not canonical (u <= v expected)")
             if multiplicity not in (1, 2):
@@ -295,6 +436,161 @@ class PlaneGraph:
                 f"(V={self.num_vertices}, E={edge_count}, F={self.num_faces})"
             )
 
+        has_primal_data = (
+            self.primal_num_vertices > 0
+            or bool(self.primal_embedding)
+            or bool(self.primal_faces)
+            or bool(self.dual_vertex_to_primal_face)
+            or bool(self.primal_vertex_to_dual_face)
+        )
+        if has_primal_data:
+            expected_primal_vertices = self.num_vertices + 2
+            if self.primal_num_vertices != expected_primal_vertices:
+                errors.append(
+                    "Primal vertex count mismatch: "
+                    f"{self.primal_num_vertices}, expected {expected_primal_vertices}"
+                )
+
+            if len(self.primal_embedding) != self.primal_num_vertices:
+                errors.append(
+                    "Primal embedding size "
+                    f"{len(self.primal_embedding)} does not match "
+                    f"primal_num_vertices={self.primal_num_vertices}"
+                )
+
+            expected_primal_faces = self.num_vertices
+            if len(self.primal_faces) != expected_primal_faces:
+                errors.append(
+                    "Primal face count mismatch: "
+                    f"{len(self.primal_faces)}, expected {expected_primal_faces}"
+                )
+
+            for face_idx, face in enumerate(self.primal_faces):
+                if len(face) != 4:
+                    errors.append(
+                        f"Primal face {face_idx} has size {len(face)}, expected 4"
+                    )
+                if len(set(face)) != len(face):
+                    errors.append(
+                        f"Primal face {face_idx} repeats vertices: {face}"
+                    )
+                for vertex in face:
+                    if vertex < 0 or vertex >= self.primal_num_vertices:
+                        errors.append(
+                            f"Primal face {face_idx} contains out-of-range vertex {vertex}"
+                        )
+
+            primal_directed_counts: Dict[Tuple[int, int], int] = {}
+            primal_undirected_half_edge_counts: Dict[Tuple[int, int], int] = {}
+
+            for v in range(self.primal_num_vertices):
+                if not self._has_vertex(self.primal_embedding, v):
+                    errors.append(f"Primal vertex {v} missing from embedding")
+                    continue
+                neighbors_v = self._neighbors_of(self.primal_embedding, v)
+                for u in neighbors_v:
+                    if u < 0 or u >= self.primal_num_vertices:
+                        errors.append(
+                            "Primal embedding contains out-of-range neighbor "
+                            f"{u} at vertex {v}"
+                        )
+                        continue
+                    if u == v:
+                        errors.append(f"Primal self-loop at vertex {v}")
+                    directed = (v, u)
+                    primal_directed_counts[directed] = (
+                        primal_directed_counts.get(directed, 0) + 1
+                    )
+                    edge = (v, u) if v <= u else (u, v)
+                    primal_undirected_half_edge_counts[edge] = (
+                        primal_undirected_half_edge_counts.get(edge, 0) + 1
+                    )
+
+            primal_edge_count = 0
+            for edge, half_edge_count in primal_undirected_half_edge_counts.items():
+                u, v = edge
+                if u == v:
+                    continue
+                count_uv = primal_directed_counts.get((u, v), 0)
+                count_vu = primal_directed_counts.get((v, u), 0)
+                if count_uv != 1 or count_vu != 1:
+                    errors.append(
+                        "Primal graph is not simple on edge "
+                        f"{edge}: u->v={count_uv}, v->u={count_vu}"
+                    )
+                if half_edge_count != 2:
+                    errors.append(
+                        "Primal edge multiplicity mismatch on edge "
+                        f"{edge}: half-edge count {half_edge_count}, expected 2"
+                    )
+                primal_edge_count += half_edge_count // 2
+
+            primal_euler_lhs = (
+                self.primal_num_vertices - primal_edge_count + len(self.primal_faces)
+            )
+            if primal_euler_lhs != 2:
+                errors.append(
+                    f"Primal Euler formula violation: V - E + F = {primal_euler_lhs}, "
+                    "expected 2 "
+                    f"(V={self.primal_num_vertices}, E={primal_edge_count}, "
+                    f"F={len(self.primal_faces)})"
+                )
+
+            if len(self.dual_vertex_to_primal_face) != self.num_vertices:
+                errors.append(
+                    "dual_vertex_to_primal_face length mismatch: "
+                    f"{len(self.dual_vertex_to_primal_face)}, expected {self.num_vertices}"
+                )
+            else:
+                mapped_primal_faces = set()
+                for dual_vertex, primal_face_idx in enumerate(
+                    self.dual_vertex_to_primal_face
+                ):
+                    if primal_face_idx < 0 or primal_face_idx >= len(self.primal_faces):
+                        errors.append(
+                            "dual_vertex_to_primal_face contains out-of-range face index "
+                            f"{primal_face_idx} for dual vertex {dual_vertex}"
+                        )
+                    mapped_primal_faces.add(primal_face_idx)
+                if len(mapped_primal_faces) != len(self.dual_vertex_to_primal_face):
+                    errors.append(
+                        "dual_vertex_to_primal_face maps multiple vertices to the same "
+                        "primal face"
+                    )
+                expected_primal_face_indices = set(range(len(self.primal_faces)))
+                if mapped_primal_faces != expected_primal_face_indices:
+                    errors.append(
+                        "dual_vertex_to_primal_face is not a bijection onto primal_faces"
+                    )
+
+            if len(self.primal_vertex_to_dual_face) != self.primal_num_vertices:
+                errors.append(
+                    "primal_vertex_to_dual_face length mismatch: "
+                    f"{len(self.primal_vertex_to_dual_face)}, "
+                    f"expected {self.primal_num_vertices}"
+                )
+            else:
+                mapped_dual_faces = set()
+                for primal_vertex, dual_face_idx in enumerate(
+                    self.primal_vertex_to_dual_face
+                ):
+                    if dual_face_idx < 0 or dual_face_idx >= len(self.faces):
+                        errors.append(
+                            "primal_vertex_to_dual_face contains out-of-range face index "
+                            f"{dual_face_idx} for primal vertex {primal_vertex}"
+                        )
+                    mapped_dual_faces.add(dual_face_idx)
+                if len(mapped_dual_faces) != len(self.primal_vertex_to_dual_face):
+                    errors.append(
+                        "primal_vertex_to_dual_face maps multiple vertices to the same "
+                        "dual face"
+                    )
+                expected_dual_face_indices = set(range(len(self.faces)))
+                if mapped_dual_faces != expected_dual_face_indices:
+                    errors.append(
+                        "primal_vertex_to_dual_face is not a bijection onto dual faces"
+                    )
+
         return len(errors) == 0, errors
 
     def to_dict(self) -> Dict:
@@ -316,6 +612,8 @@ class PlaneGraph:
                 for v, neighbors in self._iter_embedding_items(self.primal_embedding)
             },
             "primal_faces": [list(f) for f in self.primal_faces],
+            "dual_vertex_to_primal_face": list(self.dual_vertex_to_primal_face),
+            "primal_vertex_to_dual_face": list(self.primal_vertex_to_dual_face),
             "graph_id": self.graph_id,
         }
 
@@ -328,7 +626,7 @@ class PlaneGraph:
         ]
         # Parse edge_multiplicity keys as explicit 2-tuples.
         parsed_edge_multiplicity: Dict[Tuple[int, int], int] = {
-            (int(parts[0]), int(parts[1])): v
+            (int(parts[0]), int(parts[1])): int(v)
             for k, v in data["edge_multiplicity"].items()
             for parts in [k.split(",")]
         }
@@ -351,12 +649,18 @@ class PlaneGraph:
             primal_faces=tuple(
                 tuple(f) for f in data.get("primal_faces", [])
             ),
+            dual_vertex_to_primal_face=tuple(
+                int(idx) for idx in data.get("dual_vertex_to_primal_face", [])
+            ),
+            primal_vertex_to_dual_face=tuple(
+                int(idx) for idx in data.get("primal_vertex_to_dual_face", [])
+            ),
             graph_id=data.get("graph_id", 0),
         )
 
 
 # Cache format version. Increment when PlaneGraph fields change.
-_CACHE_FORMAT_VERSION = 1
+_CACHE_FORMAT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -375,7 +679,11 @@ class SafeUnpickler(pickle.Unpickler):
 
     # Whitelist of allowed modules and classes
     SAFE_MODULES: Dict[str, Set[str]] = {
-        "pyplantri.plane_graph": {"PlaneGraph", "CacheMetadata"},
+        "pyplantri.plane_graph": {
+            "PlaneGraph",
+            "CacheMetadata",
+            "FrozenEdgeMultiplicity",
+        },
         "builtins": {"tuple", "dict", "list", "int", "str", "frozenset"},
         "collections": {"defaultdict"},
     }
@@ -553,7 +861,22 @@ def _load_pickle(
     if max_count is not None:
         graphs = graphs[:max_count]
 
-    return graphs, metadata
+    normalized_graphs: List[PlaneGraph] = []
+    for graph in graphs:
+        if isinstance(graph, PlaneGraph):
+            if isinstance(graph.edge_multiplicity, FrozenEdgeMultiplicity):
+                normalized_graphs.append(graph)
+            else:
+                normalized_graphs.append(PlaneGraph.from_dict(graph.to_dict()))
+        elif isinstance(graph, dict):
+            normalized_graphs.append(PlaneGraph.from_dict(graph))
+        else:
+            raise ValueError(
+                "Cache contains unsupported graph payload type: "
+                f"{type(graph).__name__}"
+            )
+
+    return normalized_graphs, metadata
 
 
 def _load_json(
@@ -633,4 +956,3 @@ def load_graphs_from_cache(
                 "Safer alternative: use_json=True"
             )
         return _load_pickle(filepath, max_count, safe_mode)
-

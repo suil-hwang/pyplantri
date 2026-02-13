@@ -13,6 +13,7 @@ from scipy.sparse import csr_matrix
 
 # Constant for ASCII character parsing optimization.
 _ORD_A = ord('a')
+EdgeLabel = Union[str, int]
 
 
 def _is_ascii_digit_byte(value: int) -> bool:
@@ -420,16 +421,30 @@ class GraphConverter:
     @staticmethod
     def adjacency_to_edge_multiplicity(
         adjacency_list: Dict[int, List[int]],
-        is_one_based: bool = True
+        is_one_based: bool = True,
+        *,
+        output_one_based: bool = False,
     ) -> Dict[Tuple[int, int], int]:
-        """Converts adjacency list to edge multiplicity map."""
+        """Convert adjacency list to edge multiplicity map.
+
+        Args:
+            adjacency_list: Vertex -> neighbor list adjacency map.
+            is_one_based: Whether input vertex indices are 1-based.
+            output_one_based: Whether output edge keys should be 1-based.
+                Historical default behavior is 0-based output regardless of
+                ``is_one_based``.
+        """
         edge_multiplicity: Dict[Tuple[int, int], int] = defaultdict(int)
-        index_offset = 1 if is_one_based else 0
+        input_offset = 1 if is_one_based else 0
+        output_offset = 1 if output_one_based else 0
 
         for vertex, neighbors in adjacency_list.items():
             for neighbor in neighbors:
-                u = min(vertex - index_offset, neighbor - index_offset)
-                v = max(vertex - index_offset, neighbor - index_offset)
+                u = min(vertex - input_offset, neighbor - input_offset)
+                v = max(vertex - input_offset, neighbor - input_offset)
+                if output_offset:
+                    u += output_offset
+                    v += output_offset
                 edge_multiplicity[(u, v)] += 1
 
         # Divide by 2 since edges are counted from both endpoints.
@@ -753,7 +768,12 @@ class QuadrangulationEnumerator:
         """Parses plantri double_code output to adjacency lists with twin maps."""
         parts = double_code_line.split()
         if len(parts) < 2:
-            empty: Dict = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
+            empty: Dict = {
+                "vertex_count": 0,
+                "adjacency_list": {},
+                "twin_map": {},
+                "edge_label_pairs": {},
+            }
             return empty, empty
 
         # Parse primal graph.
@@ -775,7 +795,12 @@ class QuadrangulationEnumerator:
 
         # Parse dual graph.
         if idx >= len(parts):
-            empty = {"vertex_count": 0, "adjacency_list": {}, "twin_map": {}}
+            empty = {
+                "vertex_count": 0,
+                "adjacency_list": {},
+                "twin_map": {},
+                "edge_label_pairs": {},
+            }
             return empty, empty
 
         dual_vertex_count = int(parts[idx])
@@ -784,10 +809,10 @@ class QuadrangulationEnumerator:
         dual_edge_lists = parts[idx:]
 
         # Build adjacency lists AND twin maps from edge name mappings.
-        primal_adj, primal_twins = (
+        primal_adj, primal_twins, primal_edge_label_pairs = (
             QuadrangulationEnumerator._build_adjacency_and_twins(primal_edge_lists)
         )
-        dual_adj, dual_twins = (
+        dual_adj, dual_twins, dual_edge_label_pairs = (
             QuadrangulationEnumerator._build_adjacency_and_twins(dual_edge_lists)
         )
 
@@ -795,11 +820,13 @@ class QuadrangulationEnumerator:
             "vertex_count": primal_vertex_count,
             "adjacency_list": primal_adj,
             "twin_map": primal_twins,
+            "edge_label_pairs": primal_edge_label_pairs,
         }
         dual_data = {
             "vertex_count": dual_vertex_count,
             "adjacency_list": dual_adj,
             "twin_map": dual_twins,
+            "edge_label_pairs": dual_edge_label_pairs,
         }
 
         return primal_data, dual_data
@@ -816,10 +843,14 @@ class QuadrangulationEnumerator:
     @staticmethod
     def _build_adjacency_and_twins(
         edge_lists: List[Union[str, bytes]],
-    ) -> Tuple[Dict[int, List[int]], Dict[Tuple[int, int], Tuple[int, int]]]:
-        """Builds adjacency list AND half-edge twin mapping from edge lists."""
+    ) -> Tuple[
+        Dict[int, List[int]],
+        Dict[Tuple[int, int], Tuple[int, int]],
+        Dict[EdgeLabel, Tuple[Tuple[int, int], Tuple[int, int]]],
+    ]:
+        """Build adjacency, twin map, and edge-label/half-edge pairs."""
         # Collect (vertex, position) pairs where each edge name appears.
-        edge_name_to_half_edges: Dict[Union[str, int], List[Tuple[int, int]]] = {}
+        edge_name_to_half_edges: Dict[EdgeLabel, List[Tuple[int, int]]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             for pos, edge_name in enumerate(edges_str):
                 slots = edge_name_to_half_edges.get(edge_name)
@@ -852,9 +883,13 @@ class QuadrangulationEnumerator:
 
         # Twin mapping: match two half-edges sharing the same edge name.
         twin_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        edge_label_pairs: Dict[EdgeLabel, Tuple[Tuple[int, int], Tuple[int, int]]] = {}
         for half_edges in edge_name_to_half_edges.values():
             if len(half_edges) == 2:
                 twin_map[half_edges[0]] = half_edges[1]
                 twin_map[half_edges[1]] = half_edges[0]
+        for edge_name, half_edges in edge_name_to_half_edges.items():
+            if len(half_edges) == 2:
+                edge_label_pairs[edge_name] = (half_edges[0], half_edges[1])
 
-        return adjacency, twin_map
+        return adjacency, twin_map, edge_label_pairs
