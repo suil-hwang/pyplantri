@@ -61,6 +61,7 @@ class PlantriError(Exception):
 
 class Plantri:
     """Wrapper for the plantri executable."""
+    _COUNT_INCOMPATIBLE_OUTPUT_OPTIONS = frozenset({"-a", "-g", "-s", "-E", "-T", "-u"})
 
     def __init__(self, executable: Optional[Path] = None) -> None:
         """Initializes Plantri with the executable path."""
@@ -117,21 +118,55 @@ class Plantri:
     def count(
         self,
         n_vertices: int,
-        graph_type: Literal["triangulation", "quadrangulation"] = "triangulation",
-        connectivity: int = 3,
+        graph_type: Literal["triangulation", "quadrangulation", "cubic"] = "triangulation",
+        connectivity: Optional[int] = 3,
+        dual: bool = False,
+        minimum_degree: Optional[int] = None,
+        bipartite: bool = False,
         timeout: float = 3600.0,
     ) -> int:
-        """Counts graphs without generating output."""
-        options = ["-u"]  # No stdout output (count only via stderr).
+        """Counts graphs without generating stdout output."""
+        options: List[str] = []
 
         if graph_type == "quadrangulation":
             options.append("-q")
+        elif graph_type == "cubic":
+            options.append("-b")
 
-        options.append(f"-c{connectivity}")
+        if connectivity is not None:
+            options.append(f"-c{connectivity}")
+        if dual:
+            options.append("-d")
+        if minimum_degree is not None:
+            options.append(f"-m{minimum_degree}")
+        if bipartite:
+            options.append("-bp")
+
+        return self.count_from_options(
+            n_vertices,
+            options=options,
+            timeout=timeout,
+        )
+
+    def count_from_options(
+        self,
+        n_vertices: int,
+        options: Optional[List[str]] = None,
+        timeout: float = 3600.0,
+    ) -> int:
+        """Counts graphs with arbitrary generation options via plantri ``-u``.
+
+        Any output-format options incompatible with ``-u`` are ignored.
+        """
+        normalized_options = [
+            opt
+            for opt in (options or [])
+            if opt not in self._COUNT_INCOMPATIBLE_OUTPUT_OPTIONS
+        ]
 
         try:
             result = subprocess.run(
-                [str(self.executable)] + options + [str(n_vertices)],
+                [str(self.executable)] + normalized_options + ["-u", str(n_vertices)],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -146,7 +181,10 @@ class Plantri:
 
             # Parse count from stderr (e.g., "1 graphs written to stdout" or "1 quadrangulations generated").
             for line in result.stderr.split("\n"):
-                match = re.search(r"(\d+)\s+(?:graph|triangulation|quadrangulation)", line.lower())
+                match = re.search(
+                    r"(\d+)\s+(?:graph|triangulation|quadrangulation)s?\b",
+                    line.lower(),
+                )
                 if match:
                     return int(match.group(1))
 
@@ -159,7 +197,7 @@ class Plantri:
         except subprocess.TimeoutExpired as e:
             raise PlantriError(
                 f"plantri execution timed out after {timeout} seconds "
-                f"for n={n_vertices}, graph_type={graph_type}"
+                f"for n={n_vertices}, options={normalized_options}"
             ) from e
 
         except FileNotFoundError as e:
@@ -616,7 +654,11 @@ class QuadrangulationEnumerator:
 
     def count(self, dual_vertex_count: int) -> int:
         """Counts the number of non-isomorphic SQS structures."""
-        return sum(1 for _ in self.iter_raw(dual_vertex_count))
+        primal_vertex_count = dual_vertex_count + 2
+        return self._plantri.count_from_options(
+            primal_vertex_count,
+            options=self.OPTIONS,
+        )
 
     def iter_raw(self, dual_vertex_count: int) -> Iterator[bytes]:
         """Generates raw double_code output lines as bytes."""
