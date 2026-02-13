@@ -2,6 +2,7 @@
 import os
 import re
 import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
@@ -78,12 +79,32 @@ class Plantri:
         options: Optional[List[str]] = None,
         output_format: Literal["planar_code", "ascii"] = "planar_code",
     ) -> bytes:
-        """Runs plantri with the given parameters.
+        """Runs plantri with the given parameters."""
+        cmd = self._build_command(
+            n_vertices,
+            options=options,
+            output_format=output_format,
+        )
 
-        Supported output formats:
-            - "planar_code" (default binary format)
-            - "ascii" (textual adjacency lists via -a)
-        """
+        try:
+            result = subprocess.run(cmd, capture_output=True, check=True)
+            return result.stdout
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.decode(errors="replace") if e.stderr else str(e)
+            raise PlantriError(f"plantri execution failed: {error_msg}") from e
+        except FileNotFoundError as e:
+            raise PlantriError(
+                f"plantri executable not found: {self.executable}"
+            ) from e
+
+    def _build_command(
+        self,
+        n_vertices: int,
+        *,
+        options: Optional[List[str]],
+        output_format: Literal["planar_code", "ascii"],
+    ) -> List[str]:
+        """Builds a plantri command line for the given options."""
         if output_format not in ("planar_code", "ascii"):
             raise ValueError(
                 f"Unsupported output_format={output_format!r}. "
@@ -93,27 +114,76 @@ class Plantri:
             )
 
         cmd = [str(self.executable)]
-
         if options:
             cmd.extend(options)
 
         # Set output format flag.
-        if output_format == "ascii":
-            if "-a" not in (options or []):
-                cmd.append("-a")
+        if output_format == "ascii" and "-a" not in (options or []):
+            cmd.append("-a")
 
         cmd.append(str(n_vertices))
+        return cmd
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, check=True)
-            return result.stdout
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else str(e)
-            raise PlantriError(f"plantri execution failed: {error_msg}")
-        except FileNotFoundError:
-            raise PlantriError(
-                f"plantri executable not found: {self.executable}"
-            )
+    def iter_stdout_lines(
+        self,
+        n_vertices: int,
+        options: Optional[List[str]] = None,
+        output_format: Literal["planar_code", "ascii"] = "planar_code",
+    ) -> Iterator[bytes]:
+        """Streams non-empty stdout lines from plantri without buffering all output."""
+        cmd = self._build_command(
+            n_vertices,
+            options=options,
+            output_format=output_format,
+        )
+
+        with tempfile.TemporaryFile() as stderr_file:
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_file,
+                )
+            except FileNotFoundError as e:
+                raise PlantriError(
+                    f"plantri executable not found: {self.executable}"
+                ) from e
+
+            if proc.stdout is None:
+                proc.kill()
+                proc.wait()
+                raise PlantriError("Failed to capture plantri stdout stream.")
+
+            fully_consumed = False
+            try:
+                for raw_line in proc.stdout:
+                    line = raw_line.strip()
+                    if line:
+                        yield line
+                fully_consumed = True
+            finally:
+                proc.stdout.close()
+
+                if fully_consumed:
+                    return_code = proc.wait()
+                else:
+                    if proc.poll() is None:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                    return_code = proc.returncode if proc.returncode is not None else 0
+
+                stderr_file.seek(0)
+                stderr_text = stderr_file.read().decode("utf-8", errors="replace")
+                if fully_consumed and return_code != 0:
+                    stderr_excerpt = stderr_text[:4000]
+                    raise PlantriError(
+                        f"plantri execution failed (exit code {return_code}): "
+                        f"{stderr_excerpt}"
+                    )
 
     def count(
         self,
@@ -154,10 +224,7 @@ class Plantri:
         options: Optional[List[str]] = None,
         timeout: float = 3600.0,
     ) -> int:
-        """Counts graphs with arbitrary generation options via plantri ``-u``.
-
-        Any output-format options incompatible with ``-u`` are ignored.
-        """
+        """Counts graphs with arbitrary generation options via plantri ``-u``."""
         normalized_options = [
             opt
             for opt in (options or [])
@@ -241,15 +308,14 @@ class Plantri:
         if bipartite:
             options.append("-bp")
 
-        output = self.run(n_vertices, options, output_format="ascii")
-
         # Parse text output without UTF-8 assumptions. plantri emits byte labels.
         # Decode per line with latin-1 only when yielding strings.
         current_graph_lines: List[bytes] = []
-        for raw_line in output.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
+        for line in self.iter_stdout_lines(
+            n_vertices,
+            options,
+            output_format="ascii",
+        ):
 
             # Legacy format with "Graph ..." headers.
             if line.startswith(b"Graph"):
@@ -474,8 +540,18 @@ class GraphConverter:
     def extract_faces(
         embedding: Dict[int, Tuple[int, ...]],
         edge_multiplicity: Optional[Dict[Tuple[int, int], int]] = None,
+        twin_map: Optional[Dict[Tuple[int, int], Tuple[int, int]]] = None,
     ) -> Tuple[Tuple[int, ...], ...]:
-        """Extracts faces from a 0-based embedding."""
+        """Extract faces from a 0-based embedding.
+
+        If ``twin_map`` is provided, this function delegates to
+        ``extract_faces_with_twins`` for deterministic half-edge traversal.
+        Otherwise it falls back to a heuristic traversal that can be ambiguous
+        for parallel edges.
+        """
+        if twin_map is not None:
+            return GraphConverter.extract_faces_with_twins(embedding, twin_map)
+
         if not embedding:
             return tuple()
 
@@ -665,12 +741,12 @@ class QuadrangulationEnumerator:
         # Euler's formula for plane graphs: V - E + F = 2
         # For quadrangulations: primal_vertices = dual_vertices + 2
         primal_vertex_count = dual_vertex_count + 2
-        output = self._plantri.run(primal_vertex_count, self.OPTIONS)
-
-        for line in output.splitlines():
-            stripped = line.strip()
-            if stripped and _is_ascii_digit_byte(stripped[0]):
-                yield stripped
+        for line in self._plantri.iter_stdout_lines(
+            primal_vertex_count,
+            self.OPTIONS,
+        ):
+            if _is_ascii_digit_byte(line[0]):
+                yield line
 
     @staticmethod
     def parse_double_code(double_code_line: Union[str, bytes]) -> Tuple[Dict, Dict]:

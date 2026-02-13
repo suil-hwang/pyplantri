@@ -22,7 +22,7 @@ from .plane_graph_enumeration import (
 logger = logging.getLogger(__name__)
 
 Embedding = Tuple[Tuple[int, ...], ...]
-# Accept dict or list at construction time; __post_init__ normalizes to Embedding.
+# Internal normalization input type.
 EmbeddingInput = Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ...]]]
 
 
@@ -59,11 +59,11 @@ class PlaneGraph:
     num_vertices: int
     edges: Tuple[Tuple[int, int], ...]
     edge_multiplicity: Dict[Tuple[int, int], int]
-    embedding: EmbeddingInput  # CW cyclic order at each vertex; normalized in __post_init__
+    embedding: Embedding  # CW cyclic order at each vertex.
     faces: Tuple[Tuple[int, ...], ...]
 
     primal_num_vertices: int
-    primal_embedding: EmbeddingInput  # normalized in __post_init__
+    primal_embedding: Embedding
     primal_faces: Tuple[Tuple[int, ...], ...]
 
     graph_id: int = 0
@@ -74,22 +74,9 @@ class PlaneGraph:
         default=None, init=False, repr=False, compare=False
     )
 
-    def __post_init__(self) -> None:
-        """Normalize embedding containers to dense tuple-of-tuples."""
-        normalized_embedding = self._normalize_embedding(
-            self.embedding,
-            expected_size=self.num_vertices,
-        )
-        normalized_primal_embedding = self._normalize_embedding(
-            self.primal_embedding,
-            expected_size=self.primal_num_vertices,
-        )
-        object.__setattr__(self, "embedding", normalized_embedding)
-        object.__setattr__(self, "primal_embedding", normalized_primal_embedding)
-
     @staticmethod
     def _normalize_embedding(
-        embedding: Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ...]]],
+        embedding: EmbeddingInput,
         *,
         expected_size: int = 0,
     ) -> Embedding:
@@ -230,7 +217,12 @@ class PlaneGraph:
 
     def validate(self) -> Tuple[bool, List[str]]:
         """Validates graph invariants."""
-        errors = []
+        errors: List[str] = []
+
+        if len(self.embedding) != self.num_vertices:
+            errors.append(
+                f"Embedding size {len(self.embedding)} does not match num_vertices={self.num_vertices}"
+            )
 
         for v in range(self.num_vertices):
             if not self._has_vertex(self.embedding, v):
@@ -242,20 +234,66 @@ class PlaneGraph:
                     f"Vertex {v} has degree {len(neighbors_v)}, expected 4"
                 )
 
-        single_count = len(self.single_edges)
-        double_count = len(self.double_edges)
-        expected_edge_sum = 2 * self.num_vertices
-        actual_edge_sum = single_count + 2 * double_count
-        if actual_edge_sum != expected_edge_sum:
-            errors.append(f"Edge formula: s + 2d = {actual_edge_sum}, expected {expected_edge_sum}")
+        for (u, v), multiplicity in self.edge_multiplicity.items():
+            if u > v:
+                errors.append(f"Edge key ({u}, {v}) is not canonical (u <= v expected)")
+            if multiplicity not in (1, 2):
+                errors.append(
+                    f"Edge ({u}, {v}) has multiplicity {multiplicity}, expected 1 or 2"
+                )
 
         expected_faces = self.num_vertices + 2
         if self.num_faces != expected_faces:
             errors.append(f"Face count: {self.num_faces}, expected {expected_faces}")
 
+        directed_counts: Dict[Tuple[int, int], int] = {}
+        undirected_half_edge_counts: Dict[Tuple[int, int], int] = {}
+
         for v, neighbors in self._iter_embedding_items(self.embedding):
             if v in neighbors:
                 errors.append(f"Self-loop at vertex {v}")
+            for u in neighbors:
+                directed = (v, u)
+                directed_counts[directed] = directed_counts.get(directed, 0) + 1
+                edge = (v, u) if v <= u else (u, v)
+                undirected_half_edge_counts[edge] = (
+                    undirected_half_edge_counts.get(edge, 0) + 1
+                )
+
+        for (u, v), multiplicity in self.edge_multiplicity.items():
+            if u == v:
+                continue
+            count_uv = directed_counts.get((u, v), 0)
+            count_vu = directed_counts.get((v, u), 0)
+            if count_uv != multiplicity or count_vu != multiplicity:
+                errors.append(
+                    f"Embedding/multiplicity mismatch for edge ({u}, {v}): "
+                    f"u->v={count_uv}, v->u={count_vu}, multiplicity={multiplicity}"
+                )
+
+        for edge, half_edge_count in undirected_half_edge_counts.items():
+            u, v = edge
+            if u == v:
+                continue
+            edge_multiplicity = self.edge_multiplicity.get(edge)
+            if edge_multiplicity is None:
+                errors.append(
+                    f"Edge {edge} appears in embedding but is missing in edge_multiplicity"
+                )
+                continue
+            if half_edge_count != 2 * edge_multiplicity:
+                errors.append(
+                    f"Half-edge count mismatch for edge {edge}: "
+                    f"{half_edge_count} in embedding vs {2 * edge_multiplicity} expected"
+                )
+
+        edge_count = sum(self.edge_multiplicity.values())
+        euler_lhs = self.num_vertices - edge_count + self.num_faces
+        if euler_lhs != 2:
+            errors.append(
+                f"Euler formula violation: V - E + F = {euler_lhs}, expected 2 "
+                f"(V={self.num_vertices}, E={edge_count}, F={self.num_faces})"
+            )
 
         return len(errors) == 0, errors
 
@@ -596,56 +634,3 @@ def load_graphs_from_cache(
             )
         return _load_pickle(filepath, max_count, safe_mode)
 
-
-def main() -> None:
-    """CLI entry point for plantri graph enumeration."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Enumerate 4-regular planar multigraphs via plantri",
-    )
-    parser.add_argument("n", type=int, help="Number of dual vertices (minimum 3)")
-    parser.add_argument("--max", type=int, default=None, help="Maximum graph count")
-    parser.add_argument("--export", type=str, help="Export to JSON cache file")
-    parser.add_argument("--pickle", action="store_true", help="Use pickle format")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--show-faces", action="store_true", help="Display face info")
-
-    args = parser.parse_args()
-
-    if args.n < 3:
-        parser.error("n must be at least 3.")
-
-    graphs = enumerate_plane_graphs(
-        args.n,
-        max_count=args.max,
-        verbose=args.verbose,
-    )
-
-    print(f"\nTotal: {len(graphs)} {args.n}-vertex 4-regular planar multigraphs")
-
-    for graph in graphs:
-        print(f"\n{'='*50}")
-        print(f"Graph #{graph.graph_id}")
-        print(f"  Vertices: {graph.num_vertices}")
-        print(f"  Edges: {graph.num_simple_edges} unique, {graph.num_edges} total")
-        print(f"  Double edges: {len(graph.double_edges)}")
-        print(f"  Faces: {graph.num_faces}")
-
-        print("  Embedding (CW order, 0-based):")
-        for v in range(graph.num_vertices):
-            print(f"    {v}: {list(graph.embedding[v])}")
-
-        if args.show_faces:
-            print("  Faces:")
-            for i, face in enumerate(graph.faces):
-                face_type = "digon" if len(face) == 2 else f"{len(face)}-gon"
-                print(f"    F{i}: {list(face)} ({face_type})")
-
-    if args.export:
-        save_graphs_to_cache(graphs, args.export, use_json=(not args.pickle))
-        print(f"\nExported to {args.export}")
-
-
-if __name__ == "__main__":
-    main()
