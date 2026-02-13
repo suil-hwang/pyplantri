@@ -21,6 +21,34 @@ def _get_plane_graph_cls():
     return PlaneGraph
 
 
+def _to_zero_based_twin_map(
+    twin_map_1based: Dict[Tuple[int, int], Tuple[int, int]],
+    embedding: Dict[int, Tuple[int, ...]],
+    *,
+    graph_name: str,
+) -> Dict[Tuple[int, int], Tuple[int, int]]:
+    """Convert and validate twin_map completeness for -T based enumeration."""
+    if not twin_map_1based:
+        raise ValueError(
+            f"{graph_name} twin_map is missing. "
+            "Current plantri pipeline requires -T double_code with full twin labels."
+        )
+
+    twin_map_0based: Dict[Tuple[int, int], Tuple[int, int]] = {
+        (v - 1, i): (u - 1, j)
+        for (v, i), (u, j) in twin_map_1based.items()
+    }
+
+    expected_half_edges = sum(len(neighbors) for neighbors in embedding.values())
+    if len(twin_map_0based) != expected_half_edges:
+        raise ValueError(
+            f"{graph_name} twin_map size mismatch: "
+            f"{len(twin_map_0based)} entries for {expected_half_edges} half-edges"
+        )
+
+    return twin_map_0based
+
+
 def _build_plane_graph(
     primal_data: Dict,
     dual_data: Dict,
@@ -34,14 +62,11 @@ def _build_plane_graph(
     twin_map_1based = dual_data.get("twin_map", {})
 
     embedding = GraphConverter.to_zero_based_embedding(dual_adj_1based)
-
-    # Convert twin_map to 0-based indexing.
-    # Note: vertex: 1-based -> 0-based (subtract 1)
-    #       position: already 0-based, keep as-is
-    twin_map_0based: Dict[Tuple[int, int], Tuple[int, int]] = {
-        (v - 1, i): (u - 1, j)
-        for (v, i), (u, j) in twin_map_1based.items()
-    }
+    twin_map_0based = _to_zero_based_twin_map(
+        twin_map_1based,
+        embedding,
+        graph_name="dual",
+    )
 
     edge_multiplicity: Dict[Tuple[int, int], int] = {}
     unique_edges = set()
@@ -57,14 +82,9 @@ def _build_plane_graph(
         edge_multiplicity[edge] = count
 
     edges = tuple(sorted(unique_edges))
-
-    # Use position-based extraction if twin_map available, else fallback to old method.
-    if twin_map_0based:
-        faces = GraphConverter.extract_faces_with_twins(
-            embedding, twin_map_0based
-        )
-    else:
-        faces = GraphConverter.extract_faces(embedding, edge_multiplicity)
+    faces = GraphConverter.extract_faces_with_twins(
+        embedding, twin_map_0based
+    )
 
     primal_num_vertices = 0
     primal_embedding: Dict[int, Tuple[int, ...]] = {}
@@ -75,17 +95,14 @@ def _build_plane_graph(
         primal_num_vertices = primal_data["vertex_count"]
         primal_twin_map_1based = primal_data.get("twin_map", {})
         primal_embedding = GraphConverter.to_zero_based_embedding(primal_adj_1based)
-
-        primal_twin_map_0based: Dict[Tuple[int, int], Tuple[int, int]] = {
-            (v - 1, i): (u - 1, j)
-            for (v, i), (u, j) in primal_twin_map_1based.items()
-        }
-        if primal_twin_map_0based:
-            primal_faces = GraphConverter.extract_faces_with_twins(
-                primal_embedding, primal_twin_map_0based
-            )
-        else:
-            primal_faces = GraphConverter.extract_faces(primal_embedding)
+        primal_twin_map_0based = _to_zero_based_twin_map(
+            primal_twin_map_1based,
+            primal_embedding,
+            graph_name="primal",
+        )
+        primal_faces = GraphConverter.extract_faces_with_twins(
+            primal_embedding, primal_twin_map_0based
+        )
 
     plane_graph_cls = _get_plane_graph_cls()
     return plane_graph_cls(

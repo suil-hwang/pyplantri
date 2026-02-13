@@ -7,7 +7,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple, Union
 
 from .plane_graph_enumeration import (
     EnumerationTiming,
@@ -20,6 +20,8 @@ from .plane_graph_enumeration import (
 )
 
 logger = logging.getLogger(__name__)
+
+Embedding = Tuple[Tuple[int, ...], ...]
 
 
 class SecurityWarning(UserWarning):
@@ -55,11 +57,11 @@ class PlaneGraph:
     num_vertices: int
     edges: Tuple[Tuple[int, int], ...]
     edge_multiplicity: Dict[Tuple[int, int], int]
-    embedding: Dict[int, Tuple[int, ...]]  # CW cyclic order at each vertex
+    embedding: Embedding  # CW cyclic order at each vertex
     faces: Tuple[Tuple[int, ...], ...]
 
     primal_num_vertices: int
-    primal_embedding: Dict[int, Tuple[int, ...]]
+    primal_embedding: Embedding
     primal_faces: Tuple[Tuple[int, ...], ...]
 
     graph_id: int = 0
@@ -69,6 +71,90 @@ class PlaneGraph:
     _single_edges_cache: Optional[FrozenSet[Tuple[int, int]]] = field(
         default=None, init=False, repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        """Normalize embedding containers to dense tuple-of-tuples."""
+        normalized_embedding = self._normalize_embedding(
+            self.embedding,
+            expected_size=self.num_vertices,
+        )
+        normalized_primal_embedding = self._normalize_embedding(
+            self.primal_embedding,
+            expected_size=self.primal_num_vertices,
+        )
+        object.__setattr__(self, "embedding", normalized_embedding)
+        object.__setattr__(self, "primal_embedding", normalized_primal_embedding)
+
+    @staticmethod
+    def _normalize_embedding(
+        embedding: Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ...]]],
+        *,
+        expected_size: int = 0,
+    ) -> Embedding:
+        """Convert sparse/dict embedding into dense 0..n-1 tuple-of-tuples."""
+        if isinstance(embedding, dict):
+            size = max(expected_size, 0)
+            if embedding:
+                max_index = max(int(v) for v in embedding.keys()) + 1
+                size = max(size, max_index)
+            dense: List[Tuple[int, ...]] = [tuple() for _ in range(size)]
+            for vertex, neighbors in embedding.items():
+                idx = int(vertex)
+                if idx < 0:
+                    continue
+                if idx >= len(dense):
+                    dense.extend(tuple() for _ in range(idx + 1 - len(dense)))
+                dense[idx] = tuple(int(u) for u in neighbors)
+            return tuple(dense)
+
+        dense_embedding: Embedding = tuple(
+            tuple(int(u) for u in neighbors) for neighbors in embedding
+        )
+        if expected_size > len(dense_embedding):
+            dense_embedding = dense_embedding + tuple(
+                tuple() for _ in range(expected_size - len(dense_embedding))
+            )
+        return dense_embedding
+
+    @staticmethod
+    def _iter_embedding_items(embedding: Union[Dict[int, Tuple[int, ...]], Embedding]) -> Iterator[Tuple[int, Tuple[int, ...]]]:
+        """Iterate (vertex, neighbors) for dict or dense embedding containers."""
+        if isinstance(embedding, dict):
+            for v, neighbors in embedding.items():
+                yield int(v), tuple(neighbors)
+        else:
+            for v, neighbors in enumerate(embedding):
+                yield v, neighbors
+
+    @staticmethod
+    def _iter_embedding_values(embedding: Union[Dict[int, Tuple[int, ...]], Embedding]) -> Iterator[Tuple[int, ...]]:
+        """Iterate neighbor tuples for dict or dense embedding containers."""
+        if isinstance(embedding, dict):
+            for neighbors in embedding.values():
+                yield tuple(neighbors)
+        else:
+            for neighbors in embedding:
+                yield neighbors
+
+    @staticmethod
+    def _has_vertex(embedding: Union[Dict[int, Tuple[int, ...]], Embedding], vertex: int) -> bool:
+        """Return True if vertex exists in embedding."""
+        if isinstance(embedding, dict):
+            return vertex in embedding
+        return 0 <= vertex < len(embedding)
+
+    @staticmethod
+    def _neighbors_of(
+        embedding: Union[Dict[int, Tuple[int, ...]], Embedding],
+        vertex: int,
+    ) -> Tuple[int, ...]:
+        """Get neighbors for vertex from dict or dense embedding containers."""
+        if isinstance(embedding, dict):
+            neighbors = embedding.get(vertex, tuple())
+            return tuple(neighbors)
+        if 0 <= vertex < len(embedding):
+            return embedding[vertex]
+        return tuple()
 
     @property
     def num_edges(self) -> int:
@@ -114,20 +200,23 @@ class PlaneGraph:
     @property
     def is_4_regular(self) -> bool:
         """Whether all vertices have degree 4."""
-        return all(len(neighbors) == 4 for neighbors in self.embedding.values())
+        return all(len(neighbors) == 4 for neighbors in self._iter_embedding_values(self.embedding))
 
     @property
     def is_loop_free(self) -> bool:
         """Whether graph has no self-loops."""
-        return all(v not in neighbors for v, neighbors in self.embedding.items())
+        return all(
+            v not in neighbors
+            for v, neighbors in self._iter_embedding_items(self.embedding)
+        )
 
     def get_neighbors_cw(self, vertex: int) -> Tuple[int, ...]:
         """Gets CW-ordered neighbors of a vertex."""
-        return self.embedding[vertex]
+        return self._neighbors_of(self.embedding, vertex)
 
     def get_neighbors_ccw(self, vertex: int) -> Tuple[int, ...]:
         """Gets CCW-ordered neighbors of a vertex."""
-        return tuple(reversed(self.embedding[vertex]))
+        return tuple(reversed(self.get_neighbors_cw(vertex)))
 
     def get_consecutive_pairs(
         self, vertex: int, ccw: bool = False
@@ -142,12 +231,13 @@ class PlaneGraph:
         errors = []
 
         for v in range(self.num_vertices):
-            if v not in self.embedding:
+            if not self._has_vertex(self.embedding, v):
                 errors.append(f"Vertex {v} missing from embedding")
                 continue
-            if len(self.embedding[v]) != 4:
+            neighbors_v = self._neighbors_of(self.embedding, v)
+            if len(neighbors_v) != 4:
                 errors.append(
-                    f"Vertex {v} has degree {len(self.embedding[v])}, expected 4"
+                    f"Vertex {v} has degree {len(neighbors_v)}, expected 4"
                 )
 
         single_count = len(self.single_edges)
@@ -161,7 +251,7 @@ class PlaneGraph:
         if self.num_faces != expected_faces:
             errors.append(f"Face count: {self.num_faces}, expected {expected_faces}")
 
-        for v, neighbors in self.embedding.items():
+        for v, neighbors in self._iter_embedding_items(self.embedding):
             if v in neighbors:
                 errors.append(f"Self-loop at vertex {v}")
 
@@ -176,13 +266,14 @@ class PlaneGraph:
                 f"{u},{v}": m for (u, v), m in self.edge_multiplicity.items()
             },
             "embedding": {
-                str(v): list(neighbors) for v, neighbors in self.embedding.items()
+                str(v): list(neighbors)
+                for v, neighbors in self._iter_embedding_items(self.embedding)
             },
             "faces": [list(f) for f in self.faces],
             "primal_num_vertices": self.primal_num_vertices,
             "primal_embedding": {
                 str(v): list(neighbors)
-                for v, neighbors in self.primal_embedding.items()
+                for v, neighbors in self._iter_embedding_items(self.primal_embedding)
             },
             "primal_faces": [list(f) for f in self.primal_faces],
             "graph_id": self.graph_id,
@@ -201,19 +292,22 @@ class PlaneGraph:
             for k, v in data["edge_multiplicity"].items()
             for parts in [k.split(",")]
         }
+        embedding_payload = data.get("embedding", {})
+        primal_embedding_payload = data.get("primal_embedding", {})
         return cls(
             num_vertices=data["num_vertices"],
             edges=tuple(parsed_edges),
             edge_multiplicity=parsed_edge_multiplicity,
-            embedding={
-                int(v): tuple(neighbors) for v, neighbors in data["embedding"].items()
-            },
+            embedding=cls._normalize_embedding(
+                embedding_payload,
+                expected_size=data["num_vertices"],
+            ),
             faces=tuple(tuple(f) for f in data["faces"]),
             primal_num_vertices=data.get("primal_num_vertices", 0),
-            primal_embedding={
-                int(v): tuple(neighbors)
-                for v, neighbors in data.get("primal_embedding", {}).items()
-            },
+            primal_embedding=cls._normalize_embedding(
+                primal_embedding_payload,
+                expected_size=data.get("primal_num_vertices", 0),
+            ),
             primal_faces=tuple(
                 tuple(f) for f in data.get("primal_faces", [])
             ),
