@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
+from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
 
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -421,7 +421,7 @@ class GraphConverter:
     @staticmethod
     def adjacency_to_edge_multiplicity(
         adjacency_list: Dict[int, List[int]],
-        is_one_based: bool = True,
+        is_one_based: Optional[bool] = None,
         *,
         output_one_based: bool = False,
     ) -> Dict[Tuple[int, int], int]:
@@ -430,11 +430,35 @@ class GraphConverter:
         Args:
             adjacency_list: Vertex -> neighbor list adjacency map.
             is_one_based: Whether input vertex indices are 1-based.
+                When ``None`` (default), infer indexing from observed vertex
+                labels: presence of ``0`` means 0-based, otherwise presence of
+                ``1`` means 1-based.
             output_one_based: Whether output edge keys should be 1-based.
                 Historical default behavior is 0-based output regardless of
                 ``is_one_based``.
         """
         edge_multiplicity: Dict[Tuple[int, int], int] = defaultdict(int)
+        if is_one_based is None:
+            observed_indices: Set[int] = set(int(v) for v in adjacency_list.keys())
+            for neighbors in adjacency_list.values():
+                observed_indices.update(int(u) for u in neighbors)
+
+            if not observed_indices:
+                is_one_based = False
+            elif min(observed_indices) < 0:
+                raise ValueError(
+                    "adjacency_list contains negative vertex indices, cannot infer index base."
+                )
+            elif 0 in observed_indices:
+                is_one_based = False
+            elif 1 in observed_indices:
+                is_one_based = True
+            else:
+                raise ValueError(
+                    "Cannot infer index base from adjacency_list. "
+                    "Pass is_one_based=True or is_one_based=False explicitly."
+                )
+
         input_offset = 1 if is_one_based else 0
         output_offset = 1 if output_one_based else 0
 
@@ -639,9 +663,9 @@ class GraphConverter:
 
         # Drop malformed non-digon loops (repeated vertices) from ambiguous fallback.
         cleaned_faces: List[Tuple[int, ...]] = []
-        for face in faces:
-            if len(face) == 2 or len(set(face)) == len(face):
-                cleaned_faces.append(face)
+        for face_vertices in faces:
+            if len(face_vertices) == 2 or len(set(face_vertices)) == len(face_vertices):
+                cleaned_faces.append(face_vertices)
         faces = cleaned_faces
 
         # Add digon faces for parallel edges.
@@ -806,7 +830,7 @@ class QuadrangulationEnumerator:
         dual_vertex_count = int(parts[idx])
         idx += 1
 
-        dual_edge_lists = parts[idx:]
+        dual_edge_lists = cast(List[Union[str, bytes]], list(parts[idx:]))
 
         # Build adjacency lists AND twin maps from edge name mappings.
         primal_adj, primal_twins, primal_edge_label_pairs = (
@@ -852,7 +876,11 @@ class QuadrangulationEnumerator:
         # Collect (vertex, position) pairs where each edge name appears.
         edge_name_to_half_edges: Dict[EdgeLabel, List[Tuple[int, int]]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            for pos, edge_name in enumerate(edges_str):
+            if isinstance(edges_str, bytes):
+                edge_iter: Iterator[EdgeLabel] = iter(edges_str)
+            else:
+                edge_iter = iter(edges_str)
+            for pos, edge_name in enumerate(edge_iter):
                 slots = edge_name_to_half_edges.get(edge_name)
                 if slots is None:
                     edge_name_to_half_edges[edge_name] = [(vertex_idx, pos)]
@@ -863,7 +891,11 @@ class QuadrangulationEnumerator:
         adjacency: Dict[int, List[int]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             neighbors: List[int] = []
-            for edge_name in edges_str:
+            if isinstance(edges_str, bytes):
+                edge_iter = iter(edges_str)
+            else:
+                edge_iter = iter(edges_str)
+            for edge_name in edge_iter:
                 half_edges = edge_name_to_half_edges.get(edge_name)
                 if half_edges is None or len(half_edges) != 2:
                     edge_name_str = QuadrangulationEnumerator._format_edge_name_for_error(

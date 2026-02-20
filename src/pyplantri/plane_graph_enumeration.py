@@ -481,7 +481,8 @@ def _iter_chunk_args(
     chunk_size: int,
     validate: bool,
     include_primal: bool,
-) -> Iterator[Tuple[List[bytes], int, bool, bool]]:
+    digon_zero_only: bool,
+) -> Iterator[Tuple[List[bytes], int, bool, bool, bool]]:
     """Create chunk arguments lazily from a raw line stream."""
     raw_iter = iter(raw_lines)
     start_id = 0
@@ -492,11 +493,17 @@ def _iter_chunk_args(
             chunk.append(line)
             if len(chunk) >= chunk_size:
                 current_chunk = chunk
-                yield (current_chunk, start_id, validate, include_primal)
+                yield (
+                    current_chunk,
+                    start_id,
+                    validate,
+                    include_primal,
+                    digon_zero_only,
+                )
                 start_id += len(current_chunk)
                 chunk = []
         if chunk:
-            yield (chunk, start_id, validate, include_primal)
+            yield (chunk, start_id, validate, include_primal, digon_zero_only)
     finally:
         _close_if_possible(raw_iter)
 
@@ -555,29 +562,33 @@ def _build_graphs_from_raw_lines(
     try:
         for graph_id, line in enumerate(raw_iter):
             generated_count += 1
-
-            primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
-            if not primal_data["adjacency_list"] or not dual_data["adjacency_list"]:
-                continue
-
-            if digon_zero_only and _has_digon_from_dual_adjacency(dual_data["adjacency_list"]):
-                continue
-
-            graph = _build_plane_graph(
-                primal_data,
-                dual_data,
-                graph_id,
-                include_primal=include_primal,
-            )
-
-            if validate:
-                is_valid, _ = graph.validate()
-                if not is_valid:
+            try:
+                primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
+                if not primal_data["adjacency_list"] or not dual_data["adjacency_list"]:
                     continue
 
-            graphs.append(graph)
-            if max_count and len(graphs) >= max_count:
-                break
+                if digon_zero_only and _has_digon_from_dual_adjacency(
+                    dual_data["adjacency_list"]
+                ):
+                    continue
+
+                graph = _build_plane_graph(
+                    primal_data,
+                    dual_data,
+                    graph_id,
+                    include_primal=include_primal,
+                )
+
+                if validate:
+                    is_valid, _ = graph.validate()
+                    if not is_valid:
+                        continue
+
+                graphs.append(graph)
+                if max_count and len(graphs) >= max_count:
+                    break
+            except (ValueError, RuntimeError, KeyError, IndexError):
+                continue  # Skip malformed graph lines and continue streaming
     finally:
         _close_if_possible(raw_iter)
 
@@ -585,10 +596,10 @@ def _build_graphs_from_raw_lines(
 
 
 def _process_graph_chunk(
-    args: Tuple[List[bytes], int, bool, bool]
+    args: Tuple[List[bytes], int, bool, bool, bool]
 ) -> List[PlaneGraph]:
     """Process a chunk of raw lines into PlaneGraph objects."""
-    lines, start_id, validate, include_primal = args
+    lines, start_id, validate, include_primal, digon_zero_only = args
     graphs: List[PlaneGraph] = []
 
     for i, line in enumerate(lines):
@@ -596,6 +607,9 @@ def _process_graph_chunk(
         try:
             primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
             if not primal_data["adjacency_list"] or not dual_data["adjacency_list"]:
+                continue
+
+            if digon_zero_only and _has_digon_from_dual_adjacency(dual_data["adjacency_list"]):
                 continue
 
             graph = _build_plane_graph(
@@ -706,6 +720,7 @@ def enumerate_plane_graphs_parallel(
     chunk_size: Optional[int] = None,
     include_primal: bool = True,
     return_timing: bool = False,
+    digon_zero_only: bool = False,
 ) -> Union[List[PlaneGraph], Tuple[List[PlaneGraph], EnumerationTiming]]:
     """Parallel enumeration of plane graphs."""
     import time
@@ -752,9 +767,10 @@ def enumerate_plane_graphs_parallel(
         return []
 
     if verbose:
+        mode = ", digon=0" if digon_zero_only else ""
         print(
             f"[Plantri] Parallel enumeration (n={dual_vertex_count}, "
-            f"workers={n_workers}, chunk={effective_chunk_size})..."
+            f"workers={n_workers}, chunk={effective_chunk_size}{mode})..."
         )
 
     # Bounded warmup to decide if we should stay sequential for small inputs.
@@ -783,7 +799,7 @@ def enumerate_plane_graphs_parallel(
             max_count=max_count,
             validate=validate,
             include_primal=include_primal,
-            digon_zero_only=False,
+            digon_zero_only=digon_zero_only,
         )
         if return_timing:
             t_total = time.perf_counter() - t_start
@@ -803,6 +819,7 @@ def enumerate_plane_graphs_parallel(
         chunk_size=effective_chunk_size,
         validate=validate,
         include_primal=include_primal,
+        digon_zero_only=digon_zero_only,
     )
 
     # Use spawn context for Windows compatibility

@@ -386,6 +386,17 @@ class PlaneGraph:
         expected_faces = self.num_vertices + 2
         if self.num_faces != expected_faces:
             errors.append(f"Face count: {self.num_faces}, expected {expected_faces}")
+        for face_idx, face in enumerate(self.faces):
+            if len(face) < 2:
+                errors.append(f"Dual face {face_idx} has size {len(face)}, expected >= 2")
+            if len(face) > 2 and len(set(face)) != len(face):
+                errors.append(f"Dual face {face_idx} repeats vertices: {face}")
+            for vertex in face:
+                if vertex < 0 or vertex >= self.num_vertices:
+                    errors.append(
+                        f"Dual face {face_idx} contains out-of-range vertex "
+                        f"{vertex} for n={self.num_vertices}"
+                    )
 
         directed_counts: Dict[Tuple[int, int], int] = {}
         undirected_half_edge_counts: Dict[Tuple[int, int], int] = {}
@@ -840,23 +851,28 @@ def _load_pickle(
                 payload = pickle.load(f)
 
     # Extract and validate metadata.
-    metadata = payload.get("metadata")
-    if metadata is None:
-        # Legacy format without metadata.
-        logger.warning("Legacy cache format without metadata: %s", filepath)
-        graphs = payload if isinstance(payload, list) else payload.get("graphs", [])
-        metadata = CacheMetadata(
-            format_version=0,
-            pyplantri_version="unknown",
-            dual_vertex_count=0,
-            graph_count=len(graphs),
-            pickle_protocol=0,
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Cache contains unsupported payload type: "
+            f"{type(payload).__name__}. Expected dict payload with "
+            "'metadata' and 'graphs'."
         )
-    else:
-        if isinstance(metadata, dict):
-            metadata = CacheMetadata(**metadata)
-        _validate_format_version(metadata, filepath)
-        graphs = payload["graphs"]
+    if "metadata" not in payload or "graphs" not in payload:
+        raise ValueError(
+            "Legacy cache format without metadata is no longer supported: "
+            f"{filepath}. Regenerate cache with current pyplantri."
+        )
+
+    metadata = payload["metadata"]
+    if isinstance(metadata, dict):
+        metadata = CacheMetadata(**metadata)
+    elif not isinstance(metadata, CacheMetadata):
+        raise ValueError(
+            "Invalid metadata payload type in cache: "
+            f"{type(metadata).__name__}"
+        )
+    _validate_format_version(metadata, filepath)
+    graphs = payload["graphs"]
 
     if max_count is not None:
         graphs = graphs[:max_count]
@@ -887,7 +903,23 @@ def _load_json(
     with open(filepath, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
-    raw_meta = payload.get("metadata", {})
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Legacy JSON cache format is no longer supported. "
+            f"Expected object with 'metadata' and 'graphs': {filepath}"
+        )
+    if "metadata" not in payload or "graphs" not in payload:
+        raise ValueError(
+            "JSON cache missing required keys 'metadata' and 'graphs': "
+            f"{filepath}"
+        )
+
+    raw_meta = payload["metadata"]
+    if not isinstance(raw_meta, dict):
+        raise ValueError(
+            "JSON metadata must be an object: "
+            f"{filepath}"
+        )
     metadata = CacheMetadata(
         format_version=raw_meta.get("format_version", 0),
         pyplantri_version=raw_meta.get("pyplantri_version", "unknown"),
@@ -897,7 +929,7 @@ def _load_json(
     )
     _validate_format_version(metadata, filepath)
 
-    raw_graphs = payload.get("graphs", payload if isinstance(payload, list) else [])
+    raw_graphs = payload["graphs"]
     if max_count is not None:
         raw_graphs = raw_graphs[:max_count]
 
