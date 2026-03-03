@@ -49,6 +49,11 @@ class SafeUnpickler(pickle.Unpickler):
         "collections": {"defaultdict"},
     }
 
+    # Redirect classes that moved between modules during refactoring.
+    _MODULE_REDIRECTS: Dict[Tuple[str, str], Tuple[str, str]] = {
+        ("pyplantri.plane_graph", "CacheMetadata"): ("pyplantri.cache", "CacheMetadata"),
+    }
+
     def __init__(self, file: Any, *, strict: bool = True):
         """Initialize SafeUnpickler."""
         super().__init__(file)
@@ -68,6 +73,9 @@ class SafeUnpickler(pickle.Unpickler):
                 raise pickle.UnpicklingError(msg)
             else:
                 warnings.warn(msg, SecurityWarning, stacklevel=2)
+
+        # Redirect classes that moved to a different module.
+        module, name = self._MODULE_REDIRECTS.get((module, name), (module, name))
 
         return super().find_class(module, name)
 
