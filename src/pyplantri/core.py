@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import tempfile
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
@@ -14,6 +15,15 @@ from scipy.sparse import csr_matrix
 # Constant for ASCII character parsing optimization.
 _ORD_A = ord('a')
 EdgeLabel = Union[str, int]
+GraphType = Literal["triangulation", "quadrangulation", "cubic"]
+GraphClass = Literal[
+    "triangulation",
+    "quadrangulation",
+    "cubic",
+    "eulerian",
+    "eulerian_triangulation",
+    "bipartite_plane",
+]
 
 
 def _is_ascii_digit_byte(value: int) -> bool:
@@ -64,6 +74,21 @@ class PlantriError(Exception):
 class Plantri:
     """Wrapper for the plantri executable."""
     _COUNT_INCOMPATIBLE_OUTPUT_OPTIONS = frozenset({"-a", "-g", "-s", "-E", "-T", "-u"})
+    _GRAPH_CLASS_OPTIONS: Dict[str, Tuple[str, ...]] = {
+        # Simple triangulations.
+        "triangulation": tuple(),
+        # Simple quadrangulations.
+        "quadrangulation": ("-q",),
+        # Cubic plane graphs are duals of triangulations.
+        "cubic": ("-d",),
+        # plantri -b : Eulerian triangulations.
+        "eulerian": ("-b",),
+        # plantri -bp : simple bipartite plane graphs (separate class dispatch).
+        "bipartite_plane": ("-bp",),
+    }
+    _GRAPH_CLASS_ALIASES: Dict[str, str] = {
+        "eulerian_triangulation": "eulerian",
+    }
 
     def __init__(self, executable: Optional[Path] = None) -> None:
         """Initializes Plantri with the executable path."""
@@ -186,32 +211,130 @@ class Plantri:
                         f"{stderr_excerpt}"
                     )
 
+    def _normalize_graph_class(self, graph_class: str) -> str:
+        """Validate and normalize graph class alias names."""
+        canonical = self._GRAPH_CLASS_ALIASES.get(graph_class, graph_class)
+        if canonical not in self._GRAPH_CLASS_OPTIONS:
+            allowed = ", ".join(
+                sorted(self._GRAPH_CLASS_OPTIONS.keys() | self._GRAPH_CLASS_ALIASES.keys())
+            )
+            raise ValueError(
+                f"Unsupported graph_class={graph_class!r}. "
+                f"Allowed values: {allowed}."
+            )
+        return canonical
+
+    def _resolve_graph_class(
+        self,
+        *,
+        graph_class: Optional[GraphClass],
+        graph_type: GraphType,
+        bipartite: bool,
+    ) -> str:
+        """Resolve legacy graph_type/bipartite into a canonical graph_class."""
+        if graph_class is not None:
+            if bipartite:
+                raise ValueError(
+                    "bipartite=True cannot be combined with graph_class. "
+                    "Use graph_class='bipartite_plane' instead."
+                )
+            return self._normalize_graph_class(graph_class)
+
+        if graph_type == "triangulation":
+            if bipartite:
+                warnings.warn(
+                    "bipartite=True is deprecated. "
+                    "Use graph_class='bipartite_plane'.",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+                return "bipartite_plane"
+            return "triangulation"
+
+        if graph_type == "quadrangulation":
+            if bipartite:
+                raise ValueError(
+                    "graph_type='quadrangulation' is incompatible with bipartite=True "
+                    "(plantri: -q and -bp are incompatible). "
+                    "Use graph_class to choose a valid class."
+                )
+            return "quadrangulation"
+
+        if graph_type == "cubic":
+            if bipartite:
+                raise ValueError(
+                    "Ambiguous legacy options: graph_type='cubic' with bipartite=True. "
+                    "Use graph_class='eulerian' with dual=True for bipartite cubic output, "
+                    "or graph_class='bipartite_plane' for general bipartite plane graphs."
+                )
+            warnings.warn(
+                "graph_type='cubic' now means cubic graphs (triangulation dual, -d). "
+                "To get plantri -b behavior, use graph_class='eulerian'.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            return "cubic"
+
+        raise ValueError(f"Unsupported graph_type={graph_type!r}.")
+
+    def _build_generation_options(
+        self,
+        *,
+        graph_class: str,
+        connectivity: Optional[int],
+        dual: bool,
+        minimum_degree: Optional[int],
+    ) -> List[str]:
+        """Build generation options from canonical graph class and constraints."""
+        options = list(self._GRAPH_CLASS_OPTIONS[graph_class])
+
+        if connectivity is not None:
+            options.append(f"-c{connectivity}")
+        if minimum_degree is not None:
+            options.append(f"-m{minimum_degree}")
+        if dual and "-d" not in options:
+            options.append("-d")
+
+        return options
+
     def count(
         self,
         n_vertices: int,
-        graph_type: Literal["triangulation", "quadrangulation", "cubic"] = "triangulation",
+        graph_type: GraphType = "triangulation",
         connectivity: Optional[int] = 3,
         dual: bool = False,
         minimum_degree: Optional[int] = None,
         bipartite: bool = False,
         timeout: float = 3600.0,
+        *,
+        graph_class: Optional[GraphClass] = None,
     ) -> int:
-        """Counts graphs without generating stdout output."""
-        options: List[str] = []
+        """Count output objects for a selected plantri graph class.
 
-        if graph_type == "quadrangulation":
-            options.append("-q")
-        elif graph_type == "cubic":
-            options.append("-b")
-
-        if connectivity is not None:
-            options.append(f"-c{connectivity}")
-        if dual:
-            options.append("-d")
-        if minimum_degree is not None:
-            options.append(f"-m{minimum_degree}")
-        if bipartite:
-            options.append("-bp")
+        Args:
+            graph_type: Legacy API selector. Kept for compatibility.
+                - ``"triangulation"``
+                - ``"quadrangulation"``
+                - ``"cubic"`` (corrected to mean triangulation dual: ``-d``)
+            graph_class: Recommended explicit class selector:
+                - ``"triangulation"``
+                - ``"quadrangulation"``
+                - ``"cubic"`` (triangulation dual)
+                - ``"eulerian"`` / ``"eulerian_triangulation"`` (plantri ``-b``)
+                - ``"bipartite_plane"`` (plantri ``-bp``)
+            bipartite: Legacy flag. Deprecated; use ``graph_class='bipartite_plane'``.
+        """
+        resolved_graph_class = self._resolve_graph_class(
+            graph_class=graph_class,
+            graph_type=graph_type,
+            bipartite=bipartite,
+        )
+        options = self._build_generation_options(
+            graph_class=resolved_graph_class,
+            connectivity=connectivity,
+            dual=dual,
+            minimum_degree=minimum_degree,
+        )
 
         return self.count_from_options(
             n_vertices,
@@ -250,7 +373,7 @@ class Plantri:
             # Parse count from stderr (e.g., "1 graphs written to stdout" or "1 quadrangulations generated").
             for line in result.stderr.split("\n"):
                 match = re.search(
-                    r"(\d+)\s+(?:graph|triangulation|quadrangulation)s?\b",
+                    r"(\d+)\s+.*\b(?:graph|triangulation|quadrangulation)s?\b",
                     line.lower(),
                 )
                 if match:
@@ -286,28 +409,33 @@ class Plantri:
     def generate_graphs(
         self,
         n_vertices: int,
-        graph_type: Literal["triangulation", "quadrangulation", "cubic"] = "triangulation",
+        graph_type: GraphType = "triangulation",
         connectivity: Optional[int] = None,
         dual: bool = False,
         minimum_degree: Optional[int] = None,
         bipartite: bool = False,
+        *,
+        graph_class: Optional[GraphClass] = None,
     ) -> Iterator[str]:
-        """Generates plane graphs as an iterator."""
-        options = ["-a"]  # ASCII output.
+        """Generate ASCII graphs for a selected plantri graph class.
 
-        if graph_type == "quadrangulation":
-            options.append("-q")
-        elif graph_type == "cubic":
-            options.append("-b")
-
-        if connectivity is not None:
-            options.append(f"-c{connectivity}")
-        if dual:
-            options.append("-d")
-        if minimum_degree is not None:
-            options.append(f"-m{minimum_degree}")
-        if bipartite:
-            options.append("-bp")
+        ``graph_class`` is the recommended selector; ``graph_type`` and
+        ``bipartite`` are legacy compatibility parameters.
+        """
+        resolved_graph_class = self._resolve_graph_class(
+            graph_class=graph_class,
+            graph_type=graph_type,
+            bipartite=bipartite,
+        )
+        options = ["-a"]
+        options.extend(
+            self._build_generation_options(
+                graph_class=resolved_graph_class,
+                connectivity=connectivity,
+                dual=dual,
+                minimum_degree=minimum_degree,
+            )
+        )
 
         # Parse text output without UTF-8 assumptions. plantri emits byte labels.
         # Decode per line with latin-1 only when yielding strings.
@@ -576,108 +704,6 @@ class GraphConverter:
 
 
     @staticmethod
-    def extract_faces(
-        embedding: Dict[int, Tuple[int, ...]],
-        edge_multiplicity: Optional[Dict[Tuple[int, int], int]] = None,
-        twin_map: Optional[Dict[Tuple[int, int], Tuple[int, int]]] = None,
-    ) -> Tuple[Tuple[int, ...], ...]:
-        """Extract faces from a 0-based embedding.
-
-        If ``twin_map`` is provided, this function delegates to
-        ``extract_faces_with_twins`` for deterministic half-edge traversal.
-        Otherwise it falls back to a heuristic traversal that can be ambiguous
-        for parallel edges.
-        """
-        if twin_map is not None:
-            return GraphConverter.extract_faces_with_twins(embedding, twin_map)
-
-        if not embedding:
-            return tuple()
-
-        # Infer multiplicities when not provided so digons are still recovered.
-        effective_multiplicity: Dict[Tuple[int, int], int]
-        if edge_multiplicity is None:
-            raw_counts: Dict[Tuple[int, int], int] = defaultdict(int)
-            for v, neighbors in embedding.items():
-                for u in neighbors:
-                    edge = (min(v, u), max(v, u))
-                    raw_counts[edge] += 1
-            effective_multiplicity = {
-                edge: count // 2 for edge, count in raw_counts.items()
-            }
-        else:
-            effective_multiplicity = edge_multiplicity
-
-        visited_half_edges: Set[Tuple[int, int]] = set()  # (vertex, local slot index)
-        faces: List[Tuple[int, ...]] = []
-
-        total_half_edges = sum(len(neighbors) for neighbors in embedding.values())
-        max_face_steps = max(4, total_half_edges)
-
-        for start_v in embedding:
-            for start_i in range(len(embedding[start_v])):
-                if (start_v, start_i) in visited_half_edges:
-                    continue
-
-                face: List[int] = []
-                current_v = start_v
-                current_i = start_i
-                steps = 0
-
-                while True:
-                    half_edge = (current_v, current_i)
-                    if half_edge in visited_half_edges:
-                        break
-
-                    visited_half_edges.add(half_edge)
-                    face.append(current_v)
-
-                    next_v = embedding[current_v][current_i]
-                    next_neighbors = embedding.get(next_v)
-                    if not next_neighbors:
-                        break
-
-                    # Ambiguous for parallel edges, but deterministic.
-                    try:
-                        incoming_idx = next_neighbors.index(current_v)
-                    except ValueError:
-                        break
-
-                    next_next_v = next_neighbors[(incoming_idx - 1) % len(next_neighbors)]
-                    try:
-                        next_i = embedding[next_v].index(next_next_v)
-                    except ValueError:
-                        break
-
-                    current_v, current_i = next_v, next_i
-
-                    if current_v == start_v and current_i == start_i:
-                        break
-
-                    steps += 1
-                    if steps > max_face_steps:
-                        break
-
-                if len(face) >= 2:
-                    faces.append(tuple(face))
-
-        # Drop malformed non-digon loops (repeated vertices) from ambiguous fallback.
-        cleaned_faces: List[Tuple[int, ...]] = []
-        for face_vertices in faces:
-            if len(face_vertices) == 2 or len(set(face_vertices)) == len(face_vertices):
-                cleaned_faces.append(face_vertices)
-        faces = cleaned_faces
-
-        # Add digon faces for parallel edges.
-        for (u, v), multiplicity in effective_multiplicity.items():
-            if multiplicity >= 2:
-                digon = (u, v)
-                if digon not in faces and (v, u) not in faces:
-                    faces.append(digon)
-
-        return tuple(faces)
-
-    @staticmethod
     def extract_faces_with_twins(
         embedding: Dict[int, Tuple[int, ...]],
         twin_map: Dict[Tuple[int, int], Tuple[int, int]],
@@ -800,12 +826,12 @@ class QuadrangulationEnumerator:
             }
             return empty, empty
 
-        # Parse primal graph.
-        primal_vertex_count = int(parts[0])
+        # Parse first graph section.
+        first_vertex_count = int(parts[0])
 
-        # Collect primal vertex edge lists.
+        # Collect first graph edge lists.
         idx = 1
-        primal_edge_lists: List[Union[str, bytes]] = []
+        first_edge_lists: List[Union[str, bytes]] = []
         while idx < len(parts):
             head = parts[idx][0]
             if isinstance(head, str):
@@ -814,10 +840,10 @@ class QuadrangulationEnumerator:
                 is_vertex_count = _is_ascii_digit_byte(head)
             if is_vertex_count:
                 break
-            primal_edge_lists.append(parts[idx])
+            first_edge_lists.append(parts[idx])
             idx += 1
 
-        # Parse dual graph.
+        # Parse second graph section.
         if idx >= len(parts):
             empty = {
                 "vertex_count": 0,
@@ -827,31 +853,70 @@ class QuadrangulationEnumerator:
             }
             return empty, empty
 
-        dual_vertex_count = int(parts[idx])
+        second_vertex_count = int(parts[idx])
         idx += 1
 
-        dual_edge_lists = cast(List[Union[str, bytes]], list(parts[idx:]))
+        second_edge_lists = cast(List[Union[str, bytes]], list(parts[idx:]))
 
         # Build adjacency lists AND twin maps from edge name mappings.
-        primal_adj, primal_twins, primal_edge_label_pairs = (
-            QuadrangulationEnumerator._build_adjacency_and_twins(primal_edge_lists)
+        first_adj, first_twins, first_edge_label_pairs = (
+            QuadrangulationEnumerator._build_adjacency_and_twins(first_edge_lists)
         )
-        dual_adj, dual_twins, dual_edge_label_pairs = (
-            QuadrangulationEnumerator._build_adjacency_and_twins(dual_edge_lists)
+        second_adj, second_twins, second_edge_label_pairs = (
+            QuadrangulationEnumerator._build_adjacency_and_twins(second_edge_lists)
         )
 
-        primal_data = {
-            "vertex_count": primal_vertex_count,
-            "adjacency_list": primal_adj,
-            "twin_map": primal_twins,
-            "edge_label_pairs": primal_edge_label_pairs,
+        first_data = {
+            "vertex_count": first_vertex_count,
+            "adjacency_list": first_adj,
+            "twin_map": first_twins,
+            "edge_label_pairs": first_edge_label_pairs,
         }
-        dual_data = {
-            "vertex_count": dual_vertex_count,
-            "adjacency_list": dual_adj,
-            "twin_map": dual_twins,
-            "edge_label_pairs": dual_edge_label_pairs,
+        second_data = {
+            "vertex_count": second_vertex_count,
+            "adjacency_list": second_adj,
+            "twin_map": second_twins,
+            "edge_label_pairs": second_edge_label_pairs,
         }
+
+        # Determine primal/dual orientation robustly.
+        #
+        # plantri double_code output order depends on -d:
+        # - without -d: primal first, dual second
+        # - with -d:    dual first, primal second
+        #
+        # Prefer strict quadrangulation consistency checks:
+        #   1) dual is 4-regular
+        #   2) |V_primal| = |V_dual| + 2
+        # Fall back to degree-only discrimination when relation is unavailable.
+        first_is_4_regular = GraphConverter.is_4_regular(first_adj)
+        second_is_4_regular = GraphConverter.is_4_regular(second_adj)
+
+        as_is_is_quadrangulation_pair = (
+            second_is_4_regular
+            and first_vertex_count == second_vertex_count + 2
+        )
+        swapped_is_quadrangulation_pair = (
+            first_is_4_regular
+            and second_vertex_count == first_vertex_count + 2
+        )
+
+        swap_sections = False
+        if swapped_is_quadrangulation_pair and not as_is_is_quadrangulation_pair:
+            swap_sections = True
+        elif as_is_is_quadrangulation_pair and not swapped_is_quadrangulation_pair:
+            swap_sections = False
+        elif first_is_4_regular and not second_is_4_regular:
+            swap_sections = True
+        elif second_is_4_regular and not first_is_4_regular:
+            swap_sections = False
+
+        if swap_sections:
+            primal_data = second_data
+            dual_data = first_data
+        else:
+            primal_data = first_data
+            dual_data = second_data
 
         return primal_data, dual_data
 

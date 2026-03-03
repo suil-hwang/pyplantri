@@ -276,9 +276,9 @@ def _build_plane_graph(
             graph_name="dual",
         )
     else:
-        faces = GraphConverter.extract_faces(
+        faces = GraphConverter.extract_faces_with_twins(
             embedding,
-            twin_map=twin_map_0based,
+            twin_map_0based,
         )
         dual_face_label_signatures = tuple()
 
