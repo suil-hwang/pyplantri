@@ -6,6 +6,7 @@ import tempfile
 import warnings
 from collections import defaultdict
 from pathlib import Path
+from shutil import which
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
 
 from .converter import GraphConverter
@@ -55,6 +56,10 @@ def _find_plantri_exe() -> Path:
                 if direct_exe.exists():
                     return direct_exe
 
+    path_exe = which(exe_name)
+    if path_exe is not None:
+        return Path(path_exe)
+
     # Default path for error messages.
     return Path(__file__).parent / "bin" / exe_name
 
@@ -95,7 +100,7 @@ class Plantri:
         if not self.executable.exists():
             raise FileNotFoundError(
                 f"plantri executable not found: {self.executable}\n"
-                "Run 'pip install -e .' first."
+                "Run 'pip install -e .' first or ensure 'plantri' is available on PATH."
             )
 
     def run(

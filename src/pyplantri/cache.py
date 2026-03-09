@@ -40,7 +40,6 @@ class SafeUnpickler(pickle.Unpickler):
     SAFE_MODULES: Dict[str, Set[str]] = {
         "pyplantri.plane_graph": {
             "PlaneGraph",
-            "CacheMetadata",          # backward compat for old cache files
             "FrozenEdgeMultiplicity",
         },
         "pyplantri.cache": {
@@ -62,11 +61,16 @@ class SafeUnpickler(pickle.Unpickler):
 
     def find_class(self, module: str, name: str) -> Any:
         """Override to restrict loadable classes."""
+        original_module, original_name = module, name
+
+        # Redirect classes that moved to a different module before whitelist checks.
+        module, name = self._MODULE_REDIRECTS.get((module, name), (module, name))
         allowed = self.SAFE_MODULES.get(module, set())
 
         if name not in allowed:
             msg = (
-                f"Attempted to unpickle forbidden class: {module}.{name}\n"
+                f"Attempted to unpickle forbidden class: "
+                f"{original_module}.{original_name}\n"
                 f"Only PlaneGraph and built-in types are allowed.\n"
                 f"This may indicate a malicious or corrupted file."
             )
@@ -74,9 +78,6 @@ class SafeUnpickler(pickle.Unpickler):
                 raise pickle.UnpicklingError(msg)
             else:
                 warnings.warn(msg, SecurityWarning, stacklevel=2)
-
-        # Redirect classes that moved to a different module.
-        module, name = self._MODULE_REDIRECTS.get((module, name), (module, name))
 
         return super().find_class(module, name)
 

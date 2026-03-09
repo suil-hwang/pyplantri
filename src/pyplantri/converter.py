@@ -122,8 +122,16 @@ class GraphConverter:
                     v += output_offset
                 edge_multiplicity[(u, v)] += 1
 
-        # Divide by 2 since edges are counted from both endpoints.
-        return {k: v // 2 for k, v in edge_multiplicity.items()}
+        normalized_edge_multiplicity: Dict[Tuple[int, int], int] = {}
+        for edge, half_edge_count in edge_multiplicity.items():
+            if half_edge_count % 2 != 0:
+                raise ValueError(
+                    f"Asymmetric adjacency for edge {edge}: "
+                    f"half-edge count {half_edge_count}"
+                )
+            normalized_edge_multiplicity[edge] = half_edge_count // 2
+
+        return normalized_edge_multiplicity
 
     @staticmethod
     def to_adjacency_matrix(

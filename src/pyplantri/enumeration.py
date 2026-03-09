@@ -3,13 +3,63 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-from collections import defaultdict
+import sys
+import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 from .builder import _build_plane_graph
 from .plane_graph import PlaneGraph
 from .plantri import Plantri, QuadrangulationEnumerator
+
+
+def _hit_max_count(current_len: int, max_count: Optional[int]) -> bool:
+    """Return True once the requested output count has been reached."""
+    return max_count is not None and current_len >= max_count
+
+
+def _main_module_path() -> Optional[Path]:
+    """Return the importable __main__ path, or None when unavailable."""
+    main_module = sys.modules.get("__main__")
+    if main_module is None:
+        return None
+
+    raw_path = getattr(main_module, "__file__", None)
+    if not raw_path:
+        return None
+
+    try:
+        main_path = Path(raw_path)
+    except (TypeError, ValueError):
+        return None
+
+    if main_path.name.startswith("<") and main_path.name.endswith(">"):
+        return None
+
+    if not main_path.is_absolute():
+        main_path = Path.cwd() / main_path
+
+    return main_path
+
+
+def _resolve_parallel_context(
+    start_method: Optional[str],
+) -> Tuple[Optional[object], str]:
+    """Resolve multiprocessing context and detect unsupported interactive entrypoints."""
+    ctx = (
+        multiprocessing.get_context(start_method)
+        if start_method is not None
+        else multiprocessing.get_context()
+    )
+    method = ctx.get_start_method()
+
+    if method in {"spawn", "forkserver"}:
+        main_path = _main_module_path()
+        if main_path is None or not main_path.exists():
+            return None, method
+
+    return ctx, method
 
 
 def enumerate_plane_graphs(
@@ -20,6 +70,9 @@ def enumerate_plane_graphs(
     include_primal: bool = True,
 ) -> List[PlaneGraph]:
     """Enumerates all n-vertex 4-regular planar multigraphs."""
+    if max_count == 0:
+        return []
+
     if verbose:
         print(f"[Plantri] Enumerating {dual_vertex_count}-vertex 4-regular planar multigraphs...")
 
@@ -46,7 +99,7 @@ def enumerate_plane_graphs(
         if verbose and (graph_id + 1) % 100 == 0:
             print(f"  Processed {graph_id + 1} graphs...")
 
-        if max_count and len(graphs) >= max_count:
+        if _hit_max_count(len(graphs), max_count):
             break
 
     if verbose:
@@ -204,6 +257,10 @@ def _build_graphs_from_raw_lines(
     generated_count = 0
 
     raw_iter = iter(raw_lines)
+    if max_count == 0:
+        _close_if_possible(raw_iter)
+        return graphs, generated_count
+
     try:
         for graph_id, line in enumerate(raw_iter):
             generated_count += 1
@@ -230,7 +287,7 @@ def _build_graphs_from_raw_lines(
                         continue
 
                 graphs.append(graph)
-                if max_count and len(graphs) >= max_count:
+                if _hit_max_count(len(graphs), max_count):
                     break
             except (ValueError, RuntimeError, KeyError, IndexError):
                 continue  # Skip malformed graph lines and continue streaming
@@ -308,6 +365,19 @@ def enumerate_plane_graphs_filtered(
     import time
 
     t_start = time.perf_counter()
+    if max_count == 0:
+        timing = EnumerationTiming(
+            plantri_s=0.0,
+            parse_build_s=0.0,
+            total_s=0.0,
+            graph_count=0,
+        )
+        return FilteredEnumerationResult(
+            graphs=[],
+            generated_count=0,
+            timing=timing,
+        )
+
     primal_vertex_count = dual_vertex_count + 2
     plantri = Plantri()
     raw_stream = _iter_raw_double_code_lines(
@@ -366,11 +436,22 @@ def enumerate_plane_graphs_parallel(
     include_primal: bool = True,
     return_timing: bool = False,
     digon_zero_only: bool = False,
+    start_method: Optional[str] = None,
 ) -> Union[List[PlaneGraph], Tuple[List[PlaneGraph], EnumerationTiming]]:
     """Parallel enumeration of plane graphs."""
     import time
 
     t_start = time.perf_counter()
+    if max_count == 0:
+        if return_timing:
+            timing = EnumerationTiming(
+                plantri_s=0.0,
+                parse_build_s=0.0,
+                total_s=0.0,
+                graph_count=0,
+            )
+            return [], timing
+        return []
 
     # Step 1: Start streaming plantri output.
     primal_vertex_count = dual_vertex_count + 2
@@ -467,34 +548,44 @@ def enumerate_plane_graphs_parallel(
         digon_zero_only=digon_zero_only,
     )
 
-    # Use spawn context for Windows compatibility
-    ctx = multiprocessing.get_context("spawn")
+    ctx, resolved_start_method = _resolve_parallel_context(start_method)
+    if ctx is None:
+        warnings.warn(
+            "enumerate_plane_graphs_parallel() fell back to sequential processing "
+            f"because the active '{resolved_start_method}' start method requires an "
+            "importable __main__ module. Run from a script protected by "
+            "\"if __name__ == '__main__':\" or use n_workers=1 in interactive "
+            "sessions.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        graphs, _ = _build_graphs_from_raw_lines(
+            _iter_prefixed_lines(prefetched, raw_iter),
+            max_count=max_count,
+            validate=validate,
+            include_primal=include_primal,
+            digon_zero_only=digon_zero_only,
+        )
+        if return_timing:
+            t_total = time.perf_counter() - t_start
+            timing = EnumerationTiming(
+                plantri_s=t_plantri,
+                parse_build_s=t_total - t_plantri,
+                total_s=t_total,
+                graph_count=len(graphs),
+            )
+            return graphs, timing
+        return graphs
+
     with ctx.Pool(processes=n_workers) as pool:
         try:
             for chunk_graphs in pool.imap(_process_graph_chunk, chunk_args):
                 all_graphs.extend(chunk_graphs)
-                if max_count and len(all_graphs) >= max_count:
+                if _hit_max_count(len(all_graphs), max_count):
                     all_graphs = all_graphs[:max_count]
                     break
         finally:
             _close_if_possible(chunk_args)
-
-    # Re-assign graph_ids sequentially
-    for i, graph in enumerate(all_graphs):
-        # PlaneGraph is frozen, so we need to create new instances
-        all_graphs[i] = PlaneGraph(
-            num_vertices=graph.num_vertices,
-            edges=graph.edges,
-            edge_multiplicity=graph.edge_multiplicity,
-            embedding=graph.embedding,
-            faces=graph.faces,
-            primal_num_vertices=graph.primal_num_vertices,
-            primal_embedding=graph.primal_embedding,
-            primal_faces=graph.primal_faces,
-            dual_vertex_to_primal_face=graph.dual_vertex_to_primal_face,
-            primal_vertex_to_dual_face=graph.primal_vertex_to_dual_face,
-            graph_id=i,
-        )
 
     if verbose:
         print(f"[Plantri] Found {len(all_graphs)} valid graphs")

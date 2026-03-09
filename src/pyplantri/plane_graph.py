@@ -52,7 +52,10 @@ class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
             u = int(raw_u)
             v = int(raw_v)
             multiplicity = int(raw_multiplicity)
-            normalized[(u, v)] = multiplicity
+            edge = (u, v)
+            if edge in normalized:
+                raise ValueError(f"Duplicate edge key encountered: {edge}")
+            normalized[edge] = multiplicity
 
         ordered_items = tuple(sorted(normalized.items()))
         self._items = ordered_items
@@ -335,6 +338,26 @@ class PlaneGraph:
         if len(self.embedding) != self.num_vertices:
             errors.append(
                 f"Embedding size {len(self.embedding)} does not match num_vertices={self.num_vertices}"
+            )
+
+        if len(set(self.edges)) != len(self.edges):
+            errors.append("edges field contains duplicates")
+        for u, v in self.edges:
+            if u < 0 or v < 0 or u >= self.num_vertices or v >= self.num_vertices:
+                errors.append(
+                    f"edges field contains out-of-range vertex index: "
+                    f"({u}, {v}) for n={self.num_vertices}"
+                )
+            if u > v:
+                errors.append(
+                    f"edges field is not canonical on edge ({u}, {v}); "
+                    "expected u <= v"
+                )
+        expected_edges = tuple(sorted(self.edge_multiplicity.keys()))
+        if self.edges != expected_edges:
+            errors.append(
+                f"edges field mismatch: edges={self.edges!r}, "
+                f"expected={expected_edges!r}"
             )
 
         for v in range(self.num_vertices):
