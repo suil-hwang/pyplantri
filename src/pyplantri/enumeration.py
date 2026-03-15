@@ -439,24 +439,32 @@ def enumerate_plane_graphs_parallel(
     num_workers: Optional[int] = None,
     chunk_size: Optional[int] = None,
     include_primal: bool = True,
-    return_timing: bool = False,
     digon_zero_only: bool = False,
     start_method: Optional[str] = None,
-) -> Union[List[PlaneGraph], Tuple[List[PlaneGraph], EnumerationTiming]]:
+) -> FilteredEnumerationResult:
     """Parallel enumeration of plane graphs."""
     import time
 
+    def _make_result(
+        graphs: List[PlaneGraph],
+        plantri_s: float,
+        t_start: float,
+    ) -> FilteredEnumerationResult:
+        t_total = time.perf_counter() - t_start
+        return FilteredEnumerationResult(
+            graphs=graphs,
+            generated_count=len(graphs),
+            timing=EnumerationTiming(
+                plantri_s=plantri_s,
+                parse_build_s=t_total - plantri_s,
+                total_s=t_total,
+                graph_count=len(graphs),
+            ),
+        )
+
     t_start = time.perf_counter()
     if max_count == 0:
-        if return_timing:
-            timing = EnumerationTiming(
-                plantri_s=0.0,
-                parse_build_s=0.0,
-                total_s=0.0,
-                graph_count=0,
-            )
-            return [], timing
-        return []
+        return _make_result([], 0.0, t_start)
 
     # Step 1: Start streaming plantri output.
     primal_vertex_count = dual_vertex_count + 2
@@ -486,16 +494,7 @@ def enumerate_plane_graphs_parallel(
     )
 
     if not prefetched:
-        if return_timing:
-            t_total = time.perf_counter() - t_start
-            timing = EnumerationTiming(
-                plantri_s=t_plantri,
-                parse_build_s=t_total - t_plantri,
-                total_s=t_total,
-                graph_count=0,
-            )
-            return [], timing
-        return []
+        return _make_result([], t_plantri, t_start)
 
     if verbose:
         mode = ", digon=0" if digon_zero_only else ""
@@ -532,16 +531,7 @@ def enumerate_plane_graphs_parallel(
             include_primal=include_primal,
             digon_zero_only=digon_zero_only,
         )
-        if return_timing:
-            t_total = time.perf_counter() - t_start
-            timing = EnumerationTiming(
-                plantri_s=t_plantri,
-                parse_build_s=t_total - t_plantri,
-                total_s=t_total,
-                graph_count=len(graphs),
-            )
-            return graphs, timing
-        return graphs
+        return _make_result(graphs, t_plantri, t_start)
 
     # Step 2: Stream chunks directly to worker pool.
     all_graphs: List[PlaneGraph] = []
@@ -571,16 +561,7 @@ def enumerate_plane_graphs_parallel(
             include_primal=include_primal,
             digon_zero_only=digon_zero_only,
         )
-        if return_timing:
-            t_total = time.perf_counter() - t_start
-            timing = EnumerationTiming(
-                plantri_s=t_plantri,
-                parse_build_s=t_total - t_plantri,
-                total_s=t_total,
-                graph_count=len(graphs),
-            )
-            return graphs, timing
-        return graphs
+        return _make_result(graphs, t_plantri, t_start)
 
     with ctx.Pool(processes=num_workers) as pool:
         try:
@@ -595,14 +576,4 @@ def enumerate_plane_graphs_parallel(
     if verbose:
         print(f"[Plantri] Found {len(all_graphs)} valid graphs")
 
-    if return_timing:
-        t_total = time.perf_counter() - t_start
-        timing = EnumerationTiming(
-            plantri_s=t_plantri,
-            parse_build_s=t_total - t_plantri,
-            total_s=t_total,
-            graph_count=len(all_graphs),
-        )
-        return all_graphs, timing
-
-    return all_graphs
+    return _make_result(all_graphs, t_plantri, t_start)
