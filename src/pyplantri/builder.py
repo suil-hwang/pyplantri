@@ -8,6 +8,7 @@ from .converter import GraphConverter
 from .plane_graph import PlaneGraph
 from .plantri import ParsedGraphSection
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
+
 LabelSignature = Tuple[Tuple[str, int], ...]
 
 
