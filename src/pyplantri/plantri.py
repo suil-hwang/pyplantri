@@ -16,11 +16,7 @@ from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
 
 @dataclass(frozen=True, slots=True)
 class ParsedGraphSection:
-    """One graph section parsed from plantri -T double_code output.
-
-    All vertex indices are 1-based, matching plantri's native output convention.
-    Use GraphConverter.to_zero_based_embedding() to convert to 0-based.
-    """
+    """One graph section parsed from plantri -T double_code output."""
 
     vertex_count: int
     adjacency_list: Dict[int, List[int]]
@@ -666,12 +662,12 @@ class QuadrangulationEnumerator:
         edge_lists: List[Union[str, bytes]],
     ) -> Tuple[
         Dict[int, List[int]],
-        Dict[Tuple[int, int], Tuple[int, int]],
-        Dict[EdgeLabel, Tuple[Tuple[int, int], Tuple[int, int]]],
+        Dict[HalfEdge, HalfEdge],
+        EdgeLabelPairs,
     ]:
         """Build adjacency, twin map, and edge-label/half-edge pairs."""
         # Collect (vertex, position) pairs where each edge name appears.
-        edge_name_to_half_edges: Dict[EdgeLabel, List[Tuple[int, int]]] = {}
+        edge_name_to_half_edges: Dict[EdgeLabel, List[HalfEdge]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             if isinstance(edges_str, bytes):
                 edge_iter: Iterator[EdgeLabel] = iter(edges_str)
@@ -711,8 +707,8 @@ class QuadrangulationEnumerator:
             adjacency[vertex_idx] = neighbors
 
         # Twin mapping: match two half-edges sharing the same edge name.
-        twin_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
-        edge_label_pairs: Dict[EdgeLabel, Tuple[Tuple[int, int], Tuple[int, int]]] = {}
+        twin_map: Dict[HalfEdge, HalfEdge] = {}
+        edge_label_pairs: EdgeLabelPairs = {}
         for half_edges in edge_name_to_half_edges.values():
             if len(half_edges) == 2:
                 twin_map[half_edges[0]] = half_edges[1]
