@@ -12,8 +12,6 @@ from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, c
 from .converter import GraphConverter
 
 
-# Constant for ASCII character parsing optimization.
-_ORD_A = ord('a')
 EdgeLabel = Union[str, int]
 GraphType = Literal["triangulation", "quadrangulation", "cubic"]
 GraphClass = Literal[
