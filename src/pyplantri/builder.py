@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .converter import GraphConverter
 from .plane_graph import PlaneGraph
-
-EdgeLabel = Union[str, int]
+from .plantri import EdgeLabel
 HalfEdge = Tuple[int, int]
 EdgeLabelPairs = Dict[EdgeLabel, Tuple[HalfEdge, HalfEdge]]
 LabelSignature = Tuple[Tuple[str, int], ...]
