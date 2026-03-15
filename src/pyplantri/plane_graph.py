@@ -28,6 +28,14 @@ class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
             self._items = edge_multiplicity._items
             return
 
+        # Fast path for plain dict from trusted internal code:
+        # skip per-element isinstance checks and int() conversions.
+        if type(edge_multiplicity) is dict:
+            ordered_items = tuple(sorted(edge_multiplicity.items()))
+            self._items = ordered_items
+            self._data = dict(ordered_items)
+            return
+
         items_iter: Iterator[Tuple[Tuple[int, int], int]]
         if isinstance(edge_multiplicity, Mapping):
             items_iter = iter(edge_multiplicity.items())
@@ -141,54 +149,43 @@ class PlaneGraph:
 
     def __post_init__(self) -> None:
         """Normalize mutable inputs to immutable internal representations."""
-        object.__setattr__(self, "num_vertices", int(self.num_vertices))
-        object.__setattr__(self, "primal_num_vertices", int(self.primal_num_vertices))
-        object.__setattr__(self, "graph_id", int(self.graph_id))
+        _set = object.__setattr__
 
-        normalized_edges = tuple((int(u), int(v)) for u, v in self.edges)
-        object.__setattr__(self, "edges", normalized_edges)
+        if not isinstance(self.num_vertices, int):
+            _set(self, "num_vertices", int(self.num_vertices))
+        if not isinstance(self.primal_num_vertices, int):
+            _set(self, "primal_num_vertices", int(self.primal_num_vertices))
+        if not isinstance(self.graph_id, int):
+            _set(self, "graph_id", int(self.graph_id))
 
-        frozen_edge_multiplicity = (
-            self.edge_multiplicity
-            if isinstance(self.edge_multiplicity, FrozenEdgeMultiplicity)
-            else FrozenEdgeMultiplicity(self.edge_multiplicity)
-        )
-        object.__setattr__(self, "edge_multiplicity", frozen_edge_multiplicity)
+        if not isinstance(self.edges, tuple):
+            _set(self, "edges", tuple((int(u), int(v)) for u, v in self.edges))
 
-        normalized_embedding = self._normalize_embedding(
-            self.embedding,
-            expected_size=self.num_vertices,
-        )
-        object.__setattr__(self, "embedding", normalized_embedding)
+        if not isinstance(self.edge_multiplicity, FrozenEdgeMultiplicity):
+            _set(self, "edge_multiplicity", FrozenEdgeMultiplicity(self.edge_multiplicity))
 
-        normalized_faces = tuple(
-            tuple(int(v) for v in face)
-            for face in self.faces
-        )
-        object.__setattr__(self, "faces", normalized_faces)
+        # _normalize_embedding returns early for tuple input of sufficient size.
+        _set(self, "embedding", self._normalize_embedding(
+            self.embedding, expected_size=self.num_vertices,
+        ))
+        _set(self, "primal_embedding", self._normalize_embedding(
+            self.primal_embedding, expected_size=self.primal_num_vertices,
+        ))
 
-        normalized_primal_embedding = self._normalize_embedding(
-            self.primal_embedding,
-            expected_size=self.primal_num_vertices,
-        )
-        object.__setattr__(self, "primal_embedding", normalized_primal_embedding)
-
-        normalized_primal_faces = tuple(
-            tuple(int(v) for v in face)
-            for face in self.primal_faces
-        )
-        object.__setattr__(self, "primal_faces", normalized_primal_faces)
-
-        object.__setattr__(
-            self,
-            "dual_vertex_to_primal_face",
-            tuple(int(idx) for idx in self.dual_vertex_to_primal_face),
-        )
-        object.__setattr__(
-            self,
-            "primal_vertex_to_dual_face",
-            tuple(int(idx) for idx in self.primal_vertex_to_dual_face),
-        )
+        if not isinstance(self.faces, tuple):
+            _set(self, "faces", tuple(
+                tuple(int(v) for v in face) for face in self.faces
+            ))
+        if not isinstance(self.primal_faces, tuple):
+            _set(self, "primal_faces", tuple(
+                tuple(int(v) for v in face) for face in self.primal_faces
+            ))
+        if not isinstance(self.dual_vertex_to_primal_face, tuple):
+            _set(self, "dual_vertex_to_primal_face",
+                 tuple(int(idx) for idx in self.dual_vertex_to_primal_face))
+        if not isinstance(self.primal_vertex_to_dual_face, tuple):
+            _set(self, "primal_vertex_to_dual_face",
+                 tuple(int(idx) for idx in self.primal_vertex_to_dual_face))
 
     @staticmethod
     def _normalize_embedding(
@@ -211,6 +208,10 @@ class PlaneGraph:
                     dense.extend(tuple() for _ in range(idx + 1 - len(dense)))
                 dense[idx] = tuple(int(u) for u in neighbors)
             return tuple(dense)
+
+        # Fast path: already-normalized tuple from a prior _normalize_embedding call.
+        if isinstance(embedding, tuple) and len(embedding) >= expected_size:
+            return embedding
 
         dense_embedding: Embedding = tuple(
             tuple(int(u) for u in neighbors) for neighbors in embedding
