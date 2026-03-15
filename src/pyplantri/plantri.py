@@ -263,7 +263,7 @@ class Plantri:
 class QuadrangulationEnumerator:
     """Enumerates 4-regular plane multigraphs (duals of simple quadrangulations)."""
 
-    OPTIONS = ["-q", "-c2", "-m2", "-T"]
+    _QUADRANGULATION_FLAGS = ["-q", "-c2", "-m2", "-T"]
 
     def __init__(self) -> None:
         """Initializes the SQS enumerator with a Plantri instance."""
@@ -284,7 +284,7 @@ class QuadrangulationEnumerator:
         primal_vertex_count = dual_vertex_count + 2
         return self._plantri.count_from_options(
             primal_vertex_count,
-            options=self.OPTIONS,
+            options=self._QUADRANGULATION_FLAGS,
         )
 
     def iter_raw(self, dual_vertex_count: int) -> Iterator[bytes]:
@@ -294,7 +294,7 @@ class QuadrangulationEnumerator:
         primal_vertex_count = dual_vertex_count + 2
         for line in self._plantri.iter_stdout_lines(
             primal_vertex_count,
-            self.OPTIONS,
+            self._QUADRANGULATION_FLAGS,
         ):
             if _is_ascii_digit_byte(line[0]):
                 yield line

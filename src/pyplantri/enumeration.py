@@ -362,7 +362,7 @@ def enumerate_plane_graphs_filtered(
     raw_stream = _iter_raw_double_code_lines(
         plantri.iter_stdout_lines(
             primal_vertex_count,
-            QuadrangulationEnumerator.OPTIONS,
+            QuadrangulationEnumerator._QUADRANGULATION_FLAGS,
         )
     )
     raw_iter = iter(raw_stream)
@@ -446,7 +446,7 @@ def enumerate_plane_graphs_parallel(
     raw_stream = _iter_raw_double_code_lines(
         plantri.iter_stdout_lines(
             primal_vertex_count,
-            QuadrangulationEnumerator.OPTIONS,
+            QuadrangulationEnumerator._QUADRANGULATION_FLAGS,
         )
     )
     raw_iter = iter(raw_stream)
