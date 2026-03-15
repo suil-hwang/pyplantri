@@ -315,19 +315,19 @@ class PlaneGraph:
             for v, neighbors in self._iter_embedding_items(self.embedding)
         )
 
-    def get_neighbors_cw(self, vertex: int) -> Tuple[int, ...]:
-        """Gets CW-ordered neighbors of a vertex."""
+    def neighbors_cw(self, vertex: int) -> Tuple[int, ...]:
+        """CW-ordered neighbors of a vertex."""
         return self._neighbors_of(self.embedding, vertex)
 
-    def get_neighbors_ccw(self, vertex: int) -> Tuple[int, ...]:
-        """Gets CCW-ordered neighbors of a vertex."""
-        return tuple(reversed(self.get_neighbors_cw(vertex)))
+    def neighbors_ccw(self, vertex: int) -> Tuple[int, ...]:
+        """CCW-ordered neighbors of a vertex."""
+        return tuple(reversed(self.neighbors_cw(vertex)))
 
-    def get_consecutive_pairs(
+    def consecutive_neighbor_pairs(
         self, vertex: int, ccw: bool = False
     ) -> List[Tuple[int, int]]:
-        """Gets consecutive neighbor pairs for cyclic order constraints."""
-        neighbors = self.get_neighbors_ccw(vertex) if ccw else self.get_neighbors_cw(vertex)
+        """Consecutive neighbor pairs for cyclic order constraints."""
+        neighbors = self.neighbors_ccw(vertex) if ccw else self.neighbors_cw(vertex)
         n = len(neighbors)
         return [(neighbors[i], neighbors[(i + 1) % n]) for i in range(n)]
 
