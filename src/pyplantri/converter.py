@@ -1,18 +1,16 @@
 # src/pyplantri/converter.py
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
-
 
 class GraphConverter:
     """Utility for converting plantri output to various formats."""
 
     @staticmethod
     def to_zero_based_embedding(
-        adjacency_list: Dict[int, List[int]],
-    ) -> Dict[int, Tuple[int, ...]]:
+        adjacency_list: dict[int, list[int]],
+    ) -> dict[int, tuple[int, ...]]:
         """Converts 1-based adjacency list to 0-based embedding."""
-        embedding: Dict[int, Tuple[int, ...]] = {}
+        embedding: dict[int, tuple[int, ...]] = {}
         for vertex, neighbors in adjacency_list.items():
             vertex_idx = vertex - 1
             neighbor_tuple = tuple(u - 1 for u in neighbors)
@@ -21,12 +19,12 @@ class GraphConverter:
 
     @staticmethod
     def extract_faces_with_twins(
-        embedding: Dict[int, Tuple[int, ...]],
-        twin_map: Dict[Tuple[int, int], Tuple[int, int]],
-    ) -> Tuple[Tuple[int, ...], ...]:
+        embedding: dict[int, tuple[int, ...]],
+        twin_map: dict[tuple[int, int], tuple[int, int]],
+    ) -> tuple[tuple[int, ...], ...]:
         """Extract faces accurately using position-based half-edge traversal."""
         visited: set = set()
-        faces: List[Tuple[int, ...]] = []
+        faces: list[tuple[int, ...]] = []
 
         # Calculate max iterations for infinite loop detection
         if not embedding:
@@ -42,7 +40,7 @@ class GraphConverter:
                 if (v, i) in visited:
                     continue
 
-                face: List[int] = []
+                face: list[int] = []
                 curr_v, curr_i = v, i
                 iterations = 0
 
@@ -78,7 +76,7 @@ class GraphConverter:
         return tuple(faces)
 
     @staticmethod
-    def is_4_regular(adjacency_list: Dict[int, List[int]]) -> bool:
+    def is_4_regular(adjacency_list: dict[int, list[int]]) -> bool:
         """Checks if graph is 4-regular."""
         if not adjacency_list:
             return False

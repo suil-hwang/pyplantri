@@ -9,7 +9,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any
 
 from .plane_graph import FrozenEdgeMultiplicity, PlaneGraph
 
@@ -39,7 +39,7 @@ class SafeUnpickler(pickle.Unpickler):
     """Restricted unpickler that only allows PlaneGraph and built-in types."""
 
     # Whitelist of allowed modules and classes
-    SAFE_MODULES: Dict[str, Set[str]] = {
+    SAFE_MODULES: dict[str, set[str]] = {
         "pyplantri.plane_graph": {
             "PlaneGraph",
             "FrozenEdgeMultiplicity",
@@ -52,7 +52,7 @@ class SafeUnpickler(pickle.Unpickler):
     }
 
     # Redirect classes that moved between modules during refactoring.
-    _MODULE_REDIRECTS: Dict[Tuple[str, str], Tuple[str, str]] = {
+    _MODULE_REDIRECTS: dict[tuple[str, str], tuple[str, str]] = {
         ("pyplantri.plane_graph", "CacheMetadata"): ("pyplantri.cache", "CacheMetadata"),
     }
 
@@ -114,7 +114,7 @@ def _validate_format_version(metadata: CacheMetadata, filepath: Path) -> None:
 
 
 def _save_pickle(
-    graphs: List[PlaneGraph],
+    graphs: list[PlaneGraph],
     filepath: Path,
     dual_vertex_count: int,
     compress: bool,
@@ -161,7 +161,7 @@ def _save_pickle(
 
 
 def _save_json(
-    graphs: List[PlaneGraph],
+    graphs: list[PlaneGraph],
     filepath: Path,
     dual_vertex_count: int,
 ) -> None:
@@ -191,9 +191,9 @@ def _save_json(
 
 def _load_pickle(
     filepath: Path,
-    max_count: Optional[int],
+    max_count: int | None,
     safe_mode: bool,
-) -> Tuple[List[PlaneGraph], CacheMetadata]:
+) -> tuple[list[PlaneGraph], CacheMetadata]:
     """Pickle deserialization with optional safety restrictions."""
     with open(filepath, "rb") as f:
         # Auto-detect gzip by magic number (0x1f 0x8b).
@@ -239,7 +239,7 @@ def _load_pickle(
     if max_count is not None:
         graphs = graphs[:max_count]
 
-    normalized_graphs: List[PlaneGraph] = []
+    normalized_graphs: list[PlaneGraph] = []
     for graph in graphs:
         if isinstance(graph, PlaneGraph):
             if isinstance(graph.edge_multiplicity, FrozenEdgeMultiplicity):
@@ -259,8 +259,8 @@ def _load_pickle(
 
 def _load_json(
     filepath: Path,
-    max_count: Optional[int],
-) -> Tuple[List[PlaneGraph], CacheMetadata]:
+    max_count: int | None,
+) -> tuple[list[PlaneGraph], CacheMetadata]:
     """JSON deserialization."""
     with open(filepath, "r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -300,8 +300,8 @@ def _load_json(
 
 
 def save_graphs_to_cache(
-    graphs: List[PlaneGraph],
-    filepath: Union[str, Path],
+    graphs: list[PlaneGraph],
+    filepath: str | Path,
     *,
     dual_vertex_count: int = 0,
     compress: bool = True,
@@ -326,13 +326,13 @@ def save_graphs_to_cache(
 
 
 def load_graphs_from_cache(
-    filepath: Union[str, Path],
+    filepath: str | Path,
     *,
-    max_count: Optional[int] = None,
+    max_count: int | None = None,
     use_json: bool = False,
     trusted: bool = False,
     safe_mode: bool = True,
-) -> Tuple[List[PlaneGraph], CacheMetadata]:
+) -> tuple[list[PlaneGraph], CacheMetadata]:
     """Load graphs from cache file with security checks."""
     filepath = Path(filepath)
     if not filepath.exists():

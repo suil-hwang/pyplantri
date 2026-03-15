@@ -7,19 +7,19 @@ import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from collections.abc import Iterable, Iterator
 
 from .builder import _build_plane_graph
 from .plane_graph import PlaneGraph
 from .plantri import Plantri, QuadrangulationEnumerator
 
 
-def _hit_max_count(current_len: int, max_count: Optional[int]) -> bool:
+def _hit_max_count(current_len: int, max_count: int | None) -> bool:
     """Return True once the requested output count has been reached."""
     return max_count is not None and current_len >= max_count
 
 
-def _main_module_path() -> Optional[Path]:
+def _main_module_path() -> Path | None:
     """Return the importable __main__ path, or None when unavailable."""
     main_module = sys.modules.get("__main__")
     if main_module is None:
@@ -44,8 +44,8 @@ def _main_module_path() -> Optional[Path]:
 
 
 def _resolve_parallel_context(
-    start_method: Optional[str],
-) -> Tuple[Optional[multiprocessing.context.BaseContext], str]:
+    start_method: str | None,
+) -> tuple[multiprocessing.context.BaseContext | None, str]:
     """Resolve multiprocessing context and detect unsupported interactive entrypoints."""
     ctx = (
         multiprocessing.get_context(start_method)
@@ -64,11 +64,11 @@ def _resolve_parallel_context(
 
 def enumerate_plane_graphs(
     dual_vertex_count: int,
-    max_count: Optional[int] = None,
+    max_count: int | None = None,
     validate: bool = True,
     verbose: bool = False,
     include_primal: bool = True,
-) -> List[PlaneGraph]:
+) -> list[PlaneGraph]:
     """Enumerates all n-vertex 4-regular planar multigraphs."""
     if max_count == 0:
         return []
@@ -77,7 +77,7 @@ def enumerate_plane_graphs(
         print(f"[Plantri] Enumerating {dual_vertex_count}-vertex 4-regular planar multigraphs...")
 
     enumerator = QuadrangulationEnumerator()
-    graphs: List[PlaneGraph] = []
+    graphs: list[PlaneGraph] = []
 
     for graph_id, (primal_data, dual_data) in enumerate(enumerator.generate_pairs(dual_vertex_count)):
         graph = _build_plane_graph(
@@ -116,7 +116,7 @@ def _close_if_possible(obj: object) -> None:
 
 
 def _iter_raw_double_code_lines(
-    raw_lines: Iterable[Union[str, bytes]],
+    raw_lines: Iterable[str | bytes],
 ) -> Iterator[bytes]:
     """Yield valid double_code lines from a raw line stream."""
     raw_iter = iter(raw_lines)
@@ -133,7 +133,7 @@ def _iter_raw_double_code_lines(
 
 
 def _iter_prefixed_lines(
-    prefix: List[bytes],
+    prefix: list[bytes],
     raw_lines: Iterable[bytes],
 ) -> Iterator[bytes]:
     """Yield prefetched lines first, then continue streaming from raw_lines."""
@@ -154,11 +154,11 @@ def _iter_chunk_args(
     validate: bool,
     include_primal: bool,
     digon_zero_only: bool,
-) -> Iterator[Tuple[List[bytes], int, bool, bool, bool]]:
+) -> Iterator[tuple[list[bytes], int, bool, bool, bool]]:
     """Create chunk arguments lazily from a raw line stream."""
     raw_iter = iter(raw_lines)
     start_id = 0
-    chunk: List[bytes] = []
+    chunk: list[bytes] = []
 
     try:
         for line in raw_iter:
@@ -180,9 +180,9 @@ def _iter_chunk_args(
         _close_if_possible(raw_iter)
 
 
-def _has_digon_from_dual_adjacency(dual_adjacency: Dict[int, List[int]]) -> bool:
+def _has_digon_from_dual_adjacency(dual_adjacency: dict[int, list[int]]) -> bool:
     """Return True if dual adjacency has any parallel edge (digon)."""
-    half_edge_counts: Dict[Tuple[int, int], int] = {}
+    half_edge_counts: dict[tuple[int, int], int] = {}
     for vertex, neighbors in dual_adjacency.items():
         for neighbor in neighbors:
             edge = (vertex, neighbor) if vertex <= neighbor else (neighbor, vertex)
@@ -193,7 +193,7 @@ def _has_digon_from_dual_adjacency(dual_adjacency: Dict[int, List[int]]) -> bool
     return False
 
 
-def _default_parallel_workers(raw_line_count: Optional[int] = None) -> int:
+def _default_parallel_workers(raw_line_count: int | None = None) -> int:
     """Choose a conservative worker count to reduce spawn overhead."""
     cpu_count = os.cpu_count() or 4
     if raw_line_count is None:
@@ -207,7 +207,7 @@ def _default_parallel_workers(raw_line_count: Optional[int] = None) -> int:
     return max(2, min(cpu_count, target))
 
 
-def _default_chunk_size(raw_line_count: Optional[int] = None) -> int:
+def _default_chunk_size(raw_line_count: int | None = None) -> int:
     """Choose chunk size for balanced IPC overhead and parallelism."""
     if raw_line_count is None:
         return 5_000
@@ -219,13 +219,13 @@ def _default_chunk_size(raw_line_count: Optional[int] = None) -> int:
 
 
 def _try_build_single_graph(
-    line: Union[str, bytes],
+    line: str | bytes,
     graph_id: int,
     *,
     include_primal: bool,
     digon_zero_only: bool,
     validate: bool,
-) -> Optional[PlaneGraph]:
+) -> PlaneGraph | None:
     """Attempt to build a PlaneGraph from a raw double_code line.
 
     Returns None if the line is malformed, fails validation, or is
@@ -255,15 +255,15 @@ def _try_build_single_graph(
 
 
 def _build_graphs_from_raw_lines(
-    raw_lines: Iterable[Union[str, bytes]],
+    raw_lines: Iterable[str | bytes],
     *,
-    max_count: Optional[int],
+    max_count: int | None,
     validate: bool,
     include_primal: bool,
     digon_zero_only: bool = False,
-) -> Tuple[List[PlaneGraph], int]:
+) -> tuple[list[PlaneGraph], int]:
     """Build PlaneGraph objects from raw double_code lines."""
-    graphs: List[PlaneGraph] = []
+    graphs: list[PlaneGraph] = []
     generated_count = 0
 
     raw_iter = iter(raw_lines)
@@ -292,11 +292,11 @@ def _build_graphs_from_raw_lines(
 
 
 def _process_graph_chunk(
-    args: Tuple[List[bytes], int, bool, bool, bool]
-) -> List[PlaneGraph]:
+    args: tuple[list[bytes], int, bool, bool, bool]
+) -> list[PlaneGraph]:
     """Process a chunk of raw lines into PlaneGraph objects."""
     lines, start_id, validate, include_primal, digon_zero_only = args
-    graphs: List[PlaneGraph] = []
+    graphs: list[PlaneGraph] = []
 
     for i, line in enumerate(lines):
         graph = _try_build_single_graph(
@@ -326,7 +326,7 @@ class EnumerationTiming:
 class FilteredEnumerationResult:
     """Enumeration result with source count and timing details."""
 
-    graphs: List[PlaneGraph]
+    graphs: list[PlaneGraph]
     generated_count: int
     timing: EnumerationTiming
 
@@ -334,7 +334,7 @@ class FilteredEnumerationResult:
 def enumerate_plane_graphs_filtered(
     dual_vertex_count: int,
     *,
-    max_count: Optional[int] = None,
+    max_count: int | None = None,
     validate: bool = True,
     include_primal: bool = True,
     digon_zero_only: bool = False,
@@ -367,7 +367,7 @@ def enumerate_plane_graphs_filtered(
     )
     raw_iter = iter(raw_stream)
 
-    prefetched: List[bytes] = []
+    prefetched: list[bytes] = []
     try:
         prefetched.append(next(raw_iter))
     except StopIteration:
@@ -407,20 +407,20 @@ def enumerate_plane_graphs_filtered(
 
 def enumerate_plane_graphs_parallel(
     dual_vertex_count: int,
-    max_count: Optional[int] = None,
+    max_count: int | None = None,
     validate: bool = True,
     verbose: bool = False,
-    num_workers: Optional[int] = None,
-    chunk_size: Optional[int] = None,
+    num_workers: int | None = None,
+    chunk_size: int | None = None,
     include_primal: bool = True,
     digon_zero_only: bool = False,
-    start_method: Optional[str] = None,
+    start_method: str | None = None,
 ) -> FilteredEnumerationResult:
     """Parallel enumeration of plane graphs."""
     import time
 
     def _make_result(
-        graphs: List[PlaneGraph],
+        graphs: list[PlaneGraph],
         plantri_s: float,
         t_start: float,
     ) -> FilteredEnumerationResult:
@@ -451,7 +451,7 @@ def enumerate_plane_graphs_parallel(
     )
     raw_iter = iter(raw_stream)
 
-    prefetched: List[bytes] = []
+    prefetched: list[bytes] = []
     try:
         prefetched.append(next(raw_iter))
     except StopIteration:
@@ -508,7 +508,7 @@ def enumerate_plane_graphs_parallel(
         return _make_result(graphs, t_plantri, t_start)
 
     # Step 2: Stream chunks directly to worker pool.
-    all_graphs: List[PlaneGraph] = []
+    all_graphs: list[PlaneGraph] = []
     chunk_args = _iter_chunk_args(
         _iter_prefixed_lines(prefetched, raw_iter),
         chunk_size=effective_chunk_size,

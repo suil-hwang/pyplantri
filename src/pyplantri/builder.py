@@ -2,22 +2,22 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from collections.abc import Iterable, Iterator
 
 from .converter import GraphConverter
 from .plane_graph import PlaneGraph
 from .plantri import ParsedGraphSection
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
 
-LabelSignature = Tuple[Tuple[str, int], ...]
+LabelSignature = tuple[tuple[str, int], ...]
 
 
 def _to_zero_based_twin_map(
-    twin_map_1based: Dict[Tuple[int, int], Tuple[int, int]],
-    embedding: Dict[int, Tuple[int, ...]],
+    twin_map_1based: dict[tuple[int, int], tuple[int, int]],
+    embedding: dict[int, tuple[int, ...]],
     *,
     graph_name: str,
-) -> Dict[Tuple[int, int], Tuple[int, int]]:
+) -> dict[tuple[int, int], tuple[int, int]]:
     """Convert and validate twin_map completeness for -T based enumeration."""
     if not twin_map_1based:
         raise ValueError(
@@ -25,7 +25,7 @@ def _to_zero_based_twin_map(
             "Current plantri pipeline requires -T double_code with full twin labels."
         )
 
-    twin_map_0based: Dict[Tuple[int, int], Tuple[int, int]] = {
+    twin_map_0based: dict[tuple[int, int], tuple[int, int]] = {
         (v - 1, i): (u - 1, j)
         for (v, i), (u, j) in twin_map_1based.items()
     }
@@ -50,9 +50,9 @@ def _to_zero_based_edge_label_pairs(
     }
 
 
-def _build_half_edge_label_map(edge_label_pairs: EdgeLabelPairs) -> Dict[HalfEdge, EdgeLabel]:
+def _build_half_edge_label_map(edge_label_pairs: EdgeLabelPairs) -> dict[HalfEdge, EdgeLabel]:
     """Build half-edge -> edge-label mapping from edge-label pair map."""
-    half_edge_labels: Dict[HalfEdge, EdgeLabel] = {}
+    half_edge_labels: dict[HalfEdge, EdgeLabel] = {}
     for edge_label, (h1, h2) in edge_label_pairs.items():
         prev = half_edge_labels.get(h1)
         if prev is not None and prev != edge_label:
@@ -79,23 +79,23 @@ def _edge_label_token(edge_label: EdgeLabel) -> str:
 
 def _label_signature(labels: Iterable[EdgeLabel]) -> LabelSignature:
     """Convert edge-label multiset into a canonical signature tuple."""
-    counts: Dict[str, int] = defaultdict(int)
+    counts: dict[str, int] = defaultdict(int)
     for edge_label in labels:
         counts[_edge_label_token(edge_label)] += 1
     return tuple(sorted(counts.items()))
 
 
 def _extract_faces_and_label_signatures(
-    embedding: Dict[int, Tuple[int, ...]],
-    twin_map: Dict[HalfEdge, HalfEdge],
-    half_edge_labels: Dict[HalfEdge, EdgeLabel],
+    embedding: dict[int, tuple[int, ...]],
+    twin_map: dict[HalfEdge, HalfEdge],
+    half_edge_labels: dict[HalfEdge, EdgeLabel],
     *,
     graph_name: str,
-) -> Tuple[Tuple[Tuple[int, ...], ...], Tuple[LabelSignature, ...]]:
+) -> tuple[tuple[tuple[int, ...], ...], tuple[LabelSignature, ...]]:
     """Extract faces and edge-label signatures from half-edge traversal."""
     visited: set[HalfEdge] = set()
-    faces: List[Tuple[int, ...]] = []
-    signatures: List[LabelSignature] = []
+    faces: list[tuple[int, ...]] = []
+    signatures: list[LabelSignature] = []
 
     if not embedding:
         return tuple(), tuple()
@@ -109,8 +109,8 @@ def _extract_faces_and_label_signatures(
             if (v, i) in visited:
                 continue
 
-            face: List[int] = []
-            face_labels: List[EdgeLabel] = []
+            face: list[int] = []
+            face_labels: list[EdgeLabel] = []
             curr_v, curr_i = v, i
             iterations = 0
 
@@ -152,19 +152,19 @@ def _extract_faces_and_label_signatures(
 
 
 def _vertex_label_signatures(
-    embedding: Dict[int, Tuple[int, ...]],
-    half_edge_labels: Dict[HalfEdge, EdgeLabel],
+    embedding: dict[int, tuple[int, ...]],
+    half_edge_labels: dict[HalfEdge, EdgeLabel],
     *,
     vertex_count: int,
     graph_name: str,
-) -> Tuple[LabelSignature, ...]:
+) -> tuple[LabelSignature, ...]:
     """Build edge-label signatures for all vertices in index order."""
-    signatures: List[LabelSignature] = []
+    signatures: list[LabelSignature] = []
     for v in range(vertex_count):
         neighbors = embedding.get(v)
         if neighbors is None:
             raise ValueError(f"{graph_name} embedding missing vertex {v}.")
-        labels: List[EdgeLabel] = []
+        labels: list[EdgeLabel] = []
         for i in range(len(neighbors)):
             half_edge = (v, i)
             label = half_edge_labels.get(half_edge)
@@ -178,12 +178,12 @@ def _vertex_label_signatures(
 
 
 def _match_label_signatures(
-    source_signatures: Tuple[LabelSignature, ...],
-    target_signatures: Tuple[LabelSignature, ...],
+    source_signatures: tuple[LabelSignature, ...],
+    target_signatures: tuple[LabelSignature, ...],
     *,
     source_name: str,
     target_name: str,
-) -> Tuple[int, ...]:
+) -> tuple[int, ...]:
     """Match source entities to target entities by edge-label multiset signature."""
     if len(source_signatures) != len(target_signatures):
         raise ValueError(
@@ -191,12 +191,12 @@ def _match_label_signatures(
             f"count mismatch {len(source_signatures)} vs {len(target_signatures)}."
         )
 
-    target_by_signature: Dict[LabelSignature, List[int]] = defaultdict(list)
+    target_by_signature: dict[LabelSignature, list[int]] = defaultdict(list)
     for target_idx, signature in enumerate(target_signatures):
         target_by_signature[signature].append(target_idx)
 
     used_targets: set[int] = set()
-    mapping: List[int] = []
+    mapping: list[int] = []
     for source_idx, signature in enumerate(source_signatures):
         candidates = [
             target_idx
@@ -244,13 +244,13 @@ def _build_plane_graph(
     )
     dual_half_edge_labels = _build_half_edge_label_map(dual_edge_label_pairs_0based)
 
-    edge_multiplicity_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+    edge_multiplicity_counts: dict[tuple[int, int], int] = defaultdict(int)
     for u, neighbors in embedding.items():
         for v in neighbors:
             if u <= v:
                 edge_multiplicity_counts[(u, v)] += 1
 
-    edge_multiplicity: Dict[Tuple[int, int], int] = dict(edge_multiplicity_counts)
+    edge_multiplicity: dict[tuple[int, int], int] = dict(edge_multiplicity_counts)
     edges = tuple(sorted(edge_multiplicity.keys()))
     if dual_half_edge_labels:
         faces, dual_face_label_signatures = _extract_faces_and_label_signatures(
@@ -267,10 +267,10 @@ def _build_plane_graph(
         dual_face_label_signatures = tuple()
 
     primal_num_vertices = 0
-    primal_embedding: Dict[int, Tuple[int, ...]] = {}
-    primal_faces: Tuple[Tuple[int, ...], ...] = tuple()
-    dual_vertex_to_primal_face: Tuple[int, ...] = tuple()
-    primal_vertex_to_dual_face: Tuple[int, ...] = tuple()
+    primal_embedding: dict[int, tuple[int, ...]] = {}
+    primal_faces: tuple[tuple[int, ...], ...] = tuple()
+    dual_vertex_to_primal_face: tuple[int, ...] = tuple()
+    primal_vertex_to_dual_face: tuple[int, ...] = tuple()
 
     if include_primal:
         primal_adj_1based = primal_data.adjacency_list

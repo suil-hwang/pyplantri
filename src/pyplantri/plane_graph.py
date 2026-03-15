@@ -2,26 +2,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Iterator, List, Mapping, Optional, Tuple, Union
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 from .types import Embedding
 
 # Internal normalization input type.
-EmbeddingInput = Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ...]]]
+EmbeddingInput = dict[int, tuple[int, ...]] | Embedding | list[tuple[int, ...]]
 
 
-class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
+class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
     """Immutable mapping wrapper for edge multiplicities."""
 
     __slots__ = ("_data", "_items")
 
     def __init__(
         self,
-        edge_multiplicity: Union[
-            Mapping[Tuple[int, int], int],
-            List[Tuple[Tuple[int, int], int]],
-            Tuple[Tuple[Tuple[int, int], int], ...],
-        ],
+        edge_multiplicity: (
+            Mapping[tuple[int, int], int]
+            | list[tuple[tuple[int, int], int]]
+            | tuple[tuple[tuple[int, int], int], ...]
+        ),
     ) -> None:
         if isinstance(edge_multiplicity, FrozenEdgeMultiplicity):
             self._data = edge_multiplicity._data
@@ -36,13 +37,13 @@ class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
             self._data = dict(ordered_items)
             return
 
-        items_iter: Iterator[Tuple[Tuple[int, int], int]]
+        items_iter: Iterator[tuple[tuple[int, int], int]]
         if isinstance(edge_multiplicity, Mapping):
             items_iter = iter(edge_multiplicity.items())
         else:
             items_iter = iter(edge_multiplicity)
 
-        normalized: Dict[Tuple[int, int], int] = {}
+        normalized: dict[tuple[int, int], int] = {}
         for raw_edge, raw_multiplicity in items_iter:
             if not isinstance(raw_edge, tuple) or len(raw_edge) != 2:
                 raise TypeError(
@@ -72,10 +73,10 @@ class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
         self._items = ordered_items
         self._data = dict(ordered_items)
 
-    def __getitem__(self, edge: Tuple[int, int]) -> int:
+    def __getitem__(self, edge: tuple[int, int]) -> int:
         return self._data[edge]
 
-    def __iter__(self) -> Iterator[Tuple[int, int]]:
+    def __iter__(self) -> Iterator[tuple[int, int]]:
         for edge, _ in self._items:
             yield edge
 
@@ -92,13 +93,13 @@ class FrozenEdgeMultiplicity(Mapping[Tuple[int, int], int]):
     def __hash__(self) -> int:
         return hash(self._items)
 
-    def __reduce__(self) -> Tuple[Any, Tuple[Tuple[Tuple[int, int], int], ...]]:
+    def __reduce__(self) -> tuple[Any, tuple[tuple[tuple[int, int], int], ...]]:
         return (self.__class__, (self._items,))
 
     def __repr__(self) -> str:
         return f"FrozenEdgeMultiplicity({dict(self._items)!r})"
 
-    def to_dict(self) -> Dict[Tuple[int, int], int]:
+    def to_dict(self) -> dict[tuple[int, int], int]:
         return dict(self._items)
 
 
@@ -131,19 +132,19 @@ class PlaneGraph:
     """
 
     num_vertices: int
-    edges: Tuple[Tuple[int, int], ...]
-    edge_multiplicity: Mapping[Tuple[int, int], int]
+    edges: tuple[tuple[int, int], ...]
+    edge_multiplicity: Mapping[tuple[int, int], int]
     embedding: Embedding  # CW cyclic order at each vertex.
-    faces: Tuple[Tuple[int, ...], ...]
+    faces: tuple[tuple[int, ...], ...]
 
     primal_num_vertices: int
     primal_embedding: Embedding
-    primal_faces: Tuple[Tuple[int, ...], ...]
-    dual_vertex_to_primal_face: Tuple[int, ...] = tuple()
-    primal_vertex_to_dual_face: Tuple[int, ...] = tuple()
+    primal_faces: tuple[tuple[int, ...], ...]
+    dual_vertex_to_primal_face: tuple[int, ...] = tuple()
+    primal_vertex_to_dual_face: tuple[int, ...] = tuple()
 
     graph_id: int = 0
-    _double_edges_cache: Optional[FrozenSet[Tuple[int, int]]] = field(
+    _double_edges_cache: frozenset[tuple[int, int]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -199,7 +200,7 @@ class PlaneGraph:
             if embedding:
                 max_index = max(int(v) for v in embedding.keys()) + 1
                 size = max(size, max_index)
-            dense: List[Tuple[int, ...]] = [tuple() for _ in range(size)]
+            dense: list[tuple[int, ...]] = [tuple() for _ in range(size)]
             for vertex, neighbors in embedding.items():
                 idx = int(vertex)
                 if idx < 0:
@@ -223,7 +224,7 @@ class PlaneGraph:
         return dense_embedding
 
     @staticmethod
-    def _iter_embedding_items(embedding: Union[Dict[int, Tuple[int, ...]], Embedding]) -> Iterator[Tuple[int, Tuple[int, ...]]]:
+    def _iter_embedding_items(embedding: dict[int, tuple[int, ...]] | Embedding) -> Iterator[tuple[int, tuple[int, ...]]]:
         """Iterate (vertex, neighbors) for dict or dense embedding containers."""
         if isinstance(embedding, dict):
             for v, neighbors in embedding.items():
@@ -233,7 +234,7 @@ class PlaneGraph:
                 yield v, neighbors
 
     @staticmethod
-    def _iter_embedding_values(embedding: Union[Dict[int, Tuple[int, ...]], Embedding]) -> Iterator[Tuple[int, ...]]:
+    def _iter_embedding_values(embedding: dict[int, tuple[int, ...]] | Embedding) -> Iterator[tuple[int, ...]]:
         """Iterate neighbor tuples for dict or dense embedding containers."""
         if isinstance(embedding, dict):
             for neighbors in embedding.values():
@@ -243,7 +244,7 @@ class PlaneGraph:
                 yield neighbors
 
     @staticmethod
-    def _has_vertex(embedding: Union[Dict[int, Tuple[int, ...]], Embedding], vertex: int) -> bool:
+    def _has_vertex(embedding: dict[int, tuple[int, ...]] | Embedding, vertex: int) -> bool:
         """Return True if vertex exists in embedding."""
         if isinstance(embedding, dict):
             return vertex in embedding
@@ -251,9 +252,9 @@ class PlaneGraph:
 
     @staticmethod
     def _neighbors_of(
-        embedding: Union[Dict[int, Tuple[int, ...]], Embedding],
+        embedding: dict[int, tuple[int, ...]] | Embedding,
         vertex: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         """Get neighbors for vertex from dict or dense embedding containers."""
         if isinstance(embedding, dict):
             neighbors = embedding.get(vertex, tuple())
@@ -268,7 +269,7 @@ class PlaneGraph:
         return len(self.faces)
 
     @property
-    def double_edges(self) -> FrozenSet[Tuple[int, int]]:
+    def double_edges(self) -> frozenset[tuple[int, int]]:
         """Set of double edges (digons)."""
         cache = getattr(self, "_double_edges_cache", None)
         if cache is None:
@@ -293,17 +294,17 @@ class PlaneGraph:
             for v, neighbors in self._iter_embedding_items(self.embedding)
         )
 
-    def neighbors_cw(self, vertex: int) -> Tuple[int, ...]:
+    def neighbors_cw(self, vertex: int) -> tuple[int, ...]:
         """CW-ordered neighbors of a vertex."""
         return self._neighbors_of(self.embedding, vertex)
 
-    def neighbors_ccw(self, vertex: int) -> Tuple[int, ...]:
+    def neighbors_ccw(self, vertex: int) -> tuple[int, ...]:
         """CCW-ordered neighbors of a vertex."""
         return tuple(reversed(self.neighbors_cw(vertex)))
 
-    def validate(self) -> Tuple[bool, List[str]]:
+    def validate(self) -> tuple[bool, list[str]]:
         """Validates graph invariants."""
-        errors: List[str] = []
+        errors: list[str] = []
 
         if len(self.embedding) != self.num_vertices:
             errors.append(
@@ -368,8 +369,8 @@ class PlaneGraph:
                         f"{vertex} for n={self.num_vertices}"
                     )
 
-        directed_counts: Dict[Tuple[int, int], int] = {}
-        undirected_half_edge_counts: Dict[Tuple[int, int], int] = {}
+        directed_counts: dict[tuple[int, int], int] = {}
+        undirected_half_edge_counts: dict[tuple[int, int], int] = {}
 
         for v, neighbors in self._iter_embedding_items(self.embedding):
             if v in neighbors:
@@ -461,8 +462,8 @@ class PlaneGraph:
                             f"Primal face {face_idx} contains out-of-range vertex {vertex}"
                         )
 
-            primal_directed_counts: Dict[Tuple[int, int], int] = {}
-            primal_undirected_half_edge_counts: Dict[Tuple[int, int], int] = {}
+            primal_directed_counts: dict[tuple[int, int], int] = {}
+            primal_undirected_half_edge_counts: dict[tuple[int, int], int] = {}
 
             for v in range(self.primal_num_vertices):
                 if not self._has_vertex(self.primal_embedding, v):
@@ -574,7 +575,7 @@ class PlaneGraph:
 
         return len(errors) == 0, errors
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Converts to dictionary for JSON serialization."""
         return {
             "num_vertices": self.num_vertices,
@@ -599,14 +600,14 @@ class PlaneGraph:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "PlaneGraph":
+    def from_dict(cls, data: dict) -> PlaneGraph:
         """Creates PlaneGraph from dictionary."""
         # Parse edges as explicit 2-tuples for type safety.
-        parsed_edges: List[Tuple[int, int]] = [
+        parsed_edges: list[tuple[int, int]] = [
             (int(e[0]), int(e[1])) for e in data["edges"]
         ]
         # Parse edge_multiplicity keys as explicit 2-tuples.
-        parsed_edge_multiplicity: Dict[Tuple[int, int], int] = {
+        parsed_edge_multiplicity: dict[tuple[int, int], int] = {
             (int(parts[0]), int(parts[1])): int(v)
             for k, v in data["edge_multiplicity"].items()
             for parts in [k.split(",")]

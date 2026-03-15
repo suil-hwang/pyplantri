@@ -9,7 +9,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union, cast
+from collections.abc import Iterator
+from typing import Literal, cast
 
 from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
@@ -20,8 +21,8 @@ class ParsedGraphSection:
     """One graph section parsed from plantri -T double_code output."""
 
     vertex_count: int
-    adjacency_list: Dict[int, List[int]]
-    twin_map: Dict[HalfEdge, HalfEdge]
+    adjacency_list: dict[int, list[int]]
+    twin_map: dict[HalfEdge, HalfEdge]
     edge_label_pairs: EdgeLabelPairs
 
 
@@ -74,7 +75,7 @@ class Plantri:
     """Wrapper for the plantri executable."""
     _COUNT_INCOMPATIBLE_OUTPUT_OPTIONS = frozenset({"-a", "-g", "-s", "-E", "-T", "-u"})
 
-    def __init__(self, executable: Optional[Path] = None) -> None:
+    def __init__(self, executable: Path | None = None) -> None:
         """Initializes Plantri with the executable path."""
         self.executable = Path(executable) if executable else _PLANTRI_EXE
         if not self.executable.exists():
@@ -86,7 +87,7 @@ class Plantri:
     def run(
         self,
         n_vertices: int,
-        options: Optional[List[str]] = None,
+        options: list[str] | None = None,
         output_format: Literal["planar_code", "ascii"] = "planar_code",
     ) -> bytes:
         """Runs plantri with the given parameters."""
@@ -111,9 +112,9 @@ class Plantri:
         self,
         n_vertices: int,
         *,
-        options: Optional[List[str]],
+        options: list[str] | None,
         output_format: Literal["planar_code", "ascii"],
-    ) -> List[str]:
+    ) -> list[str]:
         """Builds a plantri command line for the given options."""
         if output_format not in ("planar_code", "ascii"):
             raise ValueError(
@@ -137,7 +138,7 @@ class Plantri:
     def iter_stdout_lines(
         self,
         n_vertices: int,
-        options: Optional[List[str]] = None,
+        options: list[str] | None = None,
         output_format: Literal["planar_code", "ascii"] = "planar_code",
     ) -> Iterator[bytes]:
         """Streams non-empty stdout lines from plantri without buffering all output."""
@@ -198,7 +199,7 @@ class Plantri:
     def count_from_options(
         self,
         n_vertices: int,
-        options: Optional[List[str]] = None,
+        options: list[str] | None = None,
         timeout: float = 3600.0,
     ) -> int:
         """Counts graphs with arbitrary generation options via plantri ``-u``."""
@@ -272,7 +273,7 @@ class QuadrangulationEnumerator:
     def generate_pairs(
         self,
         dual_vertex_count: int
-    ) -> Iterator[Tuple[ParsedGraphSection, ParsedGraphSection]]:
+    ) -> Iterator[tuple[ParsedGraphSection, ParsedGraphSection]]:
         """Generates primal (Q) and dual (Q*) graph pairs."""
         for line in self.iter_raw(dual_vertex_count):
             primal, dual = self.parse_double_code(line)
@@ -301,8 +302,8 @@ class QuadrangulationEnumerator:
 
     @staticmethod
     def parse_double_code(
-        double_code_line: Union[str, bytes],
-    ) -> Tuple[ParsedGraphSection, ParsedGraphSection]:
+        double_code_line: str | bytes,
+    ) -> tuple[ParsedGraphSection, ParsedGraphSection]:
         """Parses plantri double_code output to adjacency lists with twin maps."""
         parts = double_code_line.split()
         if len(parts) < 2:
@@ -319,7 +320,7 @@ class QuadrangulationEnumerator:
 
         # Collect first graph edge lists.
         idx = 1
-        first_edge_lists: List[Union[str, bytes]] = []
+        first_edge_lists: list[str | bytes] = []
         while idx < len(parts):
             head = parts[idx][0]
             if isinstance(head, str):
@@ -344,7 +345,7 @@ class QuadrangulationEnumerator:
         second_vertex_count = int(parts[idx])
         idx += 1
 
-        second_edge_lists = cast(List[Union[str, bytes]], list(parts[idx:]))
+        second_edge_lists = cast(list[str | bytes], list(parts[idx:]))
 
         # Build adjacency lists AND twin maps from edge name mappings.
         first_adj, first_twins, first_edge_label_pairs = (
@@ -409,7 +410,7 @@ class QuadrangulationEnumerator:
         return primal_data, dual_data
 
     @staticmethod
-    def _format_edge_name_for_error(edge_name: Union[str, int]) -> str:
+    def _format_edge_name_for_error(edge_name: str | int) -> str:
         """Formats an edge label for stable, readable error messages."""
         if isinstance(edge_name, str):
             return edge_name
@@ -419,15 +420,15 @@ class QuadrangulationEnumerator:
 
     @staticmethod
     def _build_adjacency_and_twins(
-        edge_lists: List[Union[str, bytes]],
-    ) -> Tuple[
-        Dict[int, List[int]],
-        Dict[HalfEdge, HalfEdge],
+        edge_lists: list[str | bytes],
+    ) -> tuple[
+        dict[int, list[int]],
+        dict[HalfEdge, HalfEdge],
         EdgeLabelPairs,
     ]:
         """Build adjacency, twin map, and edge-label/half-edge pairs."""
         # Collect (vertex, position) pairs where each edge name appears.
-        edge_name_to_half_edges: Dict[EdgeLabel, List[HalfEdge]] = {}
+        edge_name_to_half_edges: dict[EdgeLabel, list[HalfEdge]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             if isinstance(edges_str, bytes):
                 edge_iter: Iterator[EdgeLabel] = iter(edges_str)
@@ -441,9 +442,9 @@ class QuadrangulationEnumerator:
                     slots.append((vertex_idx, pos))
 
         # Build adjacency list.
-        adjacency: Dict[int, List[int]] = {}
+        adjacency: dict[int, list[int]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            neighbors: List[int] = []
+            neighbors: list[int] = []
             if isinstance(edges_str, bytes):
                 edge_iter = iter(edges_str)
             else:
@@ -467,7 +468,7 @@ class QuadrangulationEnumerator:
             adjacency[vertex_idx] = neighbors
 
         # Twin mapping: match two half-edges sharing the same edge name.
-        twin_map: Dict[HalfEdge, HalfEdge] = {}
+        twin_map: dict[HalfEdge, HalfEdge] = {}
         edge_label_pairs: EdgeLabelPairs = {}
         for half_edges in edge_name_to_half_edges.values():
             if len(half_edges) == 2:
