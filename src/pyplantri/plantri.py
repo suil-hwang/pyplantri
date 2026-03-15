@@ -5,12 +5,11 @@ import os
 import re
 import subprocess
 import tempfile
-import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
+from typing import Dict, Iterator, List, Literal, Optional, Tuple, Union, cast
 
 from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
@@ -24,17 +23,6 @@ class ParsedGraphSection:
     adjacency_list: Dict[int, List[int]]
     twin_map: Dict[HalfEdge, HalfEdge]
     edge_label_pairs: EdgeLabelPairs
-
-
-GraphType = Literal["triangulation", "quadrangulation", "cubic"]
-GraphClass = Literal[
-    "triangulation",
-    "quadrangulation",
-    "cubic",
-    "eulerian",
-    "eulerian_triangulation",
-    "bipartite_plane",
-]
 
 
 def _is_ascii_digit_byte(value: int) -> bool:
@@ -89,21 +77,6 @@ class PlantriError(Exception):
 class Plantri:
     """Wrapper for the plantri executable."""
     _COUNT_INCOMPATIBLE_OUTPUT_OPTIONS = frozenset({"-a", "-g", "-s", "-E", "-T", "-u"})
-    _GRAPH_CLASS_OPTIONS: Dict[str, Tuple[str, ...]] = {
-        # Simple triangulations.
-        "triangulation": tuple(),
-        # Simple quadrangulations.
-        "quadrangulation": ("-q",),
-        # Cubic plane graphs are duals of triangulations.
-        "cubic": ("-d",),
-        # plantri -b : Eulerian triangulations.
-        "eulerian": ("-b",),
-        # plantri -bp : simple bipartite plane graphs (separate class dispatch).
-        "bipartite_plane": ("-bp",),
-    }
-    _GRAPH_CLASS_ALIASES: Dict[str, str] = {
-        "eulerian_triangulation": "eulerian",
-    }
 
     def __init__(self, executable: Optional[Path] = None) -> None:
         """Initializes Plantri with the executable path."""
@@ -226,137 +199,6 @@ class Plantri:
                         f"{stderr_excerpt}"
                     )
 
-    def _normalize_graph_class(self, graph_class: str) -> str:
-        """Validate and normalize graph class alias names."""
-        canonical = self._GRAPH_CLASS_ALIASES.get(graph_class, graph_class)
-        if canonical not in self._GRAPH_CLASS_OPTIONS:
-            allowed = ", ".join(
-                sorted(self._GRAPH_CLASS_OPTIONS.keys() | self._GRAPH_CLASS_ALIASES.keys())
-            )
-            raise ValueError(
-                f"Unsupported graph_class={graph_class!r}. "
-                f"Allowed values: {allowed}."
-            )
-        return canonical
-
-    def _resolve_graph_class(
-        self,
-        *,
-        graph_class: Optional[GraphClass],
-        graph_type: GraphType,
-        bipartite: bool,
-    ) -> str:
-        """Resolve legacy graph_type/bipartite into a canonical graph_class."""
-        if graph_class is not None:
-            if bipartite:
-                raise ValueError(
-                    "bipartite=True cannot be combined with graph_class. "
-                    "Use graph_class='bipartite_plane' instead."
-                )
-            return self._normalize_graph_class(graph_class)
-
-        if graph_type == "triangulation":
-            if bipartite:
-                warnings.warn(
-                    "bipartite=True is deprecated. "
-                    "Use graph_class='bipartite_plane'.",
-                    DeprecationWarning,
-                    stacklevel=3,
-                )
-                return "bipartite_plane"
-            return "triangulation"
-
-        if graph_type == "quadrangulation":
-            if bipartite:
-                raise ValueError(
-                    "graph_type='quadrangulation' is incompatible with bipartite=True "
-                    "(plantri: -q and -bp are incompatible). "
-                    "Use graph_class to choose a valid class."
-                )
-            return "quadrangulation"
-
-        if graph_type == "cubic":
-            if bipartite:
-                raise ValueError(
-                    "Ambiguous legacy options: graph_type='cubic' with bipartite=True. "
-                    "Use graph_class='eulerian' with dual=True for bipartite cubic output, "
-                    "or graph_class='bipartite_plane' for general bipartite plane graphs."
-                )
-            warnings.warn(
-                "graph_type='cubic' now means cubic graphs (triangulation dual, -d). "
-                "To get plantri -b behavior, use graph_class='eulerian'.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            return "cubic"
-
-        raise ValueError(f"Unsupported graph_type={graph_type!r}.")
-
-    def _build_generation_options(
-        self,
-        *,
-        graph_class: str,
-        connectivity: Optional[int],
-        dual: bool,
-        minimum_degree: Optional[int],
-    ) -> List[str]:
-        """Build generation options from canonical graph class and constraints."""
-        options = list(self._GRAPH_CLASS_OPTIONS[graph_class])
-
-        if connectivity is not None:
-            options.append(f"-c{connectivity}")
-        if minimum_degree is not None:
-            options.append(f"-m{minimum_degree}")
-        if dual and "-d" not in options:
-            options.append("-d")
-
-        return options
-
-    def count(
-        self,
-        n_vertices: int,
-        graph_type: GraphType = "triangulation",
-        connectivity: Optional[int] = 3,
-        dual: bool = False,
-        minimum_degree: Optional[int] = None,
-        bipartite: bool = False,
-        timeout: float = 3600.0,
-        *,
-        graph_class: Optional[GraphClass] = None,
-    ) -> int:
-        """Count output objects for a selected plantri graph class.
-
-        Args:
-            graph_type: Legacy API selector. Kept for compatibility.
-                - ``"triangulation"``
-                - ``"quadrangulation"``
-                - ``"cubic"`` (corrected to mean triangulation dual: ``-d``)
-            graph_class: Recommended explicit class selector:
-                - ``"triangulation"``
-                - ``"quadrangulation"``
-                - ``"cubic"`` (triangulation dual)
-                - ``"eulerian"`` / ``"eulerian_triangulation"`` (plantri ``-b``)
-                - ``"bipartite_plane"`` (plantri ``-bp``)
-            bipartite: Legacy flag. Deprecated; use ``graph_class='bipartite_plane'``.
-        """
-        resolved_graph_class = self._resolve_graph_class(
-            graph_class=graph_class,
-            graph_type=graph_type,
-            bipartite=bipartite,
-        )
-        options = self._build_generation_options(
-            graph_class=resolved_graph_class,
-            connectivity=connectivity,
-            dual=dual,
-            minimum_degree=minimum_degree,
-        )
-
-        return self.count_from_options(
-            n_vertices,
-            options=options,
-            timeout=timeout,
-        )
-
     def count_from_options(
         self,
         n_vertices: int,
@@ -421,85 +263,6 @@ class Plantri:
                 f"Unexpected error during plantri execution: {type(e).__name__}: {e}"
             ) from e
 
-    def generate_graphs(
-        self,
-        n_vertices: int,
-        graph_type: GraphType = "triangulation",
-        connectivity: Optional[int] = None,
-        dual: bool = False,
-        minimum_degree: Optional[int] = None,
-        bipartite: bool = False,
-        *,
-        graph_class: Optional[GraphClass] = None,
-    ) -> Iterator[str]:
-        """Generate ASCII graphs for a selected plantri graph class.
-
-        ``graph_class`` is the recommended selector; ``graph_type`` and
-        ``bipartite`` are legacy compatibility parameters.
-        """
-        resolved_graph_class = self._resolve_graph_class(
-            graph_class=graph_class,
-            graph_type=graph_type,
-            bipartite=bipartite,
-        )
-        options = ["-a"]
-        options.extend(
-            self._build_generation_options(
-                graph_class=resolved_graph_class,
-                connectivity=connectivity,
-                dual=dual,
-                minimum_degree=minimum_degree,
-            )
-        )
-
-        # Parse text output without UTF-8 assumptions. plantri emits byte labels.
-        # Decode per line with latin-1 only when yielding strings.
-        current_graph_lines: List[bytes] = []
-        for line in self.iter_stdout_lines(
-            n_vertices,
-            options,
-            output_format="ascii",
-        ):
-
-            # Legacy format with "Graph ..." headers.
-            if line.startswith(b"Graph"):
-                if current_graph_lines:
-                    yield "\n".join(
-                        chunk.decode("latin-1") for chunk in current_graph_lines
-                    )
-                current_graph_lines = [line]
-                continue
-
-            # Standard plantri -a line: one graph per line, starts with vertex count.
-            if _is_ascii_digit_byte(line[0]) and not current_graph_lines:
-                yield line.decode("latin-1")
-                continue
-
-            # Continuation lines for legacy block formats.
-            if current_graph_lines:
-                current_graph_lines.append(line)
-
-        if current_graph_lines:
-            yield "\n".join(chunk.decode("latin-1") for chunk in current_graph_lines)
-
-    def generate_planar_code(
-        self,
-        n_vertices: int,
-        graph_type: Literal["triangulation", "quadrangulation"] = "triangulation",
-        connectivity: Optional[int] = None,
-        dual: bool = False,
-    ) -> bytes:
-        """Generates graphs in planar_code binary format."""
-        options = []
-
-        if graph_type == "quadrangulation":
-            options.append("-q")
-        if connectivity is not None:
-            options.append(f"-c{connectivity}")
-        if dual:
-            options.append("-d")
-
-        return self.run(n_vertices, options, output_format="planar_code")
 
 
 class QuadrangulationEnumerator:

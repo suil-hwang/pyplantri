@@ -138,9 +138,6 @@ class PlaneGraph:
     _double_edges_cache: Optional[FrozenSet[Tuple[int, int]]] = field(
         default=None, init=False, repr=False, compare=False
     )
-    _single_edges_cache: Optional[FrozenSet[Tuple[int, int]]] = field(
-        default=None, init=False, repr=False, compare=False
-    )
 
     def __post_init__(self) -> None:
         """Normalize mutable inputs to immutable internal representations."""
@@ -265,16 +262,6 @@ class PlaneGraph:
         return tuple()
 
     @property
-    def num_edges(self) -> int:
-        """Total edge count including multiplicity."""
-        return sum(self.edge_multiplicity.values())
-
-    @property
-    def num_simple_edges(self) -> int:
-        """Unique edge count (without multiplicity)."""
-        return len(self.edges)
-
-    @property
     def num_faces(self) -> int:
         """Face count (should be n + 2 by Euler's formula)."""
         return len(self.faces)
@@ -288,19 +275,6 @@ class PlaneGraph:
             object.__setattr__(
                 self,
                 "_double_edges_cache",
-                cache,
-            )
-        return cache
-
-    @property
-    def single_edges(self) -> FrozenSet[Tuple[int, int]]:
-        """Set of single edges."""
-        cache = getattr(self, "_single_edges_cache", None)
-        if cache is None:
-            cache = frozenset(e for e, m in self.edge_multiplicity.items() if m == 1)
-            object.__setattr__(
-                self,
-                "_single_edges_cache",
                 cache,
             )
         return cache
@@ -325,14 +299,6 @@ class PlaneGraph:
     def neighbors_ccw(self, vertex: int) -> Tuple[int, ...]:
         """CCW-ordered neighbors of a vertex."""
         return tuple(reversed(self.neighbors_cw(vertex)))
-
-    def consecutive_neighbor_pairs(
-        self, vertex: int, ccw: bool = False
-    ) -> List[Tuple[int, int]]:
-        """Consecutive neighbor pairs for cyclic order constraints."""
-        neighbors = self.neighbors_ccw(vertex) if ccw else self.neighbors_cw(vertex)
-        n = len(neighbors)
-        return [(neighbors[i], neighbors[(i + 1) % n]) for i in range(n)]
 
     def validate(self) -> Tuple[bool, List[str]]:
         """Validates graph invariants."""

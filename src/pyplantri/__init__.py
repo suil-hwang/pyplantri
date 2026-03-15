@@ -11,7 +11,6 @@ from .enumeration import (
     enumerate_plane_graphs,
     enumerate_plane_graphs_filtered,
     enumerate_plane_graphs_parallel,
-    iter_plane_graphs,
 )
 from .plane_graph import (
     FrozenEdgeMultiplicity,
@@ -44,7 +43,6 @@ __all__ = [
     "enumerate_plane_graphs",
     "enumerate_plane_graphs_filtered",
     "enumerate_plane_graphs_parallel",
-    "iter_plane_graphs",
     "FilteredEnumerationResult",
     "EnumerationTiming",
 ]

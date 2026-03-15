@@ -108,32 +108,6 @@ def enumerate_plane_graphs(
     return graphs
 
 
-def iter_plane_graphs(
-    dual_vertex_count: int,
-    validate: bool = True,
-    include_primal: bool = True,
-) -> Iterator[PlaneGraph]:
-    """Iterates over PlaneGraph objects."""
-    enumerator = QuadrangulationEnumerator()
-
-    for graph_id, (primal_data, dual_data) in enumerate(
-        enumerator.generate_pairs(dual_vertex_count)
-    ):
-        graph = _build_plane_graph(
-            primal_data,
-            dual_data,
-            graph_id,
-            include_primal=include_primal,
-        )
-
-        if validate:
-            is_valid, _ = graph.validate()
-            if not is_valid:
-                continue
-
-        yield graph
-
-
 def _close_if_possible(obj: object) -> None:
     """Close an iterator/generator if it exposes a close() method."""
     close = getattr(obj, "close", None)

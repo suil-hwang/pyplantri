@@ -3,9 +3,6 @@ from __future__ import annotations
 
 from typing import Dict, Tuple, Union
 
-# ASCII parsing constant
-ORD_LOWER_A: int = ord("a")
-
 # plantri edge labels: str for -a format, int (byte value) for -T format
 EdgeLabel = Union[str, int]
 
