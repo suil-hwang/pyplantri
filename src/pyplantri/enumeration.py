@@ -244,6 +244,42 @@ def _default_chunk_size(raw_line_count: Optional[int] = None) -> int:
     return 10_000
 
 
+def _try_build_single_graph(
+    line: Union[str, bytes],
+    graph_id: int,
+    *,
+    include_primal: bool,
+    digon_zero_only: bool,
+    validate: bool,
+) -> Optional[PlaneGraph]:
+    """Attempt to build a PlaneGraph from a raw double_code line.
+
+    Returns None if the line is malformed, fails validation, or is
+    filtered out by digon_zero_only.
+    """
+    try:
+        primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
+        if not primal_data.adjacency_list or not dual_data.adjacency_list:
+            return None
+        if digon_zero_only and _has_digon_from_dual_adjacency(
+            dual_data.adjacency_list
+        ):
+            return None
+        graph = _build_plane_graph(
+            primal_data,
+            dual_data,
+            graph_id,
+            include_primal=include_primal,
+        )
+        if validate:
+            is_valid, _ = graph.validate()
+            if not is_valid:
+                return None
+        return graph
+    except (ValueError, RuntimeError, KeyError, IndexError):
+        return None
+
+
 def _build_graphs_from_raw_lines(
     raw_lines: Iterable[Union[str, bytes]],
     *,
@@ -264,33 +300,17 @@ def _build_graphs_from_raw_lines(
     try:
         for graph_id, line in enumerate(raw_iter):
             generated_count += 1
-            try:
-                primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
-                if not primal_data.adjacency_list or not dual_data.adjacency_list:
-                    continue
-
-                if digon_zero_only and _has_digon_from_dual_adjacency(
-                    dual_data.adjacency_list
-                ):
-                    continue
-
-                graph = _build_plane_graph(
-                    primal_data,
-                    dual_data,
-                    graph_id,
-                    include_primal=include_primal,
-                )
-
-                if validate:
-                    is_valid, _ = graph.validate()
-                    if not is_valid:
-                        continue
-
+            graph = _try_build_single_graph(
+                line,
+                graph_id,
+                include_primal=include_primal,
+                digon_zero_only=digon_zero_only,
+                validate=validate,
+            )
+            if graph is not None:
                 graphs.append(graph)
                 if _hit_max_count(len(graphs), max_count):
                     break
-            except (ValueError, RuntimeError, KeyError, IndexError):
-                continue  # Skip malformed graph lines and continue streaming
     finally:
         _close_if_possible(raw_iter)
 
@@ -305,30 +325,15 @@ def _process_graph_chunk(
     graphs: List[PlaneGraph] = []
 
     for i, line in enumerate(lines):
-        graph_id = start_id + i
-        try:
-            primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
-            if not primal_data.adjacency_list or not dual_data.adjacency_list:
-                continue
-
-            if digon_zero_only and _has_digon_from_dual_adjacency(dual_data.adjacency_list):
-                continue
-
-            graph = _build_plane_graph(
-                primal_data,
-                dual_data,
-                graph_id,
-                include_primal=include_primal,
-            )
-
-            if validate:
-                is_valid, _ = graph.validate()
-                if not is_valid:
-                    continue
-
+        graph = _try_build_single_graph(
+            line,
+            start_id + i,
+            include_primal=include_primal,
+            digon_zero_only=digon_zero_only,
+            validate=validate,
+        )
+        if graph is not None:
             graphs.append(graph)
-        except (ValueError, RuntimeError, KeyError, IndexError):
-            continue  # Skip malformed graph lines and continue chunk processing
 
     return graphs
 
