@@ -73,22 +73,6 @@ pip install -e .
 
 CMake automatically builds plantri during installation.
 
-## Low-level `Plantri` Class Mapping
-
-For low-level wrapper usage (`pyplantri.core.Plantri`), prefer explicit
-`graph_class` selection over legacy `graph_type`/`bipartite` flags.
-
-- `graph_class="triangulation"`: plantri default triangulations
-- `graph_class="quadrangulation"`: plantri `-q`
-- `graph_class="cubic"`: triangulation dual output (`-d`)
-- `graph_class="eulerian"` (or `"eulerian_triangulation"`): plantri `-b`
-- `graph_class="bipartite_plane"`: plantri `-bp`
-
-Notes:
-
-- plantri `-b` means **Eulerian triangulations**, not generic cubic output.
-- cubic plane graph output corresponds to triangulation dual (`-d`).
-
 ## Number of Non-isomorphic Plane Graphs by n
 
 | n (Q\* vertices) | Q vertices | Non-isomorphic count |
