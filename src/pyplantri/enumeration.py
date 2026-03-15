@@ -193,29 +193,8 @@ def _has_digon_from_dual_adjacency(dual_adjacency: dict[int, list[int]]) -> bool
     return False
 
 
-def _default_parallel_workers(raw_line_count: int | None = None) -> int:
-    """Choose a conservative worker count to reduce spawn overhead."""
-    cpu_count = os.cpu_count() or 4
-    if raw_line_count is None:
-        target = 8
-    elif raw_line_count < 120_000:
-        target = 4
-    elif raw_line_count < 600_000:
-        target = 8
-    else:
-        target = 12
-    return max(2, min(cpu_count, target))
-
-
-def _default_chunk_size(raw_line_count: int | None = None) -> int:
-    """Choose chunk size for balanced IPC overhead and parallelism."""
-    if raw_line_count is None:
-        return 5_000
-    if raw_line_count < 50_000:
-        return 2_000
-    if raw_line_count < 600_000:
-        return 5_000
-    return 10_000
+_DEFAULT_NUM_WORKERS = 8
+_DEFAULT_CHUNK_SIZE = 5_000
 
 
 def _try_build_single_graph(
@@ -466,9 +445,10 @@ def enumerate_plane_graphs_parallel(
     t_plantri = time.perf_counter() - t_start
 
     if num_workers is None:
-        num_workers = _default_parallel_workers()
+        cpu_count = os.cpu_count() or 4
+        num_workers = max(2, min(cpu_count, _DEFAULT_NUM_WORKERS))
     effective_chunk_size = (
-        chunk_size if chunk_size is not None else _default_chunk_size()
+        chunk_size if chunk_size is not None else _DEFAULT_CHUNK_SIZE
     )
 
     if not prefetched:
