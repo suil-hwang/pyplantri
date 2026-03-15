@@ -45,7 +45,7 @@ def _main_module_path() -> Optional[Path]:
 
 def _resolve_parallel_context(
     start_method: Optional[str],
-) -> Tuple[Optional[object], str]:
+) -> Tuple[Optional[multiprocessing.context.BaseContext], str]:
     """Resolve multiprocessing context and detect unsupported interactive entrypoints."""
     ctx = (
         multiprocessing.get_context(start_method)
