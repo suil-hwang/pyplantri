@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import warnings
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
@@ -13,6 +14,18 @@ from .converter import GraphConverter
 
 
 EdgeLabel = Union[str, int]
+
+
+@dataclass
+class ParsedGraphSection:
+    """Parsed graph section from plantri double_code output."""
+
+    vertex_count: int
+    adjacency_list: Dict[int, List[int]]
+    twin_map: Dict[Tuple[int, int], Tuple[int, int]]
+    edge_label_pairs: Dict[EdgeLabel, Tuple[Tuple[int, int], Tuple[int, int]]]
+
+
 GraphType = Literal["triangulation", "quadrangulation", "cubic"]
 GraphClass = Literal[
     "triangulation",
@@ -501,11 +514,11 @@ class QuadrangulationEnumerator:
     def generate_pairs(
         self,
         dual_vertex_count: int
-    ) -> Iterator[Tuple[Dict, Dict]]:
+    ) -> Iterator[Tuple[ParsedGraphSection, ParsedGraphSection]]:
         """Generates primal (Q) and dual (Q*) graph pairs."""
         for line in self.iter_raw(dual_vertex_count):
             primal, dual = self.parse_double_code(line)
-            if primal["adjacency_list"] and dual["adjacency_list"]:
+            if primal.adjacency_list and dual.adjacency_list:
                 yield primal, dual
 
     def count(self, dual_vertex_count: int) -> int:
@@ -529,16 +542,18 @@ class QuadrangulationEnumerator:
                 yield line
 
     @staticmethod
-    def parse_double_code(double_code_line: Union[str, bytes]) -> Tuple[Dict, Dict]:
+    def parse_double_code(
+        double_code_line: Union[str, bytes],
+    ) -> Tuple[ParsedGraphSection, ParsedGraphSection]:
         """Parses plantri double_code output to adjacency lists with twin maps."""
         parts = double_code_line.split()
         if len(parts) < 2:
-            empty: Dict = {
-                "vertex_count": 0,
-                "adjacency_list": {},
-                "twin_map": {},
-                "edge_label_pairs": {},
-            }
+            empty = ParsedGraphSection(
+                vertex_count=0,
+                adjacency_list={},
+                twin_map={},
+                edge_label_pairs={},
+            )
             return empty, empty
 
         # Parse first graph section.
@@ -560,12 +575,12 @@ class QuadrangulationEnumerator:
 
         # Parse second graph section.
         if idx >= len(parts):
-            empty = {
-                "vertex_count": 0,
-                "adjacency_list": {},
-                "twin_map": {},
-                "edge_label_pairs": {},
-            }
+            empty = ParsedGraphSection(
+                vertex_count=0,
+                adjacency_list={},
+                twin_map={},
+                edge_label_pairs={},
+            )
             return empty, empty
 
         second_vertex_count = int(parts[idx])
@@ -581,18 +596,18 @@ class QuadrangulationEnumerator:
             QuadrangulationEnumerator._build_adjacency_and_twins(second_edge_lists)
         )
 
-        first_data = {
-            "vertex_count": first_vertex_count,
-            "adjacency_list": first_adj,
-            "twin_map": first_twins,
-            "edge_label_pairs": first_edge_label_pairs,
-        }
-        second_data = {
-            "vertex_count": second_vertex_count,
-            "adjacency_list": second_adj,
-            "twin_map": second_twins,
-            "edge_label_pairs": second_edge_label_pairs,
-        }
+        first_data = ParsedGraphSection(
+            vertex_count=first_vertex_count,
+            adjacency_list=first_adj,
+            twin_map=first_twins,
+            edge_label_pairs=first_edge_label_pairs,
+        )
+        second_data = ParsedGraphSection(
+            vertex_count=second_vertex_count,
+            adjacency_list=second_adj,
+            twin_map=second_twins,
+            edge_label_pairs=second_edge_label_pairs,
+        )
 
         # Determine primal/dual orientation robustly.
         #

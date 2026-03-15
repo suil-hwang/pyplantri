@@ -18,6 +18,7 @@ from .plane_graph import (
     PlaneGraph,
 )
 from .plantri import (
+    ParsedGraphSection,
     Plantri,
     PlantriError,
     QuadrangulationEnumerator,
@@ -26,6 +27,7 @@ from .plantri import (
 __version__ = "0.1.0"
 __all__ = [
     # Plantri wrapper
+    "ParsedGraphSection",
     "Plantri",
     "PlantriError",
     "QuadrangulationEnumerator",

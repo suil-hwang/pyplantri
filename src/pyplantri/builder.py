@@ -6,7 +6,7 @@ from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .converter import GraphConverter
 from .plane_graph import PlaneGraph
-from .plantri import EdgeLabel
+from .plantri import EdgeLabel, ParsedGraphSection
 HalfEdge = Tuple[int, int]
 EdgeLabelPairs = Dict[EdgeLabel, Tuple[HalfEdge, HalfEdge]]
 LabelSignature = Tuple[Tuple[str, int], ...]
@@ -221,17 +221,17 @@ def _match_label_signatures(
 
 
 def _build_plane_graph(
-    primal_data: Dict,
-    dual_data: Dict,
+    primal_data: ParsedGraphSection,
+    dual_data: ParsedGraphSection,
     graph_id: int,
     *,
     include_primal: bool = True,
 ) -> PlaneGraph:
     """Builds PlaneGraph from primal and dual data."""
-    dual_vertex_count = dual_data["vertex_count"]
-    dual_adj_1based = dual_data["adjacency_list"]
-    twin_map_1based = dual_data.get("twin_map", {})
-    dual_edge_label_pairs_1based: EdgeLabelPairs = dual_data.get("edge_label_pairs", {})
+    dual_vertex_count = dual_data.vertex_count
+    dual_adj_1based = dual_data.adjacency_list
+    twin_map_1based = dual_data.twin_map
+    dual_edge_label_pairs_1based: EdgeLabelPairs = dual_data.edge_label_pairs
 
     embedding = GraphConverter.to_zero_based_embedding(dual_adj_1based)
     twin_map_0based = _to_zero_based_twin_map(
@@ -273,12 +273,10 @@ def _build_plane_graph(
     primal_vertex_to_dual_face: Tuple[int, ...] = tuple()
 
     if include_primal:
-        primal_adj_1based = primal_data["adjacency_list"]
-        primal_num_vertices = primal_data["vertex_count"]
-        primal_twin_map_1based = primal_data.get("twin_map", {})
-        primal_edge_label_pairs_1based: EdgeLabelPairs = primal_data.get(
-            "edge_label_pairs", {}
-        )
+        primal_adj_1based = primal_data.adjacency_list
+        primal_num_vertices = primal_data.vertex_count
+        primal_twin_map_1based = primal_data.twin_map
+        primal_edge_label_pairs_1based: EdgeLabelPairs = primal_data.edge_label_pairs
         primal_embedding = GraphConverter.to_zero_based_embedding(primal_adj_1based)
         primal_twin_map_0based = _to_zero_based_twin_map(
             primal_twin_map_1based,

@@ -266,11 +266,11 @@ def _build_graphs_from_raw_lines(
             generated_count += 1
             try:
                 primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
-                if not primal_data["adjacency_list"] or not dual_data["adjacency_list"]:
+                if not primal_data.adjacency_list or not dual_data.adjacency_list:
                     continue
 
                 if digon_zero_only and _has_digon_from_dual_adjacency(
-                    dual_data["adjacency_list"]
+                    dual_data.adjacency_list
                 ):
                     continue
 
@@ -308,10 +308,10 @@ def _process_graph_chunk(
         graph_id = start_id + i
         try:
             primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
-            if not primal_data["adjacency_list"] or not dual_data["adjacency_list"]:
+            if not primal_data.adjacency_list or not dual_data.adjacency_list:
                 continue
 
-            if digon_zero_only and _has_digon_from_dual_adjacency(dual_data["adjacency_list"]):
+            if digon_zero_only and _has_digon_from_dual_adjacency(dual_data.adjacency_list):
                 continue
 
             graph = _build_plane_graph(
