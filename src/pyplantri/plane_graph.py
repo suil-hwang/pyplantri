@@ -2,7 +2,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Iterator, List, Mapping, Optional, Tuple, Union
 
-Embedding = Tuple[Tuple[int, ...], ...]
+from .types import Embedding
+
 # Internal normalization input type.
 EmbeddingInput = Union[Dict[int, Tuple[int, ...]], Embedding, List[Tuple[int, ...]]]
 

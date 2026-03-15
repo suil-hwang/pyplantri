@@ -5,9 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 from scipy.sparse import csr_matrix
 
-
-# Constant for ASCII character parsing optimization.
-_ORD_A = ord('a')
+from .types import ORD_LOWER_A
 
 
 class GraphConverter:
@@ -35,7 +33,7 @@ class GraphConverter:
         for vertex_idx, neighbors_str in enumerate(vertex_neighbor_lists):
             source_vertex = vertex_idx + (1 if is_one_based else 0)
             for char in neighbors_str:
-                target_vertex = ord(char) - _ORD_A + 1 - index_offset
+                target_vertex = ord(char) - ORD_LOWER_A + 1 - index_offset
                 # Canonical edge key (u < v) - count one direction only.
                 if source_vertex < target_vertex:
                     edge_multiplicity[(source_vertex, target_vertex)] += 1
@@ -64,7 +62,7 @@ class GraphConverter:
         for vertex_idx, neighbors_str in enumerate(vertex_neighbor_lists):
             vertex = vertex_idx + (1 if is_one_based else 0)
             adjacency_list[vertex] = [
-                ord(c) - _ORD_A + 1 - index_offset for c in neighbors_str
+                ord(c) - ORD_LOWER_A + 1 - index_offset for c in neighbors_str
             ]
 
         return adjacency_list

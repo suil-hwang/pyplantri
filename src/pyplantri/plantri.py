@@ -11,9 +11,7 @@ from shutil import which
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
 
 from .converter import GraphConverter
-
-
-EdgeLabel = Union[str, int]
+from .types import EdgeLabel
 
 
 @dataclass

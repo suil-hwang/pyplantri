@@ -6,9 +6,8 @@ from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .converter import GraphConverter
 from .plane_graph import PlaneGraph
-from .plantri import EdgeLabel, ParsedGraphSection
-HalfEdge = Tuple[int, int]
-EdgeLabelPairs = Dict[EdgeLabel, Tuple[HalfEdge, HalfEdge]]
+from .plantri import ParsedGraphSection
+from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
 LabelSignature = Tuple[Tuple[str, int], ...]
 
 
