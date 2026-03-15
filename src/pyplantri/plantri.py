@@ -11,17 +11,21 @@ from shutil import which
 from typing import Dict, Iterator, List, Literal, Optional, Set, Tuple, Union, cast
 
 from .converter import GraphConverter
-from .types import EdgeLabel
+from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ParsedGraphSection:
-    """Parsed graph section from plantri double_code output."""
+    """One graph section parsed from plantri -T double_code output.
+
+    All vertex indices are 1-based, matching plantri's native output convention.
+    Use GraphConverter.to_zero_based_embedding() to convert to 0-based.
+    """
 
     vertex_count: int
     adjacency_list: Dict[int, List[int]]
-    twin_map: Dict[Tuple[int, int], Tuple[int, int]]
-    edge_label_pairs: Dict[EdgeLabel, Tuple[Tuple[int, int], Tuple[int, int]]]
+    twin_map: Dict[HalfEdge, HalfEdge]
+    edge_label_pairs: EdgeLabelPairs
 
 
 GraphType = Literal["triangulation", "quadrangulation", "cubic"]
