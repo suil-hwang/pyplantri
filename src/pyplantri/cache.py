@@ -299,7 +299,6 @@ def _load_json(
     return graphs, metadata
 
 
-
 def save_graphs_to_cache(
     graphs: List[PlaneGraph],
     filepath: Union[str, Path],

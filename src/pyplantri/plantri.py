@@ -260,7 +260,6 @@ class Plantri:
             ) from e
 
 
-
 class QuadrangulationEnumerator:
     """Enumerates 4-regular plane multigraphs (duals of simple quadrangulations)."""
 
