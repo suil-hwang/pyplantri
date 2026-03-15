@@ -178,17 +178,6 @@ class GraphConverter:
         )
 
     @staticmethod
-    def to_gurobi_start_dict(
-        edge_multiplicity: Dict[Tuple[int, int], int],
-        var_prefix: str = "x"
-    ) -> Dict[str, int]:
-        """Creates a Gurobi MIP start dictionary."""
-        return {
-            f"{var_prefix}[{source},{target}]": multiplicity
-            for (source, target), multiplicity in edge_multiplicity.items()
-        }
-
-    @staticmethod
     def get_graph_stats(
         edge_multiplicity: Dict[Tuple[int, int], int],
         vertex_count: int
