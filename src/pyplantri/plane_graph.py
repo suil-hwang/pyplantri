@@ -1,4 +1,6 @@
 # src/pyplantri/plane_graph.py
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Iterator, List, Mapping, Optional, Tuple, Union
 
