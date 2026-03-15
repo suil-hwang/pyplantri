@@ -227,7 +227,7 @@ def _build_plane_graph(
     *,
     include_primal: bool = True,
 ) -> PlaneGraph:
-    """Builds PlaneGraph from primal and dual data."""
+    """Build PlaneGraph from parsed primal/dual sections of plantri double_code."""
     dual_vertex_count = dual_data.vertex_count
     dual_adj_1based = dual_data.adjacency_list
     twin_map_1based = dual_data.twin_map

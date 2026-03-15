@@ -120,6 +120,8 @@ class PlaneGraph:
 
     Dual Graph (Q*):
         - 4-regular plane multigraph (allows double edges, no loops).
+        - Double edges (digons) arise from degree-2 primal vertices
+          permitted by the -c2 -m2 generation flags.
         - num_vertices = n (dual vertices).
         - faces = n + 2 (dual faces = primal vertices).
 
@@ -270,7 +272,7 @@ class PlaneGraph:
 
     @property
     def double_edges(self) -> frozenset[tuple[int, int]]:
-        """Set of double edges (digons)."""
+        """Parallel-edge pairs (digons) in the dual embedding."""
         cache = getattr(self, "_double_edges_cache", None)
         if cache is None:
             cache = frozenset(e for e, m in self.edge_multiplicity.items() if m == 2)

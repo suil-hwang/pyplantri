@@ -69,12 +69,12 @@ def enumerate_plane_graphs(
     verbose: bool = False,
     include_primal: bool = True,
 ) -> list[PlaneGraph]:
-    """Enumerates all n-vertex 4-regular planar multigraphs."""
+    """Enumerate all n-vertex 4-regular plane multigraphs."""
     if max_count == 0:
         return []
 
     if verbose:
-        print(f"[Plantri] Enumerating {dual_vertex_count}-vertex 4-regular planar multigraphs...")
+        print(f"[Plantri] Enumerating {dual_vertex_count}-vertex 4-regular plane multigraphs...")
 
     enumerator = QuadrangulationEnumerator()
     graphs: list[PlaneGraph] = []
@@ -340,7 +340,11 @@ def enumerate_plane_graphs_filtered(
     digon_zero_only: bool = False,
     verbose: bool = False,
 ) -> FilteredEnumerationResult:
-    """Enumerate plane graphs with optional filtering in a single pass."""
+    """Enumerate plane graphs with optional filtering in a single pass.
+
+    When `digon_zero_only` is True, only duals without parallel edges
+    (digon count = 0) are kept.
+    """
     import time
 
     t_start = time.perf_counter()

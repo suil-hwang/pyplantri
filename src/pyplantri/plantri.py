@@ -262,7 +262,12 @@ class Plantri:
 
 
 class QuadrangulationEnumerator:
-    """Enumerates 4-regular plane multigraphs (duals of simple quadrangulations)."""
+    """Enumerates dual quartic plane multigraphs of simple quadrangulations.
+
+    Uses plantri flags `-q -c2 -m2 -T` to generate all non-isomorphic
+    simple quadrangulations (primal) together with their 4-regular duals
+    in double_code format.
+    """
 
     _QUADRANGULATION_FLAGS = ["-q", "-c2", "-m2", "-T"]
 
@@ -274,7 +279,11 @@ class QuadrangulationEnumerator:
         self,
         dual_vertex_count: int
     ) -> Iterator[tuple[ParsedGraphSection, ParsedGraphSection]]:
-        """Generates primal (Q) and dual (Q*) graph pairs."""
+        """Yield (primal, dual) pairs from plantri.
+
+        Primal is a simple quadrangulation; dual is a 4-regular plane
+        multigraph that may contain parallel edges.
+        """
         for line in self.iter_raw(dual_vertex_count):
             primal, dual = self.parse_double_code(line)
             if primal.adjacency_list and dual.adjacency_list:
@@ -289,7 +298,7 @@ class QuadrangulationEnumerator:
         )
 
     def iter_raw(self, dual_vertex_count: int) -> Iterator[bytes]:
-        """Generates raw double_code output lines as bytes."""
+        """Yield raw double_code lines as bytes from plantri stdout."""
         # Euler's formula for plane graphs: V - E + F = 2
         # For quadrangulations: primal_vertices = dual_vertices + 2
         primal_vertex_count = dual_vertex_count + 2
@@ -304,7 +313,12 @@ class QuadrangulationEnumerator:
     def parse_double_code(
         double_code_line: str | bytes,
     ) -> tuple[ParsedGraphSection, ParsedGraphSection]:
-        """Parses plantri double_code output to adjacency lists with twin maps."""
+        """Parse a plantri double_code line into (primal, dual) sections.
+
+        Without `-d`, plantri outputs primal first then dual. With` `-d`
+        the order is reversed. This method detects the orientation via
+        4-regularity and vertex-count checks.
+        """
         parts = double_code_line.split()
         if len(parts) < 2:
             empty = ParsedGraphSection(
@@ -373,11 +387,6 @@ class QuadrangulationEnumerator:
         # plantri double_code output order depends on -d:
         # - without -d: primal first, dual second
         # - with -d:    dual first, primal second
-        #
-        # Prefer strict quadrangulation consistency checks:
-        #   1) dual is 4-regular
-        #   2) |V_primal| = |V_dual| + 2
-        # Fall back to degree-only discrimination when relation is unavailable.
         first_is_4_regular = GraphConverter.is_4_regular(first_adj)
         second_is_4_regular = GraphConverter.is_4_regular(second_adj)
 
