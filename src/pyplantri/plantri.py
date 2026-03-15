@@ -315,7 +315,7 @@ class QuadrangulationEnumerator:
     ) -> tuple[ParsedGraphSection, ParsedGraphSection]:
         """Parse a plantri double_code line into (primal, dual) sections.
 
-        Without `-d`, plantri outputs primal first then dual. With` `-d`
+        Without -d, plantri outputs primal first then dual. With -d
         the order is reversed. This method detects the orientation via
         4-regularity and vertex-count checks.
         """
