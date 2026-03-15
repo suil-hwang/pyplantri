@@ -605,31 +605,30 @@ class PlaneGraph:
     def from_dict(cls, data: dict) -> PlaneGraph:
         """Creates PlaneGraph from dictionary."""
         # Support both old (unprefixed) and new (dual_ prefixed) key names.
-        def _get(key: str, default: object = None) -> object:
-            return data.get(f"dual_{key}") or data.get(key, default)
+        dual_num_vertices: int = data.get("dual_num_vertices") or data.get("num_vertices", 0)
+        raw_edges: list = data.get("dual_edges") or data.get("edges", [])
+        raw_edge_mult: dict = data.get("dual_edge_multiplicity") or data.get("edge_multiplicity", {})
+        raw_embedding: dict = data.get("dual_embedding") or data.get("embedding", {})
+        raw_faces: list = data.get("dual_faces") or data.get("faces", [])
 
-        raw_edges = _get("edges", [])
         parsed_edges: list[tuple[int, int]] = [
             (int(e[0]), int(e[1])) for e in raw_edges
         ]
-        raw_edge_mult = _get("edge_multiplicity", {})
         parsed_edge_multiplicity: dict[tuple[int, int], int] = {
             (int(parts[0]), int(parts[1])): int(v)
             for k, v in raw_edge_mult.items()
             for parts in [k.split(",")]
         }
-        dual_num_vertices = _get("num_vertices", 0)
-        embedding_payload = _get("embedding", {})
         primal_embedding_payload = data.get("primal_embedding", {})
         return cls(
             dual_num_vertices=dual_num_vertices,
             dual_edges=tuple(parsed_edges),
             dual_edge_multiplicity=parsed_edge_multiplicity,
             dual_embedding=cls._normalize_embedding(
-                embedding_payload,
+                raw_embedding,
                 expected_size=dual_num_vertices,
             ),
-            dual_faces=tuple(tuple(f) for f in _get("faces", [])),
+            dual_faces=tuple(tuple(f) for f in raw_faces),
             primal_num_vertices=data.get("primal_num_vertices", 0),
             primal_embedding=cls._normalize_embedding(
                 primal_embedding_payload,
