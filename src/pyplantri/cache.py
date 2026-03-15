@@ -21,7 +21,7 @@ class SecurityWarning(UserWarning):
 
 
 # Cache format version. Increment when PlaneGraph fields change.
-_CACHE_FORMAT_VERSION = 2
+_CACHE_FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,7 @@ def _load_pickle(
     normalized_graphs: list[PlaneGraph] = []
     for graph in graphs:
         if isinstance(graph, PlaneGraph):
-            if isinstance(graph.edge_multiplicity, FrozenEdgeMultiplicity):
+            if isinstance(graph.dual_edge_multiplicity, FrozenEdgeMultiplicity):
                 normalized_graphs.append(graph)
             else:
                 normalized_graphs.append(PlaneGraph.from_dict(graph.to_dict()))

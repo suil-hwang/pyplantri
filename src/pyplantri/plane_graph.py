@@ -133,11 +133,11 @@ class PlaneGraph:
         - primal_vertex_to_dual_face[j] gives dual face index for primal vertex j.
     """
 
-    num_vertices: int
-    edges: tuple[tuple[int, int], ...]
-    edge_multiplicity: Mapping[tuple[int, int], int]
-    embedding: Embedding  # CW cyclic order at each vertex.
-    faces: tuple[tuple[int, ...], ...]
+    dual_num_vertices: int
+    dual_edges: tuple[tuple[int, int], ...]
+    dual_edge_multiplicity: Mapping[tuple[int, int], int]
+    dual_embedding: Embedding  # CW cyclic order at each vertex.
+    dual_faces: tuple[tuple[int, ...], ...]
 
     primal_num_vertices: int
     primal_embedding: Embedding
@@ -154,30 +154,30 @@ class PlaneGraph:
         """Normalize mutable inputs to immutable internal representations."""
         _set = object.__setattr__
 
-        if not isinstance(self.num_vertices, int):
-            _set(self, "num_vertices", int(self.num_vertices))
+        if not isinstance(self.dual_num_vertices, int):
+            _set(self, "dual_num_vertices", int(self.dual_num_vertices))
         if not isinstance(self.primal_num_vertices, int):
             _set(self, "primal_num_vertices", int(self.primal_num_vertices))
         if not isinstance(self.graph_id, int):
             _set(self, "graph_id", int(self.graph_id))
 
-        if not isinstance(self.edges, tuple):
-            _set(self, "edges", tuple((int(u), int(v)) for u, v in self.edges))
+        if not isinstance(self.dual_edges, tuple):
+            _set(self, "dual_edges", tuple((int(u), int(v)) for u, v in self.dual_edges))
 
-        if not isinstance(self.edge_multiplicity, FrozenEdgeMultiplicity):
-            _set(self, "edge_multiplicity", FrozenEdgeMultiplicity(self.edge_multiplicity))
+        if not isinstance(self.dual_edge_multiplicity, FrozenEdgeMultiplicity):
+            _set(self, "dual_edge_multiplicity", FrozenEdgeMultiplicity(self.dual_edge_multiplicity))
 
         # _normalize_embedding returns early for tuple input of sufficient size.
-        _set(self, "embedding", self._normalize_embedding(
-            self.embedding, expected_size=self.num_vertices,
+        _set(self, "dual_embedding", self._normalize_embedding(
+            self.dual_embedding, expected_size=self.dual_num_vertices,
         ))
         _set(self, "primal_embedding", self._normalize_embedding(
             self.primal_embedding, expected_size=self.primal_num_vertices,
         ))
 
-        if not isinstance(self.faces, tuple):
-            _set(self, "faces", tuple(
-                tuple(int(v) for v in face) for face in self.faces
+        if not isinstance(self.dual_faces, tuple):
+            _set(self, "dual_faces", tuple(
+                tuple(int(v) for v in face) for face in self.dual_faces
             ))
         if not isinstance(self.primal_faces, tuple):
             _set(self, "primal_faces", tuple(
@@ -266,16 +266,16 @@ class PlaneGraph:
         return tuple()
 
     @property
-    def num_faces(self) -> int:
+    def dual_num_faces(self) -> int:
         """Face count (should be n + 2 by Euler's formula)."""
-        return len(self.faces)
+        return len(self.dual_faces)
 
     @property
     def double_edges(self) -> frozenset[tuple[int, int]]:
         """Parallel-edge pairs (digons) in the dual embedding."""
         cache = getattr(self, "_double_edges_cache", None)
         if cache is None:
-            cache = frozenset(e for e, m in self.edge_multiplicity.items() if m == 2)
+            cache = frozenset(e for e, m in self.dual_edge_multiplicity.items() if m == 2)
             object.__setattr__(
                 self,
                 "_double_edges_cache",
@@ -286,19 +286,19 @@ class PlaneGraph:
     @property
     def is_4_regular(self) -> bool:
         """Whether all vertices have degree 4."""
-        return all(len(neighbors) == 4 for neighbors in self._iter_embedding_values(self.embedding))
+        return all(len(neighbors) == 4 for neighbors in self._iter_embedding_values(self.dual_embedding))
 
     @property
     def is_loop_free(self) -> bool:
         """Whether graph has no self-loops."""
         return all(
             v not in neighbors
-            for v, neighbors in self._iter_embedding_items(self.embedding)
+            for v, neighbors in self._iter_embedding_items(self.dual_embedding)
         )
 
     def neighbors_cw(self, vertex: int) -> tuple[int, ...]:
         """CW-ordered neighbors of a vertex."""
-        return self._neighbors_of(self.embedding, vertex)
+        return self._neighbors_of(self.dual_embedding, vertex)
 
     def neighbors_ccw(self, vertex: int) -> tuple[int, ...]:
         """CCW-ordered neighbors of a vertex."""
@@ -308,46 +308,46 @@ class PlaneGraph:
         """Validates graph invariants."""
         errors: list[str] = []
 
-        if len(self.embedding) != self.num_vertices:
+        if len(self.dual_embedding) != self.dual_num_vertices:
             errors.append(
-                f"Embedding size {len(self.embedding)} does not match num_vertices={self.num_vertices}"
+                f"Embedding size {len(self.dual_embedding)} does not match num_vertices={self.dual_num_vertices}"
             )
 
-        if len(set(self.edges)) != len(self.edges):
+        if len(set(self.dual_edges)) != len(self.dual_edges):
             errors.append("edges field contains duplicates")
-        for u, v in self.edges:
-            if u < 0 or v < 0 or u >= self.num_vertices or v >= self.num_vertices:
+        for u, v in self.dual_edges:
+            if u < 0 or v < 0 or u >= self.dual_num_vertices or v >= self.dual_num_vertices:
                 errors.append(
                     f"edges field contains out-of-range vertex index: "
-                    f"({u}, {v}) for n={self.num_vertices}"
+                    f"({u}, {v}) for n={self.dual_num_vertices}"
                 )
             if u > v:
                 errors.append(
                     f"edges field is not canonical on edge ({u}, {v}); "
                     "expected u <= v"
                 )
-        expected_edges = tuple(sorted(self.edge_multiplicity.keys()))
-        if self.edges != expected_edges:
+        expected_edges = tuple(sorted(self.dual_edge_multiplicity.keys()))
+        if self.dual_edges != expected_edges:
             errors.append(
-                f"edges field mismatch: edges={self.edges!r}, "
+                f"edges field mismatch: edges={self.dual_edges!r}, "
                 f"expected={expected_edges!r}"
             )
 
-        for v in range(self.num_vertices):
-            if not self._has_vertex(self.embedding, v):
+        for v in range(self.dual_num_vertices):
+            if not self._has_vertex(self.dual_embedding, v):
                 errors.append(f"Vertex {v} missing from embedding")
                 continue
-            neighbors_v = self._neighbors_of(self.embedding, v)
+            neighbors_v = self._neighbors_of(self.dual_embedding, v)
             if len(neighbors_v) != 4:
                 errors.append(
                     f"Vertex {v} has degree {len(neighbors_v)}, expected 4"
                 )
 
-        for (u, v), multiplicity in self.edge_multiplicity.items():
-            if u < 0 or v < 0 or u >= self.num_vertices or v >= self.num_vertices:
+        for (u, v), multiplicity in self.dual_edge_multiplicity.items():
+            if u < 0 or v < 0 or u >= self.dual_num_vertices or v >= self.dual_num_vertices:
                 errors.append(
                     "edge_multiplicity contains out-of-range vertex index: "
-                    f"({u}, {v}) for n={self.num_vertices}"
+                    f"({u}, {v}) for n={self.dual_num_vertices}"
                 )
             if u > v:
                 errors.append(f"Edge key ({u}, {v}) is not canonical (u <= v expected)")
@@ -356,25 +356,25 @@ class PlaneGraph:
                     f"Edge ({u}, {v}) has multiplicity {multiplicity}, expected 1 or 2"
                 )
 
-        expected_faces = self.num_vertices + 2
-        if self.num_faces != expected_faces:
-            errors.append(f"Face count: {self.num_faces}, expected {expected_faces}")
-        for face_idx, face in enumerate(self.faces):
+        expected_faces = self.dual_num_vertices + 2
+        if self.dual_num_faces != expected_faces:
+            errors.append(f"Face count: {self.dual_num_faces}, expected {expected_faces}")
+        for face_idx, face in enumerate(self.dual_faces):
             if len(face) < 2:
                 errors.append(f"Dual face {face_idx} has size {len(face)}, expected >= 2")
             if len(face) > 2 and len(set(face)) != len(face):
                 errors.append(f"Dual face {face_idx} repeats vertices: {face}")
             for vertex in face:
-                if vertex < 0 or vertex >= self.num_vertices:
+                if vertex < 0 or vertex >= self.dual_num_vertices:
                     errors.append(
                         f"Dual face {face_idx} contains out-of-range vertex "
-                        f"{vertex} for n={self.num_vertices}"
+                        f"{vertex} for n={self.dual_num_vertices}"
                     )
 
         directed_counts: dict[tuple[int, int], int] = {}
         undirected_half_edge_counts: dict[tuple[int, int], int] = {}
 
-        for v, neighbors in self._iter_embedding_items(self.embedding):
+        for v, neighbors in self._iter_embedding_items(self.dual_embedding):
             if v in neighbors:
                 errors.append(f"Self-loop at vertex {v}")
             for u in neighbors:
@@ -385,7 +385,7 @@ class PlaneGraph:
                     undirected_half_edge_counts.get(edge, 0) + 1
                 )
 
-        for (u, v), multiplicity in self.edge_multiplicity.items():
+        for (u, v), multiplicity in self.dual_edge_multiplicity.items():
             if u == v:
                 continue
             count_uv = directed_counts.get((u, v), 0)
@@ -400,7 +400,7 @@ class PlaneGraph:
             u, v = edge
             if u == v:
                 continue
-            edge_multiplicity = self.edge_multiplicity.get(edge)
+            edge_multiplicity = self.dual_edge_multiplicity.get(edge)
             if edge_multiplicity is None:
                 errors.append(
                     f"Edge {edge} appears in embedding but is missing in edge_multiplicity"
@@ -412,12 +412,12 @@ class PlaneGraph:
                     f"{half_edge_count} in embedding vs {2 * edge_multiplicity} expected"
                 )
 
-        edge_count = sum(self.edge_multiplicity.values())
-        euler_lhs = self.num_vertices - edge_count + self.num_faces
+        edge_count = sum(self.dual_edge_multiplicity.values())
+        euler_lhs = self.dual_num_vertices - edge_count + self.dual_num_faces
         if euler_lhs != 2:
             errors.append(
                 f"Euler formula violation: V - E + F = {euler_lhs}, expected 2 "
-                f"(V={self.num_vertices}, E={edge_count}, F={self.num_faces})"
+                f"(V={self.dual_num_vertices}, E={edge_count}, F={self.dual_num_faces})"
             )
 
         has_primal_data = (
@@ -428,7 +428,7 @@ class PlaneGraph:
             or bool(self.primal_vertex_to_dual_face)
         )
         if has_primal_data:
-            expected_primal_vertices = self.num_vertices + 2
+            expected_primal_vertices = self.dual_num_vertices + 2
             if self.primal_num_vertices != expected_primal_vertices:
                 errors.append(
                     "Primal vertex count mismatch: "
@@ -442,7 +442,7 @@ class PlaneGraph:
                     f"primal_num_vertices={self.primal_num_vertices}"
                 )
 
-            expected_primal_faces = self.num_vertices
+            expected_primal_faces = self.dual_num_vertices
             if len(self.primal_faces) != expected_primal_faces:
                 errors.append(
                     "Primal face count mismatch: "
@@ -520,10 +520,10 @@ class PlaneGraph:
                     f"F={len(self.primal_faces)})"
                 )
 
-            if len(self.dual_vertex_to_primal_face) != self.num_vertices:
+            if len(self.dual_vertex_to_primal_face) != self.dual_num_vertices:
                 errors.append(
                     "dual_vertex_to_primal_face length mismatch: "
-                    f"{len(self.dual_vertex_to_primal_face)}, expected {self.num_vertices}"
+                    f"{len(self.dual_vertex_to_primal_face)}, expected {self.dual_num_vertices}"
                 )
             else:
                 mapped_primal_faces = set()
@@ -558,7 +558,7 @@ class PlaneGraph:
                 for primal_vertex, dual_face_idx in enumerate(
                     self.primal_vertex_to_dual_face
                 ):
-                    if dual_face_idx < 0 or dual_face_idx >= len(self.faces):
+                    if dual_face_idx < 0 or dual_face_idx >= len(self.dual_faces):
                         errors.append(
                             "primal_vertex_to_dual_face contains out-of-range face index "
                             f"{dual_face_idx} for primal vertex {primal_vertex}"
@@ -569,7 +569,7 @@ class PlaneGraph:
                         "primal_vertex_to_dual_face maps multiple vertices to the same "
                         "dual face"
                     )
-                expected_dual_face_indices = set(range(len(self.faces)))
+                expected_dual_face_indices = set(range(len(self.dual_faces)))
                 if mapped_dual_faces != expected_dual_face_indices:
                     errors.append(
                         "primal_vertex_to_dual_face is not a bijection onto dual faces"
@@ -580,16 +580,16 @@ class PlaneGraph:
     def to_dict(self) -> dict:
         """Converts to dictionary for JSON serialization."""
         return {
-            "num_vertices": self.num_vertices,
-            "edges": list(self.edges),
-            "edge_multiplicity": {
-                f"{u},{v}": m for (u, v), m in self.edge_multiplicity.items()
+            "dual_num_vertices": self.dual_num_vertices,
+            "dual_edges": list(self.dual_edges),
+            "dual_edge_multiplicity": {
+                f"{u},{v}": m for (u, v), m in self.dual_edge_multiplicity.items()
             },
-            "embedding": {
+            "dual_embedding": {
                 str(v): list(neighbors)
-                for v, neighbors in self._iter_embedding_items(self.embedding)
+                for v, neighbors in self._iter_embedding_items(self.dual_embedding)
             },
-            "faces": [list(f) for f in self.faces],
+            "dual_faces": [list(f) for f in self.dual_faces],
             "primal_num_vertices": self.primal_num_vertices,
             "primal_embedding": {
                 str(v): list(neighbors)
@@ -604,27 +604,32 @@ class PlaneGraph:
     @classmethod
     def from_dict(cls, data: dict) -> PlaneGraph:
         """Creates PlaneGraph from dictionary."""
-        # Parse edges as explicit 2-tuples for type safety.
+        # Support both old (unprefixed) and new (dual_ prefixed) key names.
+        def _get(key: str, default: object = None) -> object:
+            return data.get(f"dual_{key}") or data.get(key, default)
+
+        raw_edges = _get("edges", [])
         parsed_edges: list[tuple[int, int]] = [
-            (int(e[0]), int(e[1])) for e in data["edges"]
+            (int(e[0]), int(e[1])) for e in raw_edges
         ]
-        # Parse edge_multiplicity keys as explicit 2-tuples.
+        raw_edge_mult = _get("edge_multiplicity", {})
         parsed_edge_multiplicity: dict[tuple[int, int], int] = {
             (int(parts[0]), int(parts[1])): int(v)
-            for k, v in data["edge_multiplicity"].items()
+            for k, v in raw_edge_mult.items()
             for parts in [k.split(",")]
         }
-        embedding_payload = data.get("embedding", {})
+        dual_num_vertices = _get("num_vertices", 0)
+        embedding_payload = _get("embedding", {})
         primal_embedding_payload = data.get("primal_embedding", {})
         return cls(
-            num_vertices=data["num_vertices"],
-            edges=tuple(parsed_edges),
-            edge_multiplicity=parsed_edge_multiplicity,
-            embedding=cls._normalize_embedding(
+            dual_num_vertices=dual_num_vertices,
+            dual_edges=tuple(parsed_edges),
+            dual_edge_multiplicity=parsed_edge_multiplicity,
+            dual_embedding=cls._normalize_embedding(
                 embedding_payload,
-                expected_size=data["num_vertices"],
+                expected_size=dual_num_vertices,
             ),
-            faces=tuple(tuple(f) for f in data["faces"]),
+            dual_faces=tuple(tuple(f) for f in _get("faces", [])),
             primal_num_vertices=data.get("primal_num_vertices", 0),
             primal_embedding=cls._normalize_embedding(
                 primal_embedding_payload,

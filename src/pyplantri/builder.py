@@ -334,11 +334,11 @@ def _build_plane_graph(
         expected_size=primal_num_vertices,
     )
     return PlaneGraph(
-        num_vertices=dual_vertex_count,
-        edges=edges,
-        edge_multiplicity=edge_multiplicity,
-        embedding=normalized_embedding,
-        faces=faces,
+        dual_num_vertices=dual_vertex_count,
+        dual_edges=edges,
+        dual_edge_multiplicity=edge_multiplicity,
+        dual_embedding=normalized_embedding,
+        dual_faces=faces,
         primal_num_vertices=primal_num_vertices,
         primal_embedding=normalized_primal_embedding,
         primal_faces=primal_faces,
