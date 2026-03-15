@@ -431,7 +431,7 @@ def enumerate_plane_graphs_parallel(
     max_count: Optional[int] = None,
     validate: bool = True,
     verbose: bool = False,
-    n_workers: Optional[int] = None,
+    num_workers: Optional[int] = None,
     chunk_size: Optional[int] = None,
     include_primal: bool = True,
     return_timing: bool = False,
@@ -474,8 +474,8 @@ def enumerate_plane_graphs_parallel(
     # Keep plantri_s as startup latency until first valid raw line.
     t_plantri = time.perf_counter() - t_start
 
-    if n_workers is None:
-        n_workers = _default_parallel_workers()
+    if num_workers is None:
+        num_workers = _default_parallel_workers()
     effective_chunk_size = (
         chunk_size if chunk_size is not None else _default_chunk_size()
     )
@@ -496,7 +496,7 @@ def enumerate_plane_graphs_parallel(
         mode = ", digon=0" if digon_zero_only else ""
         print(
             f"[Plantri] Parallel enumeration (n={dual_vertex_count}, "
-            f"workers={n_workers}, chunk={effective_chunk_size}{mode})..."
+            f"workers={num_workers}, chunk={effective_chunk_size}{mode})..."
         )
 
     # Bounded warmup to decide if we should stay sequential for small inputs.
@@ -517,7 +517,7 @@ def enumerate_plane_graphs_parallel(
             )
 
     # For small inputs, use sequential processing to avoid multiprocessing overhead.
-    if len(prefetched) < warmup_limit or n_workers <= 1:
+    if len(prefetched) < warmup_limit or num_workers <= 1:
         if verbose:
             print("[Plantri] Using sequential processing (small input)")
         graphs, _ = _build_graphs_from_raw_lines(
@@ -554,7 +554,7 @@ def enumerate_plane_graphs_parallel(
             "enumerate_plane_graphs_parallel() fell back to sequential processing "
             f"because the active '{resolved_start_method}' start method requires an "
             "importable __main__ module. Run from a script protected by "
-            "\"if __name__ == '__main__':\" or use n_workers=1 in interactive "
+            "\"if __name__ == '__main__':\" or use num_workers=1 in interactive "
             "sessions.",
             RuntimeWarning,
             stacklevel=2,
@@ -577,7 +577,7 @@ def enumerate_plane_graphs_parallel(
             return graphs, timing
         return graphs
 
-    with ctx.Pool(processes=n_workers) as pool:
+    with ctx.Pool(processes=num_workers) as pool:
         try:
             for chunk_graphs in pool.imap(_process_graph_chunk, chunk_args):
                 all_graphs.extend(chunk_graphs)
