@@ -40,7 +40,7 @@ def _find_plantri_exe() -> Path:
         return pkg_bin
 
     # scikit-build-core build folder (editable install, dev mode).
-    # Path: src/pyplantri/core.py -> src -> project_root.
+    # Path: src/pyplantri/plantri.py -> src/pyplantri -> src -> project_root.
     project_root = Path(__file__).parent.parent.parent
     build_dir = project_root / "build"
     if build_dir.exists():
@@ -67,11 +67,7 @@ _PLANTRI_EXE = _find_plantri_exe()
 
 
 class PlantriError(Exception):
-    """Plantri execution failure.
-
-    Attributes:
-        message: Explanation of the error.
-    """
+    """Plantri execution failure."""
 
 
 class Plantri:
