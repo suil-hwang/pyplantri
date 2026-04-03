@@ -1,6 +1,8 @@
 # src/pyplantri/converter.py
 from __future__ import annotations
 
+from .types import HalfEdge
+
 
 class GraphConverter:
     """Utility for converting plantri output to various formats."""
@@ -21,63 +23,75 @@ class GraphConverter:
     def extract_faces_with_twins(
         embedding: dict[int, tuple[int, ...]],
         twin_map: dict[tuple[int, int], tuple[int, int]],
+        *,
+        graph_name: str = "graph",
     ) -> tuple[tuple[int, ...], ...]:
-        """Extract faces accurately using position-based half-edge traversal."""
-        visited: set = set()
-        faces: list[tuple[int, ...]] = []
-
-        # Calculate max iterations for infinite loop detection
-        if not embedding:
-            return tuple(faces)
-
-        max_iterations = len(embedding) * max(
-            len(neighbors) for neighbors in embedding.values()
+        """Extract face vertex cycles using the shared half-edge walker."""
+        face_cycles = GraphConverter.extract_face_half_edge_cycles(
+            embedding,
+            twin_map,
+            graph_name=graph_name,
+        )
+        return tuple(
+            tuple(vertex for vertex, _ in face_cycle)
+            for face_cycle in face_cycles
         )
 
-        for v in sorted(embedding.keys()):
-            deg_v = len(embedding[v])
-            for i in range(deg_v):
-                if (v, i) in visited:
+    @staticmethod
+    def extract_face_half_edge_cycles(
+        embedding: dict[int, tuple[int, ...]],
+        twin_map: dict[HalfEdge, HalfEdge],
+        *,
+        graph_name: str = "graph",
+    ) -> tuple[tuple[HalfEdge, ...], ...]:
+        """Extract face half-edge cycles from a plane embedding and twin map."""
+        visited: set[HalfEdge] = set()
+        face_cycles: list[tuple[HalfEdge, ...]] = []
+
+        if not embedding:
+            return tuple()
+
+        max_deg = max((len(neighbors) for neighbors in embedding.values()), default=0)
+        max_iterations = max(1, len(embedding) * max_deg)
+
+        for vertex in sorted(embedding):
+            degree = len(embedding[vertex])
+            for slot_idx in range(degree):
+                start_half_edge = (vertex, slot_idx)
+                if start_half_edge in visited:
                     continue
 
-                face: list[int] = []
-                curr_v, curr_i = v, i
+                face_cycle: list[HalfEdge] = []
+                curr_v, curr_i = start_half_edge
                 iterations = 0
 
                 while (curr_v, curr_i) not in visited:
                     iterations += 1
                     if iterations > max_iterations:
                         raise RuntimeError(
-                            f"Face traversal exceeded {max_iterations} iterations. "
-                            f"Possible infinite loop or invalid twin_map. "
-                            f"Current face: {face}"
+                            f"{graph_name} face traversal overflow: {max_iterations}"
                         )
 
-                    visited.add((curr_v, curr_i))
-                    face.append(curr_v)
+                    half_edge = (curr_v, curr_i)
+                    visited.add(half_edge)
+                    face_cycle.append(half_edge)
 
-                    # Twin
-                    if (curr_v, curr_i) not in twin_map:
-                        raise ValueError(
-                            f"Half-edge ({curr_v}, {curr_i}) not found in twin_map. "
-                            f"Embedding may be invalid or twin_map incomplete. "
-                            f"Face so far: {face}"
-                        )
-                    twin_v, twin_i = twin_map[(curr_v, curr_i)]
-
-                    # Predecessor in CW order
-                    deg = len(embedding[twin_v])
+                    twin = twin_map.get(half_edge)
+                    if twin is None:
+                        raise ValueError(f"{graph_name} twin_map missing: {half_edge}")
+                    twin_v, twin_i = twin
                     curr_v = twin_v
-                    curr_i = (twin_i - 1) % deg
+                    curr_i = (twin_i - 1) % len(embedding[twin_v])
 
-                if len(face) >= 2:
-                    faces.append(tuple(face))
+                if len(face_cycle) < 2:
+                    raise ValueError(f"{graph_name} face too short: {len(face_cycle)}")
+                face_cycles.append(tuple(face_cycle))
 
-        return tuple(faces)
+        return tuple(face_cycles)
 
     @staticmethod
     def is_4_regular(adjacency_list: dict[int, list[int]]) -> bool:
-        """Checks if graph is 4-regular."""
+        """Check whether every vertex has degree 4(quartic)."""
         if not adjacency_list:
             return False
         return all(len(neighbors) == 4 for neighbors in adjacency_list.values())

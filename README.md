@@ -2,7 +2,7 @@
 
 A Python wrapper for [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) to enumerate **Simple Quadrangulations on a Sphere (SQS)**.
 
-Given the dual vertex count `n`, it enumerates all **non-isomorphic Primal and Dual plane graphs**.
+Given the dual vertex count `n`, it enumerates all **non-isomorphic duals of simple quadrangulations of the sphere**, together with the corresponding primal and dual plane-graph topology.
 
 ## What is plantri?
 
