@@ -89,6 +89,10 @@ class GraphConverter:
         graph_name: str = "graph",
     ) -> tuple[tuple[HalfEdge, ...], ...]:
         """Extract face half-edge cycles from a plane embedding and twin map."""
+        for vertex, neighbors in embedding.items():
+            if len(neighbors) == 1 and neighbors[0] == vertex:
+                raise ValueError(f"{graph_name} face too short: 1")
+
         GraphConverter.validate_twin_map(
             embedding,
             twin_map,
