@@ -12,7 +12,7 @@ from collections.abc import Iterable, Iterator
 
 from .builder import _build_plane_graph_from_sections
 from .plane_graph import PlaneGraph
-from .plantri import Plantri, QuadrangulationEnumerator
+from .plantri import QuadrangulationDualClass, QuadrangulationEnumerator
 
 
 def _hit_max_count(current_len: int, max_count: int | None) -> bool:
@@ -168,40 +168,32 @@ def _iter_chunk_args(
         _close_if_possible(raw_iter)
 
 
-def _has_double_edge_in_dual_adjacency(
-    dual_adjacency: dict[int, list[int]],
-) -> bool:
-    """Return True if dual adjacency contains a double edge.
-
-    In this dual quartic plane-multigraph class, every double edge is exactly a
-    parallel-edge pair, so the two terms are interchangeable here.
-    """
-    half_edge_counts: dict[tuple[int, int], int] = {}
-    for vertex, neighbors in dual_adjacency.items():
-        for neighbor in neighbors:
-            edge = (vertex, neighbor) if vertex <= neighbor else (neighbor, vertex)
-            count = half_edge_counts.get(edge, 0) + 1
-            if count >= 4:
-                return True
-            half_edge_counts[edge] = count
-    return False
-
-
 _DEFAULT_NUM_WORKERS = 8
 _DEFAULT_CHUNK_SIZE = 5_000
 
 
+def _dual_class_for_filter(
+    *,
+    double_edge_free_only: bool,
+) -> QuadrangulationDualClass:
+    """Resolve the plantri generation class for the requested dual subset."""
+    return QuadrangulationEnumerator._dual_class_from_filter(
+        double_edge_free_only=double_edge_free_only,
+    )
+
+
 def _open_raw_double_code_stream(
     dual_vertex_count: int,
+    *,
+    dual_class: QuadrangulationDualClass,
 ) -> tuple[list[bytes], Iterator[bytes], float]:
     """Start plantri and return prefetched raw double_code lines plus startup latency."""
-    primal_vertex_count = dual_vertex_count + 2
     t_start = time.perf_counter()
-    plantri = Plantri()
+    enumerator = QuadrangulationEnumerator()
     raw_stream = _iter_raw_double_code_lines(
-        plantri.iter_stdout_lines(
-            primal_vertex_count,
-            QuadrangulationEnumerator._QUADRANGULATION_FLAGS,
+        enumerator.iter_double_code_lines(
+            dual_vertex_count,
+            dual_class=dual_class,
         )
     )
     raw_iter = iter(raw_stream)
@@ -226,15 +218,11 @@ def _try_build_single_graph(
     """Attempt to build a PlaneGraph from a raw double_code line.
 
     Returns None if the line is malformed, fails validation, or is
-    filtered out by double_edge_free_only.
+    rejected by a double-edge-free postcondition check.
     """
     try:
         primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
         if not primal_data.cyclic_adjacency or not dual_data.cyclic_adjacency:
-            return None
-        if double_edge_free_only and _has_double_edge_in_dual_adjacency(
-            dual_data.cyclic_adjacency
-        ):
             return None
         graph = _build_plane_graph_from_sections(
             primal_data,
@@ -242,6 +230,8 @@ def _try_build_single_graph(
             graph_id,
             include_primal=include_primal,
         )
+        if double_edge_free_only and graph.double_edges:
+            return None
         if validate:
             is_valid, _ = graph.validate()
             if not is_valid:
@@ -329,7 +319,7 @@ def _process_graph_chunk(
 class EnumerationTiming:
     """Timing breakdown for enumeration."""
 
-    plantri_s: float
+    startup_s: float
     parse_build_s: float
     total_s: float
     graph_count: int
@@ -348,7 +338,7 @@ def _make_filtered_result(
     graphs: list[PlaneGraph],
     *,
     generated_count: int,
-    plantri_s: float,
+    startup_s: float,
     t_start: float,
 ) -> FilteredEnumerationResult:
     """Create a filtered-enumeration result with consistent timing bookkeeping."""
@@ -357,8 +347,8 @@ def _make_filtered_result(
         graphs=graphs,
         generated_count=generated_count,
         timing=EnumerationTiming(
-            plantri_s=plantri_s,
-            parse_build_s=t_total - plantri_s,
+            startup_s=startup_s,
+            parse_build_s=t_total - startup_s,
             total_s=t_total,
             graph_count=len(graphs),
         ),
@@ -374,23 +364,31 @@ def enumerate_simple_quadrangulation_duals_filtered(
     double_edge_free_only: bool = False,
     verbose: bool = False,
 ) -> FilteredEnumerationResult:
-    """Enumerate simple-quadrangulation duals with optional filtering in a single pass.
-
-    When `double_edge_free_only` is True, only duals without double edges are
-    kept. In this dual class, a double edge is the same thing as a pair of
-    parallel edges.
-    """
+    """Enumerate simple-quadrangulation duals with optional class selection."""
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
+    dual_class = _dual_class_for_filter(
+        double_edge_free_only=double_edge_free_only,
+    )
     t_start = time.perf_counter()
     if max_count == 0:
         return _make_filtered_result(
             [],
             generated_count=0,
-            plantri_s=0.0,
+            startup_s=0.0,
+            t_start=t_start,
+        )
+    if dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(dual_class):
+        return _make_filtered_result(
+            [],
+            generated_count=0,
+            startup_s=0.0,
             t_start=t_start,
         )
 
-    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(dual_vertex_count)
+    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(
+        dual_vertex_count,
+        dual_class=dual_class,
+    )
 
     graphs, generated_count = _build_graphs_from_raw_lines(
         _iter_prefixed_lines(prefetched, raw_iter),
@@ -410,7 +408,7 @@ def enumerate_simple_quadrangulation_duals_filtered(
     return _make_filtered_result(
         graphs,
         generated_count=generated_count,
-        plantri_s=t_plantri,
+        startup_s=t_plantri,
         t_start=t_start,
     )
 
@@ -428,18 +426,31 @@ def enumerate_simple_quadrangulation_duals_parallel(
 ) -> FilteredEnumerationResult:
     """Parallel enumeration of simple-quadrangulation duals."""
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
+    dual_class = _dual_class_for_filter(
+        double_edge_free_only=double_edge_free_only,
+    )
 
     t_start = time.perf_counter()
     if max_count == 0:
         return _make_filtered_result(
             [],
             generated_count=0,
-            plantri_s=0.0,
+            startup_s=0.0,
+            t_start=t_start,
+        )
+    if dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(dual_class):
+        return _make_filtered_result(
+            [],
+            generated_count=0,
+            startup_s=0.0,
             t_start=t_start,
         )
 
     # Step 1: Start streaming plantri output.
-    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(dual_vertex_count)
+    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(
+        dual_vertex_count,
+        dual_class=dual_class,
+    )
 
     if num_workers is None:
         cpu_count = os.cpu_count() or 4
@@ -452,7 +463,7 @@ def enumerate_simple_quadrangulation_duals_parallel(
         return _make_filtered_result(
             [],
             generated_count=0,
-            plantri_s=t_plantri,
+            startup_s=t_plantri,
             t_start=t_start,
         )
 
@@ -494,7 +505,7 @@ def enumerate_simple_quadrangulation_duals_parallel(
         return _make_filtered_result(
             graphs,
             generated_count=generated_count,
-            plantri_s=t_plantri,
+            startup_s=t_plantri,
             t_start=t_start,
         )
 
@@ -530,7 +541,7 @@ def enumerate_simple_quadrangulation_duals_parallel(
         return _make_filtered_result(
             graphs,
             generated_count=generated_count,
-            plantri_s=t_plantri,
+            startup_s=t_plantri,
             t_start=t_start,
         )
 
@@ -557,6 +568,6 @@ def enumerate_simple_quadrangulation_duals_parallel(
     return _make_filtered_result(
         all_graphs,
         generated_count=generated_count,
-        plantri_s=t_plantri,
+        startup_s=t_plantri,
         t_start=t_start,
     )

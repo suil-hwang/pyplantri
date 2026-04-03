@@ -54,7 +54,7 @@
       double_code:
          The primal and dual graphs are written in a human-readable form
          of edge_code. The -d switch determines which is written first.
-         There is a limit of 155 edges.
+         This output routine has a runtime edge-count limit; see write_double_code().
 
       For planar_code, the standard header ">>planar_code<<"
       (without null or newline) is written at the start of the

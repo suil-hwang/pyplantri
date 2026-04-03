@@ -6,6 +6,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from shutil import which
 from collections.abc import Iterator
@@ -87,10 +88,30 @@ def _find_plantri_exe() -> Path:
 
 
 _PLANTRI_EXE = _find_plantri_exe()
+_BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES = 64
+_BUNDLED_MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES - 2
 
 
 class PlantriError(Exception):
     """Plantri execution failure."""
+
+
+class PlantriExecutableNotFoundError(PlantriError, FileNotFoundError):
+    """Plantri executable could not be found."""
+
+
+class QuadrangulationDualClass(str, Enum):
+    """Dual graph classes available from plantri quadrangulation modes."""
+
+    QUARTIC_MULTIGRAPH = "quartic_multigraph"
+    SIMPLE_QUARTIC = "simple_quartic"
+
+
+def _raise_executable_not_found(executable: Path) -> None:
+    raise PlantriExecutableNotFoundError(
+        f"plantri: executable not found {executable}; "
+        "run 'pip install -e .' or add plantri to PATH"
+    )
 
 
 class Plantri:
@@ -101,10 +122,7 @@ class Plantri:
         """Initializes Plantri with the executable path."""
         self.executable = Path(executable) if executable else _PLANTRI_EXE
         if not self.executable.exists():
-            raise FileNotFoundError(
-                f"plantri: executable not found {self.executable}; "
-                "run 'pip install -e .' or add plantri to PATH"
-            )
+            _raise_executable_not_found(self.executable)
 
     def run(
         self,
@@ -129,7 +147,7 @@ class Plantri:
                 f"{_summarize_process_text(stderr_text)}"
             ) from e
         except FileNotFoundError as e:
-            raise PlantriError(
+            raise PlantriExecutableNotFoundError(
                 f"plantri: executable not found {self.executable}"
             ) from e
 
@@ -179,7 +197,7 @@ class Plantri:
                     stderr=stderr_file,
                 )
             except FileNotFoundError as e:
-                raise PlantriError(
+                raise PlantriExecutableNotFoundError(
                     f"plantri: executable not found {self.executable}"
                 ) from e
 
@@ -273,7 +291,7 @@ class Plantri:
             ) from e
 
         except FileNotFoundError as e:
-            raise PlantriError(
+            raise PlantriExecutableNotFoundError(
                 f"plantri: executable not found {self.executable}"
             ) from e
 
@@ -291,52 +309,130 @@ class Plantri:
 class QuadrangulationEnumerator:
     """Enumerates dual quartic plane multigraphs of simple quadrangulations.
 
-    Uses plantri flags `-q -c2 -m2 -T` to generate all non-isomorphic
-    simple quadrangulations (primal) together with their quartic
-    (4-regular) duals in double_code format.
+    Uses plantri quadrangulation modes in double_code format.
+
+    - `QUARTIC_MULTIGRAPH`: `-q -c2 -m2 -T`
+    - `SIMPLE_QUARTIC`: `-q -c2 -T`
     """
 
-    _QUADRANGULATION_FLAGS = ["-q", "-c2", "-m2", "-T"]
+    _FLAGS_BY_DUAL_CLASS: dict[QuadrangulationDualClass, list[str]] = {
+        QuadrangulationDualClass.QUARTIC_MULTIGRAPH: ["-q", "-c2", "-m2", "-T"],
+        QuadrangulationDualClass.SIMPLE_QUARTIC: ["-q", "-c2", "-T"],
+    }
+    _MIN_NONEMPTY_DUAL_VERTICES: dict[QuadrangulationDualClass, int] = {
+        QuadrangulationDualClass.QUARTIC_MULTIGRAPH: 3,
+        QuadrangulationDualClass.SIMPLE_QUARTIC: 6,
+    }
 
     def __init__(self) -> None:
         """Initializes the SQS enumerator with a Plantri instance."""
-        self._plantri = Plantri()
+        self._plantri: Plantri | None = None
+
+    def _get_plantri(self) -> Plantri:
+        if self._plantri is None:
+            self._plantri = Plantri()
+        return self._plantri
+
+    @classmethod
+    def _normalize_dual_class(
+        cls,
+        dual_class: QuadrangulationDualClass | str,
+    ) -> QuadrangulationDualClass:
+        if isinstance(dual_class, QuadrangulationDualClass):
+            return dual_class
+        try:
+            return QuadrangulationDualClass(dual_class)
+        except ValueError as exc:
+            raise ValueError(f"unsupported quadrangulation dual_class: {dual_class!r}") from exc
+
+    @classmethod
+    def _flags_for_dual_class(
+        cls,
+        dual_class: QuadrangulationDualClass | str,
+    ) -> list[str]:
+        resolved_dual_class = cls._normalize_dual_class(dual_class)
+        return list(cls._FLAGS_BY_DUAL_CLASS[resolved_dual_class])
+
+    @classmethod
+    def _dual_class_from_filter(
+        cls,
+        *,
+        double_edge_free_only: bool,
+    ) -> QuadrangulationDualClass:
+        if double_edge_free_only:
+            return QuadrangulationDualClass.SIMPLE_QUARTIC
+        return QuadrangulationDualClass.QUARTIC_MULTIGRAPH
+
+    @classmethod
+    def _min_nonempty_dual_vertices(
+        cls,
+        dual_class: QuadrangulationDualClass | str,
+    ) -> int:
+        resolved_dual_class = cls._normalize_dual_class(dual_class)
+        return cls._MIN_NONEMPTY_DUAL_VERTICES[resolved_dual_class]
 
     @staticmethod
     def _validate_supported_dual_vertex_count(dual_vertex_count: int) -> None:
-        """Reject dual sizes outside the supported primal/dual reconstruction range."""
+        """Reject dual sizes outside the bundled plantri build range."""
         if dual_vertex_count < 3:
             raise ValueError(
                 f"dual_vertex_count unsupported: {dual_vertex_count} < 3"
             )
+        if dual_vertex_count > _BUNDLED_MAX_DUAL_VERTEX_COUNT:
+            raise ValueError(
+                "dual_vertex_count unsupported: "
+                f"{dual_vertex_count} > {_BUNDLED_MAX_DUAL_VERTEX_COUNT} "
+                f"(bundled plantri MAXN={_BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES})"
+            )
 
     def generate_pairs(
         self,
-        dual_vertex_count: int
+        dual_vertex_count: int,
+        *,
+        dual_class: QuadrangulationDualClass = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
     ) -> Iterator[tuple[ParsedGraphSection, ParsedGraphSection]]:
         """Yield (primal, dual) pairs from plantri."""
         self._validate_supported_dual_vertex_count(dual_vertex_count)
-        for line in self.iter_double_code_lines(dual_vertex_count):
+        for line in self.iter_double_code_lines(
+            dual_vertex_count,
+            dual_class=dual_class,
+        ):
             yield self.parse_double_code(line)
 
-    def count(self, dual_vertex_count: int) -> int:
+    def count(
+        self,
+        dual_vertex_count: int,
+        *,
+        dual_class: QuadrangulationDualClass = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
+    ) -> int:
         """Count non-isomorphic duals of simple quadrangulations."""
         self._validate_supported_dual_vertex_count(dual_vertex_count)
+        resolved_dual_class = self._normalize_dual_class(dual_class)
+        if dual_vertex_count < self._min_nonempty_dual_vertices(resolved_dual_class):
+            return 0
         primal_vertex_count = dual_vertex_count + 2
-        return self._plantri.count_from_options(
+        return self._get_plantri().count_from_options(
             primal_vertex_count,
-            options=self._QUADRANGULATION_FLAGS,
+            options=self._flags_for_dual_class(resolved_dual_class),
         )
 
-    def iter_double_code_lines(self, dual_vertex_count: int) -> Iterator[bytes]:
+    def iter_double_code_lines(
+        self,
+        dual_vertex_count: int,
+        *,
+        dual_class: QuadrangulationDualClass = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
+    ) -> Iterator[bytes]:
         """Yield raw double_code lines as bytes from plantri stdout."""
         self._validate_supported_dual_vertex_count(dual_vertex_count)
+        resolved_dual_class = self._normalize_dual_class(dual_class)
+        if dual_vertex_count < self._min_nonempty_dual_vertices(resolved_dual_class):
+            return
         # Euler's formula for plane graphs: V - E + F = 2
         # For quadrangulations: primal_vertices = dual_vertices + 2
         primal_vertex_count = dual_vertex_count + 2
-        for line in self._plantri.iter_stdout_lines(
+        for line in self._get_plantri().iter_stdout_lines(
             primal_vertex_count,
-            self._QUADRANGULATION_FLAGS,
+            self._flags_for_dual_class(resolved_dual_class),
         ):
             if _token_starts_with_digit(line):
                 yield line

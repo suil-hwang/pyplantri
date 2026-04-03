@@ -12,5 +12,8 @@ HalfEdge = tuple[int, int]
 # Edge label -> pair of half-edges sharing that label
 EdgeLabelPairs = dict[EdgeLabel, tuple[HalfEdge, HalfEdge]]
 
+# Immutable serialized edge label entries kept on PlaneGraph for reconstruction.
+EdgeLabelPairEntries = tuple[tuple[EdgeLabel, HalfEdge, HalfEdge], ...]
+
 # Canonical embedding: vertex -> CW-ordered neighbor tuple (0-based)
 Embedding = tuple[tuple[int, ...], ...]

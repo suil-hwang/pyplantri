@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
-from .types import Embedding
+from .converter import GraphConverter
+from .types import EdgeLabel, EdgeLabelPairEntries, Embedding, HalfEdge
 
 # Internal normalization input type.
 EmbeddingInput = dict[int, tuple[int, ...]] | Embedding | list[tuple[int, ...]]
@@ -132,6 +133,16 @@ class PlaneGraph:
     primal_faces: tuple[tuple[int, ...], ...]
     dual_vertex_to_primal_face: tuple[int, ...] = tuple()
     primal_vertex_to_dual_face: tuple[int, ...] = tuple()
+    dual_edge_label_pairs: EdgeLabelPairEntries = field(
+        default=tuple(),
+        repr=False,
+        compare=False,
+    )
+    primal_edge_label_pairs: EdgeLabelPairEntries = field(
+        default=tuple(),
+        repr=False,
+        compare=False,
+    )
 
     graph_id: int = 0
     _double_edges_cache: frozenset[tuple[int, int]] | None = field(
@@ -171,6 +182,161 @@ class PlaneGraph:
         ):
             return indices
         return tuple(int(idx) for idx in indices)
+
+    @staticmethod
+    def _coerce_edge_label(label: EdgeLabel) -> EdgeLabel:
+        if isinstance(label, bool):
+            raise TypeError(f"edge label must be int|str, got bool {label!r}")
+        if isinstance(label, int):
+            return int(label)
+        if isinstance(label, str):
+            return label
+        raise TypeError(f"edge label must be int|str, got {type(label).__name__}")
+
+    @staticmethod
+    def _coerce_half_edge(half_edge: Iterable[int]) -> HalfEdge:
+        if not isinstance(half_edge, (list, tuple)) or len(half_edge) != 2:
+            raise TypeError(
+                "half-edge must be a 2-sequence (vertex, slot); "
+                f"got {half_edge!r}"
+            )
+        return int(half_edge[0]), int(half_edge[1])
+
+    @classmethod
+    def _edge_label_sort_key(cls, label: EdgeLabel) -> tuple[int, int | str]:
+        normalized_label = cls._coerce_edge_label(label)
+        if isinstance(normalized_label, int):
+            return (0, normalized_label)
+        return (1, normalized_label)
+
+    @classmethod
+    def _normalize_edge_label_entry(
+        cls,
+        label: EdgeLabel,
+        half_edge_a: Iterable[int],
+        half_edge_b: Iterable[int],
+    ) -> tuple[EdgeLabel, HalfEdge, HalfEdge]:
+        normalized_label = cls._coerce_edge_label(label)
+        normalized_half_edge_a = cls._coerce_half_edge(half_edge_a)
+        normalized_half_edge_b = cls._coerce_half_edge(half_edge_b)
+        if normalized_half_edge_b < normalized_half_edge_a:
+            normalized_half_edge_a, normalized_half_edge_b = (
+                normalized_half_edge_b,
+                normalized_half_edge_a,
+            )
+        return (
+            normalized_label,
+            normalized_half_edge_a,
+            normalized_half_edge_b,
+        )
+
+    @classmethod
+    def _coerce_edge_label_pairs(
+        cls,
+        edge_label_pairs: (
+            Mapping[EdgeLabel, tuple[HalfEdge, HalfEdge]]
+            | Iterable[tuple[EdgeLabel, HalfEdge, HalfEdge]]
+            | Iterable[tuple[EdgeLabel, tuple[HalfEdge, HalfEdge]]]
+            | None
+        ),
+    ) -> EdgeLabelPairEntries:
+        if edge_label_pairs is None:
+            return tuple()
+
+        if isinstance(edge_label_pairs, tuple) and all(
+            isinstance(entry, tuple)
+            and len(entry) == 3
+            and isinstance(entry[0], (int, str))
+            and isinstance(entry[1], tuple)
+            and isinstance(entry[2], tuple)
+            and len(entry[1]) == 2
+            and len(entry[2]) == 2
+            for entry in edge_label_pairs
+        ):
+            normalized_entries = [
+                cls._normalize_edge_label_entry(label, h1, h2)
+                for label, h1, h2 in edge_label_pairs
+            ]
+            return tuple(
+                sorted(
+                    normalized_entries,
+                    key=lambda entry: (
+                        cls._edge_label_sort_key(entry[0]),
+                        entry[1],
+                        entry[2],
+                    ),
+                )
+            )
+
+        if isinstance(edge_label_pairs, Mapping):
+            raw_entries = (
+                (label, pair[0], pair[1])
+                for label, pair in edge_label_pairs.items()
+            )
+        else:
+            raw_entries = edge_label_pairs
+
+        normalized_entries: list[tuple[EdgeLabel, HalfEdge, HalfEdge]] = []
+        seen_labels: set[EdgeLabel] = set()
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, (list, tuple)):
+                raise TypeError(
+                    "edge label entry must be tuple/list; "
+                    f"got {type(raw_entry).__name__}"
+                )
+            if len(raw_entry) == 2:
+                raw_label = raw_entry[0]
+                raw_pair = raw_entry[1]
+                if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                    raise TypeError(
+                        "edge label pair payload must be a 2-sequence of half-edges; "
+                        f"got {raw_pair!r}"
+                    )
+                raw_h1, raw_h2 = raw_pair
+            elif len(raw_entry) == 3:
+                raw_label, raw_h1, raw_h2 = raw_entry
+            else:
+                raise TypeError(
+                    "edge label entry must have length 2 or 3; "
+                    f"got {len(raw_entry)}"
+                )
+
+            label = cls._coerce_edge_label(raw_label)
+            if label in seen_labels:
+                raise ValueError(f"duplicate edge label encountered: {label!r}")
+            seen_labels.add(label)
+            normalized_entries.append(
+                cls._normalize_edge_label_entry(label, raw_h1, raw_h2)
+            )
+
+        return tuple(
+            sorted(
+                normalized_entries,
+                key=lambda entry: (
+                    cls._edge_label_sort_key(entry[0]),
+                    entry[1],
+                    entry[2],
+                ),
+            )
+        )
+
+    @staticmethod
+    def _encode_edge_label(label: EdgeLabel) -> str:
+        if isinstance(label, int):
+            return f"i:{label}"
+        return f"s:{label}"
+
+    @staticmethod
+    def _decode_edge_label(encoded_label: str) -> EdgeLabel:
+        if not isinstance(encoded_label, str) or len(encoded_label) < 3:
+            raise ValueError(f"invalid encoded edge label: {encoded_label!r}")
+        prefix = encoded_label[:2]
+        payload = encoded_label[2:]
+        if prefix == "i:":
+            return int(payload)
+        if prefix == "s:":
+            return payload
+        raise ValueError(f"invalid encoded edge label prefix: {encoded_label!r}")
 
     def __post_init__(self) -> None:
         """Normalize mutable inputs to immutable internal representations."""
@@ -218,6 +384,67 @@ class PlaneGraph:
             "primal_vertex_to_dual_face",
             self._coerce_index_tuple(self.primal_vertex_to_dual_face),
         )
+        _set(
+            self,
+            "dual_edge_label_pairs",
+            self._coerce_edge_label_pairs(self.dual_edge_label_pairs),
+        )
+        _set(
+            self,
+            "primal_edge_label_pairs",
+            self._coerce_edge_label_pairs(self.primal_edge_label_pairs),
+        )
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "dual_num_vertices": self.dual_num_vertices,
+            "dual_support_edges": self.dual_support_edges,
+            "dual_edge_multiplicity": self.dual_edge_multiplicity,
+            "dual_embedding": self.dual_embedding,
+            "dual_faces": self.dual_faces,
+            "primal_num_vertices": self.primal_num_vertices,
+            "primal_embedding": self.primal_embedding,
+            "primal_faces": self.primal_faces,
+            "dual_vertex_to_primal_face": self.dual_vertex_to_primal_face,
+            "primal_vertex_to_dual_face": self.primal_vertex_to_dual_face,
+            "dual_edge_label_pairs": self.dual_edge_label_pairs,
+            "primal_edge_label_pairs": self.primal_edge_label_pairs,
+            "graph_id": self.graph_id,
+            "_double_edges_cache": self._double_edges_cache,
+        }
+
+    def __setstate__(self, state: Any) -> None:
+        if not isinstance(state, dict):
+            raise TypeError(
+                "PlaneGraph pickle state must be dict; "
+                f"got {type(state).__name__}"
+            )
+
+        required_keys = (
+            "dual_num_vertices",
+            "dual_support_edges",
+            "dual_edge_multiplicity",
+            "dual_embedding",
+            "dual_faces",
+            "primal_num_vertices",
+            "primal_embedding",
+            "primal_faces",
+            "dual_vertex_to_primal_face",
+            "primal_vertex_to_dual_face",
+            "dual_edge_label_pairs",
+            "primal_edge_label_pairs",
+            "graph_id",
+        )
+
+        missing_keys = [key for key in required_keys if key not in state]
+        if missing_keys:
+            missing = ", ".join(missing_keys)
+            raise KeyError(f"PlaneGraph pickle state missing keys: {missing}")
+
+        for name in required_keys:
+            object.__setattr__(self, name, state[name])
+        object.__setattr__(self, "_double_edges_cache", state.get("_double_edges_cache"))
+        self.__post_init__()
 
     @staticmethod
     def _normalize_embedding(
@@ -235,7 +462,7 @@ class PlaneGraph:
             for vertex, neighbors in embedding.items():
                 idx = int(vertex)
                 if idx < 0:
-                    continue
+                    raise ValueError(f"embedding contains negative vertex index: {idx}")
                 if idx >= len(dense):
                     dense.extend(tuple() for _ in range(idx + 1 - len(dense)))
                 dense[idx] = tuple(int(u) for u in neighbors)
@@ -310,6 +537,184 @@ class PlaneGraph:
                 )
 
         return directed_counts, undirected_half_edge_counts
+
+    @staticmethod
+    def _label_signature(labels: Iterable[EdgeLabel]) -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for label in labels:
+            token = PlaneGraph._encode_edge_label(label)
+            counts[token] = counts.get(token, 0) + 1
+        return tuple(sorted(counts.items()))
+
+    @staticmethod
+    def _embedding_to_dict(embedding: Embedding) -> dict[int, tuple[int, ...]]:
+        return {vertex: neighbors for vertex, neighbors in enumerate(embedding)}
+
+    def _reconstruct_half_edge_maps(
+        self,
+        *,
+        graph_name: str,
+        embedding: Embedding,
+        edge_label_pairs: EdgeLabelPairEntries,
+        errors: list[str],
+    ) -> tuple[dict[HalfEdge, HalfEdge] | None, dict[HalfEdge, EdgeLabel] | None]:
+        if not edge_label_pairs:
+            return None, None
+
+        twin_map: dict[HalfEdge, HalfEdge] = {}
+        half_edge_labels: dict[HalfEdge, EdgeLabel] = {}
+        expected_half_edge_count = sum(len(neighbors) for neighbors in embedding)
+
+        for edge_label, half_edge_a, half_edge_b in edge_label_pairs:
+            for half_edge in (half_edge_a, half_edge_b):
+                vertex, slot_idx = half_edge
+                if vertex < 0 or vertex >= len(embedding):
+                    errors.append(
+                        f"{graph_name} edge-label pair out-of-range vertex: {half_edge}"
+                    )
+                    continue
+                if slot_idx < 0 or slot_idx >= len(embedding[vertex]):
+                    errors.append(
+                        f"{graph_name} edge-label pair out-of-range slot: {half_edge}"
+                    )
+
+            for src, dst in ((half_edge_a, half_edge_b), (half_edge_b, half_edge_a)):
+                existing_twin = twin_map.get(src)
+                if existing_twin is not None and existing_twin != dst:
+                    errors.append(
+                        f"{graph_name} twin_map conflict at {src}: {existing_twin} != {dst}"
+                    )
+                twin_map[src] = dst
+
+            for half_edge in (half_edge_a, half_edge_b):
+                existing_label = half_edge_labels.get(half_edge)
+                if existing_label is not None and existing_label != edge_label:
+                    errors.append(
+                        f"{graph_name} half-edge label conflict at {half_edge}: "
+                        f"{existing_label!r} != {edge_label!r}"
+                    )
+                half_edge_labels[half_edge] = edge_label
+
+        if len(half_edge_labels) != expected_half_edge_count:
+            errors.append(
+                f"{graph_name} edge-label coverage mismatch: "
+                f"{len(half_edge_labels)} != {expected_half_edge_count}"
+            )
+        if len(twin_map) != expected_half_edge_count:
+            errors.append(
+                f"{graph_name} twin_map coverage mismatch: "
+                f"{len(twin_map)} != {expected_half_edge_count}"
+            )
+
+        return twin_map, half_edge_labels
+
+    def _extract_reconstructed_faces(
+        self,
+        *,
+        graph_name: str,
+        embedding: Embedding,
+        edge_label_pairs: EdgeLabelPairEntries,
+        errors: list[str],
+    ) -> tuple[tuple[tuple[int, ...], ...] | None, tuple[tuple[tuple[str, int], ...], ...] | None, dict[HalfEdge, EdgeLabel] | None]:
+        twin_map, half_edge_labels = self._reconstruct_half_edge_maps(
+            graph_name=graph_name,
+            embedding=embedding,
+            edge_label_pairs=edge_label_pairs,
+            errors=errors,
+        )
+        if twin_map is None or half_edge_labels is None:
+            return None, None, None
+
+        try:
+            face_cycles = GraphConverter.extract_face_half_edge_cycles(
+                self._embedding_to_dict(embedding),
+                twin_map,
+                graph_name=graph_name,
+            )
+        except Exception as exc:
+            errors.append(f"{graph_name} face reconstruction failed: {exc}")
+            return None, None, half_edge_labels
+
+        reconstructed_faces: list[tuple[int, ...]] = []
+        face_label_signatures: list[tuple[tuple[str, int], ...]] = []
+        for face_cycle in face_cycles:
+            labels: list[EdgeLabel] = []
+            for half_edge in face_cycle:
+                label = half_edge_labels.get(half_edge)
+                if label is None:
+                    errors.append(
+                        f"{graph_name} reconstructed face uses unlabeled half-edge: {half_edge}"
+                    )
+                    continue
+                labels.append(label)
+            reconstructed_faces.append(tuple(vertex for vertex, _ in face_cycle))
+            face_label_signatures.append(self._label_signature(labels))
+
+        return (
+            tuple(reconstructed_faces),
+            tuple(face_label_signatures),
+            half_edge_labels,
+        )
+
+    def _vertex_label_signatures(
+        self,
+        *,
+        graph_name: str,
+        embedding: Embedding,
+        half_edge_labels: dict[HalfEdge, EdgeLabel],
+        errors: list[str],
+    ) -> tuple[tuple[tuple[str, int], ...], ...] | None:
+        signatures: list[tuple[tuple[str, int], ...]] = []
+        for vertex, neighbors in enumerate(embedding):
+            labels: list[EdgeLabel] = []
+            for slot_idx in range(len(neighbors)):
+                half_edge = (vertex, slot_idx)
+                label = half_edge_labels.get(half_edge)
+                if label is None:
+                    errors.append(f"{graph_name} vertex uses unlabeled half-edge: {half_edge}")
+                    return None
+                labels.append(label)
+            signatures.append(self._label_signature(labels))
+        return tuple(signatures)
+
+    @staticmethod
+    def _match_label_signatures(
+        source_signatures: tuple[tuple[tuple[str, int], ...], ...],
+        target_signatures: tuple[tuple[tuple[str, int], ...], ...],
+        *,
+        source_name: str,
+        target_name: str,
+    ) -> tuple[int, ...]:
+        if len(source_signatures) != len(target_signatures):
+            raise ValueError(
+                f"signature count mismatch: {source_name} -> {target_name} "
+                f"({len(source_signatures)} != {len(target_signatures)})"
+            )
+
+        target_by_signature: dict[tuple[tuple[str, int], ...], list[int]] = {}
+        for target_idx, signature in enumerate(target_signatures):
+            target_by_signature.setdefault(signature, []).append(target_idx)
+
+        used_targets: set[int] = set()
+        mapping: list[int] = []
+        for source_idx, signature in enumerate(source_signatures):
+            candidates = [
+                target_idx
+                for target_idx in target_by_signature.get(signature, [])
+                if target_idx not in used_targets
+            ]
+            if len(candidates) != 1:
+                raise ValueError(
+                    f"signature map ambiguous: {source_name} {source_idx} -> {target_name}"
+                )
+            target_idx = candidates[0]
+            used_targets.add(target_idx)
+            mapping.append(target_idx)
+
+        if len(used_targets) != len(target_signatures):
+            raise ValueError(f"signature map not bijective: {source_name} -> {target_name}")
+
+        return tuple(mapping)
 
     @staticmethod
     def _validate_bijection(
@@ -580,6 +985,103 @@ class PlaneGraph:
             onto_label="dual faces",
         )
 
+    def _validate_topological_consistency(self, errors: list[str]) -> None:
+        if not self.dual_edge_label_pairs:
+            errors.append("dual topology metadata missing: dual_edge_label_pairs")
+            return
+        dual_faces_reconstructed, dual_face_signatures, dual_half_edge_labels = (
+            self._extract_reconstructed_faces(
+                graph_name="dual",
+                embedding=self.dual_embedding,
+                edge_label_pairs=self.dual_edge_label_pairs,
+                errors=errors,
+            )
+        )
+        if dual_faces_reconstructed is not None and dual_faces_reconstructed != self.dual_faces:
+            errors.append(
+                "dual_faces topology mismatch: "
+                "stored faces do not match reconstruction from embedding+edge labels"
+            )
+
+        if not self._has_primal_data():
+            return
+        if not self.primal_edge_label_pairs:
+            errors.append("primal topology metadata missing: primal_edge_label_pairs")
+            return
+
+        primal_faces_reconstructed, primal_face_signatures, primal_half_edge_labels = (
+            self._extract_reconstructed_faces(
+                graph_name="primal",
+                embedding=self.primal_embedding,
+                edge_label_pairs=self.primal_edge_label_pairs,
+                errors=errors,
+            )
+        )
+        if (
+            primal_faces_reconstructed is not None
+            and primal_faces_reconstructed != self.primal_faces
+        ):
+            errors.append(
+                "primal_faces topology mismatch: "
+                "stored faces do not match reconstruction from embedding+edge labels"
+            )
+
+        if (
+            dual_face_signatures is None
+            or primal_face_signatures is None
+            or dual_half_edge_labels is None
+            or primal_half_edge_labels is None
+        ):
+            return
+
+        dual_labels = {label for label, _, _ in self.dual_edge_label_pairs}
+        primal_labels = {label for label, _, _ in self.primal_edge_label_pairs}
+        if dual_labels != primal_labels:
+            errors.append("primal/dual edge label sets mismatch")
+            return
+
+        dual_vertex_signatures = self._vertex_label_signatures(
+            graph_name="dual",
+            embedding=self.dual_embedding,
+            half_edge_labels=dual_half_edge_labels,
+            errors=errors,
+        )
+        primal_vertex_signatures = self._vertex_label_signatures(
+            graph_name="primal",
+            embedding=self.primal_embedding,
+            half_edge_labels=primal_half_edge_labels,
+            errors=errors,
+        )
+        if dual_vertex_signatures is None or primal_vertex_signatures is None:
+            return
+
+        try:
+            reconstructed_dual_vertex_to_primal_face = self._match_label_signatures(
+                dual_vertex_signatures,
+                primal_face_signatures,
+                source_name="dual vertex",
+                target_name="primal face",
+            )
+            if reconstructed_dual_vertex_to_primal_face != self.dual_vertex_to_primal_face:
+                errors.append(
+                    "dual_vertex_to_primal_face topology mismatch: "
+                    "stored mapping does not match reconstruction from edge labels"
+                )
+
+            reconstructed_primal_vertex_to_dual_face = self._match_label_signatures(
+                primal_vertex_signatures,
+                dual_face_signatures,
+                source_name="primal vertex",
+                target_name="dual face",
+            )
+            if reconstructed_primal_vertex_to_dual_face != self.primal_vertex_to_dual_face:
+                errors.append(
+                    "primal_vertex_to_dual_face topology mismatch: "
+                    "stored mapping does not match reconstruction from edge labels"
+                )
+        except ValueError as exc:
+            errors.append(str(exc))
+
     @property
     def dual_num_faces(self) -> int:
         """Face count (should be n + 2 by Euler's formula)."""
@@ -622,6 +1124,7 @@ class PlaneGraph:
         self._validate_dual_contract(errors)
         if self._has_primal_data():
             self._validate_primal_contract(errors)
+        self._validate_topological_consistency(errors)
 
         return len(errors) == 0, errors
 
@@ -633,12 +1136,28 @@ class PlaneGraph:
             "dual_edge_multiplicity": {
                 f"{u},{v}": m for (u, v), m in self.dual_edge_multiplicity.items()
             },
+            "dual_edge_label_pairs": [
+                [
+                    self._encode_edge_label(label),
+                    [h1[0], h1[1]],
+                    [h2[0], h2[1]],
+                ]
+                for label, h1, h2 in self.dual_edge_label_pairs
+            ],
             "dual_embedding": {
                 str(v): list(neighbors)
                 for v, neighbors in enumerate(self.dual_embedding)
             },
             "dual_faces": [list(f) for f in self.dual_faces],
             "primal_num_vertices": self.primal_num_vertices,
+            "primal_edge_label_pairs": [
+                [
+                    self._encode_edge_label(label),
+                    [h1[0], h1[1]],
+                    [h2[0], h2[1]],
+                ]
+                for label, h1, h2 in self.primal_edge_label_pairs
+            ],
             "primal_embedding": {
                 str(v): list(neighbors)
                 for v, neighbors in enumerate(self.primal_embedding)
@@ -656,8 +1175,16 @@ class PlaneGraph:
             "dual_num_vertices",
             "dual_support_edges",
             "dual_edge_multiplicity",
+            "dual_edge_label_pairs",
             "dual_embedding",
             "dual_faces",
+            "primal_num_vertices",
+            "primal_edge_label_pairs",
+            "primal_embedding",
+            "primal_faces",
+            "dual_vertex_to_primal_face",
+            "primal_vertex_to_dual_face",
+            "graph_id",
         )
         missing_keys = [key for key in required_keys if key not in data]
         if missing_keys:
@@ -667,25 +1194,45 @@ class PlaneGraph:
         dual_num_vertices = int(data["dual_num_vertices"])
         raw_support_edges = data["dual_support_edges"]
         raw_edge_mult = data["dual_edge_multiplicity"]
+        raw_dual_edge_label_pairs = data["dual_edge_label_pairs"]
         raw_embedding = data["dual_embedding"]
         raw_faces = data["dual_faces"]
-        primal_num_vertices = int(data.get("primal_num_vertices", 0))
-        primal_embedding_payload = data.get("primal_embedding", {})
+        primal_num_vertices = int(data["primal_num_vertices"])
+        raw_primal_edge_label_pairs = data["primal_edge_label_pairs"]
+        primal_embedding_payload = data["primal_embedding"]
         parsed_edge_multiplicity: dict[tuple[int, int], int] = {
             (int(parts[0]), int(parts[1])): int(v)
             for k, v in raw_edge_mult.items()
             for parts in [k.split(",")]
         }
+        parsed_dual_edge_label_pairs = [
+            (
+                cls._decode_edge_label(raw_label),
+                cls._coerce_half_edge(raw_half_edge_a),
+                cls._coerce_half_edge(raw_half_edge_b),
+            )
+            for raw_label, raw_half_edge_a, raw_half_edge_b in raw_dual_edge_label_pairs
+        ]
+        parsed_primal_edge_label_pairs = [
+            (
+                cls._decode_edge_label(raw_label),
+                cls._coerce_half_edge(raw_half_edge_a),
+                cls._coerce_half_edge(raw_half_edge_b),
+            )
+            for raw_label, raw_half_edge_a, raw_half_edge_b in raw_primal_edge_label_pairs
+        ]
         return cls(
             dual_num_vertices=dual_num_vertices,
             dual_support_edges=cls._coerce_support_edges(raw_support_edges),
             dual_edge_multiplicity=parsed_edge_multiplicity,
+            dual_edge_label_pairs=parsed_dual_edge_label_pairs,
             dual_embedding=cls._normalize_embedding(
                 raw_embedding,
                 expected_size=dual_num_vertices,
             ),
             dual_faces=cls._coerce_faces(raw_faces),
             primal_num_vertices=primal_num_vertices,
+            primal_edge_label_pairs=parsed_primal_edge_label_pairs,
             primal_embedding=cls._normalize_embedding(
                 primal_embedding_payload,
                 expected_size=primal_num_vertices,

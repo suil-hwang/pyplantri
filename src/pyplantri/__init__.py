@@ -19,6 +19,8 @@ from .plane_graph import (
 from .plantri import (
     ParsedGraphSection,
     Plantri,
+    QuadrangulationDualClass,
+    PlantriExecutableNotFoundError,
     PlantriError,
     QuadrangulationEnumerator,
 )
@@ -28,6 +30,8 @@ __all__ = [
     # Plantri wrapper
     "ParsedGraphSection",
     "Plantri",
+    "QuadrangulationDualClass",
+    "PlantriExecutableNotFoundError",
     "PlantriError",
     "QuadrangulationEnumerator",
     # Converter

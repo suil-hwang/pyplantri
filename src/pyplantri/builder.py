@@ -43,6 +43,12 @@ def _to_zero_based_twin_map(
             f"{graph_name} twin_map size mismatch: {len(twin_map_0based)} != {expected_half_edges}"
         )
 
+    GraphConverter.validate_twin_map(
+        embedding,
+        twin_map_0based,
+        graph_name=graph_name,
+    )
+
     return twin_map_0based
 
 
@@ -296,9 +302,21 @@ def _build_plane_graph_from_sections(
         dual_num_vertices=dual_vertex_count,
         dual_support_edges=edges,
         dual_edge_multiplicity=edge_multiplicity,
+        dual_edge_label_pairs=tuple(
+            (edge_label, half_edge_a, half_edge_b)
+            for edge_label, (half_edge_a, half_edge_b) in dual.edge_label_pairs.items()
+        ),
         dual_embedding=normalized_embedding,
         dual_faces=faces,
         primal_num_vertices=primal_num_vertices,
+        primal_edge_label_pairs=(
+            tuple(
+                (edge_label, half_edge_a, half_edge_b)
+                for edge_label, (half_edge_a, half_edge_b) in primal.edge_label_pairs.items()
+            )
+            if include_primal
+            else tuple()
+        ),
         primal_embedding=normalized_primal_embedding,
         primal_faces=primal_faces,
         dual_vertex_to_primal_face=dual_vertex_to_primal_face,
