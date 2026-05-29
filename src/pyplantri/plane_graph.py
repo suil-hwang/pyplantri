@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from collections.abc import Iterable, Iterator, Mapping
-from typing import Any
+from typing import Any, SupportsInt, cast
 
 from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairEntries, Embedding, HalfEdge
@@ -38,6 +38,16 @@ class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
             self._data = dict(ordered_items)
             return
 
+        # Fast path for the canonical items tuple emitted by __reduce__ during
+        # unpickling. Treat it as trusted/pre-validated (like the dict path above)
+        # and skip the per-element isinstance/int coercion that dominates cache
+        # load time. The defensive sort keeps the canonical order regardless.
+        if type(edge_multiplicity) is tuple:
+            ordered_items = tuple(sorted(edge_multiplicity))
+            self._items = ordered_items
+            self._data = dict(ordered_items)
+            return
+
         items_iter: Iterator[tuple[tuple[int, int], int]]
         if isinstance(edge_multiplicity, Mapping):
             items_iter = iter(edge_multiplicity.items())
@@ -62,9 +72,9 @@ class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
                     "edge_multiplicity values must be integers; "
                     f"got {raw_multiplicity!r} on edge {raw_edge!r}."
                 )
-            u = int(raw_u)
-            v = int(raw_v)
-            multiplicity = int(raw_multiplicity)
+            u = int(cast("SupportsInt", raw_u))
+            v = int(cast("SupportsInt", raw_v))
+            multiplicity = int(cast("SupportsInt", raw_multiplicity))
             edge = (u, v)
             if edge in normalized:
                 raise ValueError(f"Duplicate edge key encountered: {edge}")
@@ -151,7 +161,7 @@ class PlaneGraph:
 
     @staticmethod
     def _coerce_support_edges(
-        edges: Iterable[tuple[int, int]],
+        edges: Iterable[tuple[SupportsInt, SupportsInt]],
     ) -> tuple[tuple[int, int], ...]:
         if isinstance(edges, tuple) and all(
             isinstance(edge, tuple)
@@ -160,27 +170,30 @@ class PlaneGraph:
             and isinstance(edge[1], int)
             for edge in edges
         ):
-            return edges
+            return cast("tuple[tuple[int, int], ...]", edges)
         return tuple((int(u), int(v)) for u, v in edges)
 
     @staticmethod
     def _coerce_faces(
-        faces: Iterable[Iterable[int]],
+        faces: Iterable[Iterable[SupportsInt]],
     ) -> tuple[tuple[int, ...], ...]:
         if isinstance(faces, tuple) and all(
             isinstance(face, tuple)
             and all(isinstance(v, int) for v in face)
             for face in faces
         ):
-            return tuple(tuple(v for v in face) for face in faces)
+            return cast(
+                "tuple[tuple[int, ...], ...]",
+                tuple(tuple(v for v in face) for face in faces),
+            )
         return tuple(tuple(int(v) for v in face) for face in faces)
 
     @staticmethod
-    def _coerce_index_tuple(indices: Iterable[int]) -> tuple[int, ...]:
+    def _coerce_index_tuple(indices: Iterable[SupportsInt]) -> tuple[int, ...]:
         if isinstance(indices, tuple) and all(
             isinstance(idx, int) for idx in indices
         ):
-            return indices
+            return cast("tuple[int, ...]", indices)
         return tuple(int(idx) for idx in indices)
 
     @staticmethod
@@ -188,13 +201,13 @@ class PlaneGraph:
         if isinstance(label, bool):
             raise TypeError(f"edge label must be int|str, got bool {label!r}")
         if isinstance(label, int):
-            return int(label)
+            return label
         if isinstance(label, str):
             return label
         raise TypeError(f"edge label must be int|str, got {type(label).__name__}")
 
     @staticmethod
-    def _coerce_half_edge(half_edge: Iterable[int]) -> HalfEdge:
+    def _coerce_half_edge(half_edge: Iterable[SupportsInt]) -> HalfEdge:
         if not isinstance(half_edge, (list, tuple)) or len(half_edge) != 2:
             raise TypeError(
                 "half-edge must be a 2-sequence (vertex, slot); "
@@ -253,9 +266,13 @@ class PlaneGraph:
             and len(entry[2]) == 2
             for entry in edge_label_pairs
         ):
+            three_tuple_entries = cast(
+                "tuple[tuple[EdgeLabel, HalfEdge, HalfEdge], ...]",
+                edge_label_pairs,
+            )
             normalized_entries = [
                 cls._normalize_edge_label_entry(label, h1, h2)
-                for label, h1, h2 in edge_label_pairs
+                for label, h1, h2 in three_tuple_entries
             ]
             return tuple(
                 sorted(
@@ -301,7 +318,7 @@ class PlaneGraph:
                     f"got {len(raw_entry)}"
                 )
 
-            label = cls._coerce_edge_label(raw_label)
+            label = cls._coerce_edge_label(cast("EdgeLabel", raw_label))
             if label in seen_labels:
                 raise ValueError(f"duplicate edge label encountered: {label!r}")
             seen_labels.add(label)
@@ -342,9 +359,9 @@ class PlaneGraph:
         """Normalize mutable inputs to immutable internal representations."""
         _set = object.__setattr__
 
-        _set(self, "dual_num_vertices", int(self.dual_num_vertices))
-        _set(self, "primal_num_vertices", int(self.primal_num_vertices))
-        _set(self, "graph_id", int(self.graph_id))
+        _set(self, "dual_num_vertices", int(cast("SupportsInt", self.dual_num_vertices)))
+        _set(self, "primal_num_vertices", int(cast("SupportsInt", self.primal_num_vertices)))
+        _set(self, "graph_id", int(cast("SupportsInt", self.graph_id)))
 
         _set(
             self,
@@ -457,12 +474,15 @@ class PlaneGraph:
     ) -> Embedding:
         """Convert sparse/dict embedding into dense 0..n-1 tuple-of-tuples."""
         if isinstance(embedding, dict):
+            # JSON round-trips store vertex keys as strings (to_dict uses str(v)),
+            # so the int() conversions below are genuine, not redundant.
+            keyed = cast("dict[SupportsInt | str, Iterable[SupportsInt]]", embedding)
             size = max(expected_size, 0)
-            if embedding:
-                max_index = max(int(v) for v in embedding.keys()) + 1
+            if keyed:
+                max_index = max(int(v) for v in keyed.keys()) + 1
                 size = max(size, max_index)
             dense: list[tuple[int, ...]] = [tuple() for _ in range(size)]
-            for vertex, neighbors in embedding.items():
+            for vertex, neighbors in keyed.items():
                 idx = int(vertex)
                 if idx < 0:
                     raise ValueError(f"embedding contains negative vertex index: {idx}")
@@ -480,7 +500,7 @@ class PlaneGraph:
             return embedding
 
         dense_embedding: Embedding = tuple(
-            tuple(int(u) for u in neighbors) for neighbors in embedding
+            tuple(int(cast("SupportsInt", u)) for u in neighbors) for neighbors in embedding
         )
         if expected_size > len(dense_embedding):
             dense_embedding = dense_embedding + tuple(
@@ -1228,14 +1248,14 @@ class PlaneGraph:
             dual_num_vertices=dual_num_vertices,
             dual_support_edges=cls._coerce_support_edges(raw_support_edges),
             dual_edge_multiplicity=parsed_edge_multiplicity,
-            dual_edge_label_pairs=parsed_dual_edge_label_pairs,
+            dual_edge_label_pairs=tuple(parsed_dual_edge_label_pairs),
             dual_embedding=cls._normalize_embedding(
                 raw_embedding,
                 expected_size=dual_num_vertices,
             ),
             dual_faces=cls._coerce_faces(raw_faces),
             primal_num_vertices=primal_num_vertices,
-            primal_edge_label_pairs=parsed_primal_edge_label_pairs,
+            primal_edge_label_pairs=tuple(parsed_primal_edge_label_pairs),
             primal_embedding=cls._normalize_embedding(
                 primal_embedding_payload,
                 expected_size=primal_num_vertices,

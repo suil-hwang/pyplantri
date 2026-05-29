@@ -248,6 +248,7 @@ def _build_plane_graph_from_sections(
     primal_num_vertices = 0
     primal_embedding: dict[int, tuple[int, ...]] = {}
     primal_faces: tuple[tuple[int, ...], ...] = tuple()
+    primal_edge_label_entries: tuple[tuple[EdgeLabel, HalfEdge, HalfEdge], ...] = tuple()
     dual_vertex_to_primal_face: tuple[int, ...] = tuple()
     primal_vertex_to_dual_face: tuple[int, ...] = tuple()
 
@@ -255,6 +256,10 @@ def _build_plane_graph_from_sections(
         primal = _prepare_section_data(primal_data, graph_name="primal")
         primal_num_vertices = primal.vertex_count
         primal_embedding = primal.embedding
+        primal_edge_label_entries = tuple(
+            (edge_label, half_edge_a, half_edge_b)
+            for edge_label, (half_edge_a, half_edge_b) in primal.edge_label_pairs.items()
+        )
         primal_face_cycles = GraphConverter.extract_face_half_edge_cycles(
             primal.embedding,
             primal.twin_map,
@@ -309,14 +314,7 @@ def _build_plane_graph_from_sections(
         dual_embedding=normalized_embedding,
         dual_faces=faces,
         primal_num_vertices=primal_num_vertices,
-        primal_edge_label_pairs=(
-            tuple(
-                (edge_label, half_edge_a, half_edge_b)
-                for edge_label, (half_edge_a, half_edge_b) in primal.edge_label_pairs.items()
-            )
-            if include_primal
-            else tuple()
-        ),
+        primal_edge_label_pairs=primal_edge_label_entries,
         primal_embedding=normalized_primal_embedding,
         primal_faces=primal_faces,
         dual_vertex_to_primal_face=dual_vertex_to_primal_face,
