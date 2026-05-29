@@ -77,10 +77,7 @@ def _get_version() -> str:
 def _validate_format_version(metadata: CacheMetadata, filepath: Path) -> None:
     """Validate cache format version compatibility."""
     if metadata.format_version != _CACHE_FORMAT_VERSION:
-        raise ValueError(
-            "cache: unsupported format_version "
-            f"{metadata.format_version} != {_CACHE_FORMAT_VERSION} ({filepath})"
-        )
+        raise ValueError(f"cache: unsupported format_version {metadata.format_version} != {_CACHE_FORMAT_VERSION} ({filepath})")
 
 
 def _build_cache_metadata(
@@ -125,20 +122,15 @@ def _atomic_write(
 def _coerce_pickle_metadata(raw_metadata: Any, filepath: Path) -> CacheMetadata:
     """Coerce pickle metadata payload into CacheMetadata."""
     if not isinstance(raw_metadata, CacheMetadata):
-        raise ValueError(
-            f"cache: invalid metadata type {type(raw_metadata).__name__}"
-        )
-    metadata = raw_metadata
-    _validate_format_version(metadata, filepath)
-    return metadata
+        raise ValueError(f"cache: invalid metadata type {type(raw_metadata).__name__}")
+    _validate_format_version(raw_metadata, filepath)
+    return raw_metadata
 
 
 def _coerce_json_metadata(raw_metadata: Any, filepath: Path) -> CacheMetadata:
     """Coerce canonical JSON metadata payload into CacheMetadata."""
     if not isinstance(raw_metadata, dict):
-        raise ValueError(
-            f"cache: JSON metadata must be object ({filepath})"
-        )
+        raise ValueError(f"cache: JSON metadata must be object ({filepath})")
     required_keys = (
         "format_version",
         "pyplantri_version",
@@ -148,10 +140,7 @@ def _coerce_json_metadata(raw_metadata: Any, filepath: Path) -> CacheMetadata:
     )
     missing_keys = [key for key in required_keys if key not in raw_metadata]
     if missing_keys:
-        missing = ", ".join(missing_keys)
-        raise ValueError(
-            f"cache: JSON metadata missing keys: {missing} ({filepath})"
-        )
+        raise ValueError(f"cache: JSON metadata missing keys: {', '.join(missing_keys)} ({filepath})")
     metadata = CacheMetadata(
         format_version=int(raw_metadata["format_version"]),
         pyplantri_version=str(raw_metadata["pyplantri_version"]),
@@ -169,9 +158,7 @@ def _raw_graph_dual_vertex_count(raw_graph: Any, filepath: Path) -> int | None:
         return raw_graph.dual_num_vertices
     if isinstance(raw_graph, dict):
         if "dual_num_vertices" not in raw_graph:
-            raise ValueError(
-                f"cache: graph payload missing dual_num_vertices ({filepath})"
-            )
+            raise ValueError(f"cache: graph payload missing dual_num_vertices ({filepath})")
         return int(raw_graph["dual_num_vertices"])
     return None
 
@@ -184,24 +171,16 @@ def _infer_dual_vertex_count_for_save(
     if graphs:
         graph_dual_counts = {graph.dual_num_vertices for graph in graphs}
         if len(graph_dual_counts) != 1:
-            raise ValueError(
-                "cache: graphs contain mixed dual_vertex_count values; "
-                "cannot save a heterogeneous cache"
-            )
+            raise ValueError("cache: graphs contain mixed dual_vertex_count values; cannot save a heterogeneous cache")
         inferred_dual_vertex_count = next(iter(graph_dual_counts))
         if dual_vertex_count is None:
             return inferred_dual_vertex_count
         if dual_vertex_count != inferred_dual_vertex_count:
-            raise ValueError(
-                "cache: dual_vertex_count mismatch: "
-                f"explicit {dual_vertex_count} != inferred {inferred_dual_vertex_count}"
-            )
+            raise ValueError(f"cache: dual_vertex_count mismatch: explicit {dual_vertex_count} != inferred {inferred_dual_vertex_count}")
         return dual_vertex_count
 
     if dual_vertex_count is None:
-        raise ValueError(
-            "cache: dual_vertex_count must be provided when graphs is empty"
-        )
+        raise ValueError("cache: dual_vertex_count must be provided when graphs is empty")
     return dual_vertex_count
 
 
@@ -213,9 +192,7 @@ def _normalize_loaded_graphs(
 ) -> tuple[list[PlaneGraph], int, int | None]:
     """Normalize cached graph payloads into canonical PlaneGraph instances."""
     if not isinstance(raw_graphs, (list, tuple)):
-        raise ValueError(
-            f"cache: graphs payload must be list/tuple ({filepath})"
-        )
+        raise ValueError(f"cache: graphs payload must be list/tuple ({filepath})")
 
     raw_graph_count = len(raw_graphs)
     inferred_dual_vertex_count: int | None = None
@@ -225,16 +202,11 @@ def _normalize_loaded_graphs(
     for raw_graph in raw_graphs:
         graph_dual_vertex_count = _raw_graph_dual_vertex_count(raw_graph, filepath)
         if graph_dual_vertex_count is None:
-            raise ValueError(
-                f"cache: unsupported graph payload type {type(raw_graph).__name__}"
-            )
+            raise ValueError(f"cache: unsupported graph payload type {type(raw_graph).__name__}")
         if inferred_dual_vertex_count is None:
             inferred_dual_vertex_count = graph_dual_vertex_count
         elif graph_dual_vertex_count != inferred_dual_vertex_count:
-            raise ValueError(
-                "cache: graphs payload contains mixed dual_vertex_count values "
-                f"({filepath})"
-            )
+            raise ValueError(f"cache: graphs payload contains mixed dual_vertex_count values ({filepath})")
 
     for graph in graph_items:
         if isinstance(graph, PlaneGraph):
@@ -245,9 +217,7 @@ def _normalize_loaded_graphs(
         elif isinstance(graph, dict):
             normalized_graphs.append(PlaneGraph.from_dict(graph))
         else:
-            raise ValueError(
-                f"cache: unsupported graph payload type {type(graph).__name__}"
-            )
+            raise ValueError(f"cache: unsupported graph payload type {type(graph).__name__}")
     return normalized_graphs, raw_graph_count, inferred_dual_vertex_count
 
 
@@ -260,18 +230,12 @@ def _validate_metadata_against_payload(
 ) -> None:
     """Validate metadata against the serialized payload."""
     if metadata.graph_count != raw_graph_count:
-        raise ValueError(
-            "cache: metadata.graph_count mismatch: "
-            f"{metadata.graph_count} != {raw_graph_count} ({filepath})"
-        )
+        raise ValueError(f"cache: metadata.graph_count mismatch: {metadata.graph_count} != {raw_graph_count} ({filepath})")
     if (
         inferred_dual_vertex_count is not None
         and metadata.dual_vertex_count != inferred_dual_vertex_count
     ):
-        raise ValueError(
-            "cache: metadata.dual_vertex_count mismatch: "
-            f"{metadata.dual_vertex_count} != {inferred_dual_vertex_count} ({filepath})"
-        )
+        raise ValueError(f"cache: metadata.dual_vertex_count mismatch: {metadata.dual_vertex_count} != {inferred_dual_vertex_count} ({filepath})")
 
 
 def _save_pickle(
@@ -352,26 +316,15 @@ def _load_pickle(
 
         if header == b"\x1f\x8b":
             with gzip.GzipFile(fileobj=f, mode="rb") as gz:
-                if safe_mode:
-                    payload = SafeUnpickler(gz).load()
-                else:
-                    payload = pickle.load(gz)
+                payload = SafeUnpickler(gz).load() if safe_mode else pickle.load(gz)
         else:
-            if safe_mode:
-                payload = SafeUnpickler(f).load()
-            else:
-                payload = pickle.load(f)
+            payload = SafeUnpickler(f).load() if safe_mode else pickle.load(f)
 
     # Extract and validate metadata.
     if not isinstance(payload, dict):
-        raise ValueError(
-            "cache: unsupported payload type "
-            f"{type(payload).__name__}; expected dict with metadata+graphs"
-        )
+        raise ValueError(f"cache: unsupported payload type {type(payload).__name__}; expected dict with metadata+graphs")
     if "metadata" not in payload or "graphs" not in payload:
-        raise ValueError(
-            f"cache: missing metadata/graphs keys ({filepath})"
-        )
+        raise ValueError(f"cache: missing metadata/graphs keys ({filepath})")
 
     metadata = _coerce_pickle_metadata(payload["metadata"], filepath)
     graphs, raw_graph_count, inferred_dual_vertex_count = _normalize_loaded_graphs(
@@ -397,13 +350,9 @@ def _load_json(
         payload = json.load(f)
 
     if not isinstance(payload, dict):
-        raise ValueError(
-            f"cache: JSON payload must be object with metadata+graphs ({filepath})"
-        )
+        raise ValueError(f"cache: JSON payload must be object with metadata+graphs ({filepath})")
     if "metadata" not in payload or "graphs" not in payload:
-        raise ValueError(
-            f"cache: JSON payload missing metadata/graphs ({filepath})"
-        )
+        raise ValueError(f"cache: JSON payload missing metadata/graphs ({filepath})")
 
     metadata = _coerce_json_metadata(payload["metadata"], filepath)
     graphs, raw_graph_count, inferred_dual_vertex_count = _normalize_loaded_graphs(
@@ -463,8 +412,5 @@ def load_graphs_from_cache(
         return _load_json(filepath, max_count)
     else:
         if not trusted:
-            raise ValueError(
-                "cache: pickle loading requires trusted=True; "
-                "use use_json=True for untrusted files"
-            )
+            raise ValueError("cache: pickle loading requires trusted=True; use use_json=True for untrusted files")
         return _load_pickle(filepath, max_count, safe_mode)

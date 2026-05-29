@@ -76,10 +76,7 @@ def enumerate_simple_quadrangulation_duals(
         return []
 
     if verbose:
-        print(
-            f"[Plantri] Enumerating {dual_vertex_count}-vertex quartic "
-            "plane multigraphs..."
-        )
+        print(f"[Plantri] Enumerating {dual_vertex_count}-vertex quartic plane multigraphs...")
 
     result = enumerate_simple_quadrangulation_duals_filtered(
         dual_vertex_count,
@@ -110,10 +107,7 @@ def _iter_raw_double_code_lines(
     raw_iter = iter(raw_lines)
     try:
         for line in raw_iter:
-            if isinstance(line, bytes):
-                stripped = line.strip()
-            else:
-                stripped = line.strip().encode("latin-1")
+            stripped = line.strip() if isinstance(line, bytes) else line.strip().encode("latin-1")
             if stripped and 48 <= stripped[0] <= 57:
                 yield stripped
     finally:
@@ -153,13 +147,7 @@ def _iter_chunk_args(
             chunk.append(line)
             if len(chunk) >= chunk_size:
                 current_chunk = chunk
-                yield (
-                    current_chunk,
-                    start_id,
-                    validate,
-                    include_primal,
-                    double_edge_free_only,
-                )
+                yield (current_chunk, start_id, validate, include_primal, double_edge_free_only)
                 start_id += len(current_chunk)
                 chunk = []
         if chunk:
@@ -168,8 +156,13 @@ def _iter_chunk_args(
         _close_if_possible(raw_iter)
 
 
-_DEFAULT_NUM_WORKERS = 8
+_DEFAULT_NUM_WORKERS = 16
 _DEFAULT_CHUNK_SIZE = 5_000
+
+
+def _resolve_default_num_workers(cpu_count: int) -> int:
+    """Cap workers at _DEFAULT_NUM_WORKERS."""
+    return max(2, min(cpu_count, _DEFAULT_NUM_WORKERS))
 
 
 def _dual_class_for_filter(
@@ -215,11 +208,7 @@ def _try_build_single_graph(
     double_edge_free_only: bool,
     validate: bool,
 ) -> PlaneGraph | None:
-    """Attempt to build a PlaneGraph from a raw double_code line.
-
-    Returns None if the line is malformed, fails validation, or is
-    rejected by a double-edge-free postcondition check.
-    """
+    """Attempt to build a PlaneGraph from a raw double_code line."""
     try:
         primal_data, dual_data = QuadrangulationEnumerator.parse_double_code(line)
         if not primal_data.cyclic_adjacency or not dual_data.cyclic_adjacency:
@@ -366,29 +355,14 @@ def enumerate_simple_quadrangulation_duals_filtered(
 ) -> FilteredEnumerationResult:
     """Enumerate simple-quadrangulation duals with optional class selection."""
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
-    dual_class = _dual_class_for_filter(
-        double_edge_free_only=double_edge_free_only,
-    )
+    dual_class = _dual_class_for_filter(double_edge_free_only=double_edge_free_only)
     t_start = time.perf_counter()
     if max_count == 0:
-        return _make_filtered_result(
-            [],
-            generated_count=0,
-            startup_s=0.0,
-            t_start=t_start,
-        )
+        return _make_filtered_result([], generated_count=0, startup_s=0.0, t_start=t_start)
     if dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(dual_class):
-        return _make_filtered_result(
-            [],
-            generated_count=0,
-            startup_s=0.0,
-            t_start=t_start,
-        )
+        return _make_filtered_result([], generated_count=0, startup_s=0.0, t_start=t_start)
 
-    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(
-        dual_vertex_count,
-        dual_class=dual_class,
-    )
+    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(dual_vertex_count, dual_class=dual_class)
 
     graphs, generated_count = _build_graphs_from_raw_lines(
         _iter_prefixed_lines(prefetched, raw_iter),
@@ -426,46 +400,23 @@ def enumerate_simple_quadrangulation_duals_parallel(
 ) -> FilteredEnumerationResult:
     """Parallel enumeration of simple-quadrangulation duals."""
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
-    dual_class = _dual_class_for_filter(
-        double_edge_free_only=double_edge_free_only,
-    )
+    dual_class = _dual_class_for_filter(double_edge_free_only=double_edge_free_only)
 
     t_start = time.perf_counter()
     if max_count == 0:
-        return _make_filtered_result(
-            [],
-            generated_count=0,
-            startup_s=0.0,
-            t_start=t_start,
-        )
+        return _make_filtered_result([], generated_count=0, startup_s=0.0, t_start=t_start)
     if dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(dual_class):
-        return _make_filtered_result(
-            [],
-            generated_count=0,
-            startup_s=0.0,
-            t_start=t_start,
-        )
+        return _make_filtered_result([], generated_count=0, startup_s=0.0, t_start=t_start)
 
     # Step 1: Start streaming plantri output.
-    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(
-        dual_vertex_count,
-        dual_class=dual_class,
-    )
+    prefetched, raw_iter, t_plantri = _open_raw_double_code_stream(dual_vertex_count, dual_class=dual_class)
 
     if num_workers is None:
-        cpu_count = os.cpu_count() or 4
-        num_workers = max(2, min(cpu_count, _DEFAULT_NUM_WORKERS))
-    effective_chunk_size = (
-        chunk_size if chunk_size is not None else _DEFAULT_CHUNK_SIZE
-    )
+        num_workers = _resolve_default_num_workers(os.cpu_count() or 4)
+    effective_chunk_size = chunk_size if chunk_size is not None else _DEFAULT_CHUNK_SIZE
 
     if not prefetched:
-        return _make_filtered_result(
-            [],
-            generated_count=0,
-            startup_s=t_plantri,
-            t_start=t_start,
-        )
+        return _make_filtered_result([], generated_count=0, startup_s=t_plantri, t_start=t_start)
 
     if verbose:
         mode = ", double-edge-free" if double_edge_free_only else ""

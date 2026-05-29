@@ -30,18 +30,14 @@ class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
             self._items = edge_multiplicity._items
             return
 
-        # Fast path for plain dict from trusted internal code:
-        # skip per-element isinstance checks and int() conversions.
+        # Fast path: trusted plain dict -- skip per-element isinstance/int() coercion.
         if type(edge_multiplicity) is dict:
             ordered_items = tuple(sorted(edge_multiplicity.items()))
             self._items = ordered_items
             self._data = dict(ordered_items)
             return
 
-        # Fast path for the canonical items tuple emitted by __reduce__ during
-        # unpickling. Treat it as trusted/pre-validated (like the dict path above)
-        # and skip the per-element isinstance/int coercion that dominates cache
-        # load time. The defensive sort keeps the canonical order regardless.
+        # Fast path: trusted canonical tuple from __reduce__ (unpickle); skip coercion, sort keeps order.
         if type(edge_multiplicity) is tuple:
             ordered_items = tuple(sorted(edge_multiplicity))
             self._items = ordered_items
@@ -57,21 +53,12 @@ class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
         normalized: dict[tuple[int, int], int] = {}
         for raw_edge, raw_multiplicity in items_iter:
             if not isinstance(raw_edge, tuple) or len(raw_edge) != 2:
-                raise TypeError(
-                    "edge_multiplicity keys must be 2-tuples; "
-                    f"got {raw_edge!r}."
-                )
+                raise TypeError(f"edge_multiplicity keys must be 2-tuples; got {raw_edge!r}.")
             raw_u, raw_v = raw_edge
             if isinstance(raw_u, bool) or isinstance(raw_v, bool):
-                raise TypeError(
-                    "edge_multiplicity keys must be integer vertex indices; "
-                    f"got {raw_edge!r}."
-                )
+                raise TypeError(f"edge_multiplicity keys must be integer vertex indices; got {raw_edge!r}.")
             if isinstance(raw_multiplicity, bool):
-                raise TypeError(
-                    "edge_multiplicity values must be integers; "
-                    f"got {raw_multiplicity!r} on edge {raw_edge!r}."
-                )
+                raise TypeError(f"edge_multiplicity values must be integers; got {raw_multiplicity!r} on edge {raw_edge!r}.")
             u = int(cast("SupportsInt", raw_u))
             v = int(cast("SupportsInt", raw_v))
             multiplicity = int(cast("SupportsInt", raw_multiplicity))
@@ -131,8 +118,7 @@ class PlaneGraph:
     """
 
     dual_num_vertices: int
-    # Canonical undirected support-edge pairs. Parallel copies are encoded only
-    # in dual_edge_multiplicity, so this field has size s + d rather than |E*|.
+    # Canonical undirected support-edge pairs (size s + d); parallel copies live in dual_edge_multiplicity.
     dual_support_edges: tuple[tuple[int, int], ...]
     dual_edge_multiplicity: Mapping[tuple[int, int], int]
     dual_embedding: Embedding  # CW cyclic order at each vertex.
@@ -209,10 +195,7 @@ class PlaneGraph:
     @staticmethod
     def _coerce_half_edge(half_edge: Iterable[SupportsInt]) -> HalfEdge:
         if not isinstance(half_edge, (list, tuple)) or len(half_edge) != 2:
-            raise TypeError(
-                "half-edge must be a 2-sequence (vertex, slot); "
-                f"got {half_edge!r}"
-            )
+            raise TypeError(f"half-edge must be a 2-sequence (vertex, slot); got {half_edge!r}")
         return int(half_edge[0]), int(half_edge[1])
 
     @classmethod
@@ -230,18 +213,10 @@ class PlaneGraph:
         half_edge_b: Iterable[int],
     ) -> tuple[EdgeLabel, HalfEdge, HalfEdge]:
         normalized_label = cls._coerce_edge_label(label)
-        normalized_half_edge_a = cls._coerce_half_edge(half_edge_a)
-        normalized_half_edge_b = cls._coerce_half_edge(half_edge_b)
-        if normalized_half_edge_b < normalized_half_edge_a:
-            normalized_half_edge_a, normalized_half_edge_b = (
-                normalized_half_edge_b,
-                normalized_half_edge_a,
-            )
-        return (
-            normalized_label,
-            normalized_half_edge_a,
-            normalized_half_edge_b,
+        normalized_half_edge_a, normalized_half_edge_b = sorted(
+            (cls._coerce_half_edge(half_edge_a), cls._coerce_half_edge(half_edge_b))
         )
+        return normalized_label, normalized_half_edge_a, normalized_half_edge_b
 
     @classmethod
     def _coerce_edge_label_pairs(
@@ -297,26 +272,17 @@ class PlaneGraph:
         seen_labels: set[EdgeLabel] = set()
         for raw_entry in raw_entries:
             if not isinstance(raw_entry, (list, tuple)):
-                raise TypeError(
-                    "edge label entry must be tuple/list; "
-                    f"got {type(raw_entry).__name__}"
-                )
+                raise TypeError(f"edge label entry must be tuple/list; got {type(raw_entry).__name__}")
             if len(raw_entry) == 2:
                 raw_label = raw_entry[0]
                 raw_pair = raw_entry[1]
                 if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
-                    raise TypeError(
-                        "edge label pair payload must be a 2-sequence of half-edges; "
-                        f"got {raw_pair!r}"
-                    )
+                    raise TypeError(f"edge label pair payload must be a 2-sequence of half-edges; got {raw_pair!r}")
                 raw_h1, raw_h2 = raw_pair
             elif len(raw_entry) == 3:
                 raw_label, raw_h1, raw_h2 = raw_entry
             else:
-                raise TypeError(
-                    "edge label entry must have length 2 or 3; "
-                    f"got {len(raw_entry)}"
-                )
+                raise TypeError(f"edge label entry must have length 2 or 3; got {len(raw_entry)}")
 
             label = cls._coerce_edge_label(cast("EdgeLabel", raw_label))
             if label in seen_labels:
@@ -432,10 +398,7 @@ class PlaneGraph:
 
     def __setstate__(self, state: Any) -> None:
         if not isinstance(state, dict):
-            raise TypeError(
-                "PlaneGraph pickle state must be dict; "
-                f"got {type(state).__name__}"
-            )
+            raise TypeError(f"PlaneGraph pickle state must be dict; got {type(state).__name__}")
 
         required_keys = (
             "dual_num_vertices",
@@ -455,16 +418,13 @@ class PlaneGraph:
 
         missing_keys = [key for key in required_keys if key not in state]
         if missing_keys:
-            missing = ", ".join(missing_keys)
-            raise KeyError(f"PlaneGraph pickle state missing keys: {missing}")
+            raise KeyError(f"PlaneGraph pickle state missing keys: {', '.join(missing_keys)}")
 
         for name in required_keys:
             object.__setattr__(self, name, state[name])
         object.__setattr__(self, "_double_edges_cache", state.get("_double_edges_cache"))
-        # __getstate__ emits the already-normalized internal representation, so the
-        # restored fields are canonical as-is. Skipping __post_init__ here avoids
-        # repeating that normalization -- the dominant cost of cache deserialization
-        # (~3.4x faster load, verified byte-identical via round-trip tests).
+        # State from __getstate__ is already normalized, so skip __post_init__ re-normalization
+        # -- the dominant cache-load cost (~3.4x faster, byte-identical per round-trip tests).
 
     @staticmethod
     def _normalize_embedding(
@@ -474,8 +434,7 @@ class PlaneGraph:
     ) -> Embedding:
         """Convert sparse/dict embedding into dense 0..n-1 tuple-of-tuples."""
         if isinstance(embedding, dict):
-            # JSON round-trips store vertex keys as strings (to_dict uses str(v)),
-            # so the int() conversions below are genuine, not redundant.
+            # JSON keys are strings (to_dict uses str(v)), so int() below is genuine, not redundant.
             keyed = cast("dict[SupportsInt | str, Iterable[SupportsInt]]", embedding)
             size = max(expected_size, 0)
             if keyed:
@@ -571,7 +530,7 @@ class PlaneGraph:
 
     @staticmethod
     def _embedding_to_dict(embedding: Embedding) -> dict[int, tuple[int, ...]]:
-        return {vertex: neighbors for vertex, neighbors in enumerate(embedding)}
+        return dict(enumerate(embedding))
 
     def _reconstruct_half_edge_maps(
         self,
@@ -673,11 +632,7 @@ class PlaneGraph:
             reconstructed_faces.append(tuple(vertex for vertex, _ in face_cycle))
             face_label_signatures.append(self._label_signature(labels))
 
-        return (
-            tuple(reconstructed_faces),
-            tuple(face_label_signatures),
-            half_edge_labels,
-        )
+        return tuple(reconstructed_faces), tuple(face_label_signatures), half_edge_labels
 
     def _vertex_label_signatures(
         self,
@@ -709,10 +664,7 @@ class PlaneGraph:
         target_name: str,
     ) -> tuple[int, ...]:
         if len(source_signatures) != len(target_signatures):
-            raise ValueError(
-                f"signature count mismatch: {source_name} -> {target_name} "
-                f"({len(source_signatures)} != {len(target_signatures)})"
-            )
+            raise ValueError(f"signature count mismatch: {source_name} -> {target_name} ({len(source_signatures)} != {len(target_signatures)})")
 
         target_by_signature: dict[tuple[tuple[str, int], ...], list[int]] = {}
         for target_idx, signature in enumerate(target_signatures):
@@ -727,9 +679,7 @@ class PlaneGraph:
                 if target_idx not in used_targets
             ]
             if len(candidates) != 1:
-                raise ValueError(
-                    f"signature map ambiguous: {source_name} {source_idx} -> {target_name}"
-                )
+                raise ValueError(f"signature map ambiguous: {source_name} {source_idx} -> {target_name}")
             target_idx = candidates[0]
             used_targets.add(target_idx)
             mapping.append(target_idx)
@@ -1116,11 +1066,7 @@ class PlaneGraph:
         cache = getattr(self, "_double_edges_cache", None)
         if cache is None:
             cache = frozenset(e for e, m in self.dual_edge_multiplicity.items() if m == 2)
-            object.__setattr__(
-                self,
-                "_double_edges_cache",
-                cache,
-            )
+            object.__setattr__(self, "_double_edges_cache", cache)
         return cache
 
     @property
@@ -1211,8 +1157,7 @@ class PlaneGraph:
         )
         missing_keys = [key for key in required_keys if key not in data]
         if missing_keys:
-            missing = ", ".join(missing_keys)
-            raise KeyError(f"PlaneGraph.from_dict missing keys: {missing}")
+            raise KeyError(f"PlaneGraph.from_dict missing keys: {', '.join(missing_keys)}")
 
         dual_num_vertices = int(data["dual_num_vertices"])
         raw_support_edges = data["dual_support_edges"]
