@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sysconfig
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
@@ -34,20 +35,43 @@ class ParsedGraphSection:
     edge_label_pairs: EdgeLabelPairs
 
 
-def _is_ascii_digit_byte(value: int) -> bool:
-    """Returns True if value is an ASCII digit byte ('0'..'9')."""
-    return 48 <= value <= 57
+_LINE_ORIENTED_OUTPUT_FLAGS = frozenset("agsT")
 
 
-def _token_starts_with_digit(token: str | bytes) -> bool:
-    """Returns True when a token begins with an ASCII digit."""
-    head = token[0]
-    return head.isdigit() if isinstance(head, str) else _is_ascii_digit_byte(head)
+def _has_plantri_flag(options: list[str] | None, flags: frozenset[str]) -> bool:
+    """Return whether separate or combined plantri options contain a flag."""
+    return any(
+        option.startswith("-") and any(char in flags for char in option[1:])
+        for option in (options or [])
+    )
 
 
-def _iter_edge_labels(edge_labels: str | bytes) -> Iterator[EdgeLabel]:
-    """Iterate edge labels from one plantri -T token."""
-    return iter(edge_labels)
+def _without_plantri_flags(
+    options: list[str] | None,
+    flags: frozenset[str],
+) -> list[str]:
+    """Remove boolean plantri flags while preserving combined option tokens."""
+    normalized: list[str] = []
+    for option in options or []:
+        if not option.startswith("-") or option == "-":
+            normalized.append(option)
+            continue
+        remaining = "".join(char for char in option[1:] if char not in flags)
+        if remaining:
+            normalized.append(f"-{remaining}")
+    return normalized
+
+
+def _validate_n_vertices(n_vertices: int) -> None:
+    """Require a positive integer vertex count for public plantri commands."""
+    if type(n_vertices) is not int or n_vertices <= 0:
+        raise ValueError(f"plantri: n_vertices must be a positive int; got {n_vertices!r}")
+
+
+def _build_tag_sort_key(tag_dir: Path) -> tuple[bool, str]:
+    """Prefer build directories for the current platform, then sort by name."""
+    platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    return not tag_dir.name.endswith(platform_tag), tag_dir.name
 
 
 def _find_plantri_exe() -> Path:
@@ -56,35 +80,35 @@ def _find_plantri_exe() -> Path:
 
     # Package bin folder (installed).
     pkg_bin = Path(__file__).parent / "bin" / exe_name
-    if pkg_bin.exists():
+    if pkg_bin.is_file():
         return pkg_bin
 
     # scikit-build-core build folder (editable/dev): plantri.py -> pyplantri -> src -> project_root.
     project_root = Path(__file__).parent.parent.parent
     build_dir = project_root / "build"
-    if build_dir.exists():
-        for tag_dir in build_dir.iterdir():
+    if build_dir.is_dir():
+        for tag_dir in sorted(build_dir.iterdir(), key=_build_tag_sort_key):
             if tag_dir.is_dir():
                 # Release folder (Visual Studio build).
                 release_exe = tag_dir / "Release" / exe_name
-                if release_exe.exists():
+                if release_exe.is_file():
                     return release_exe
                 # MinGW/Unix build.
                 direct_exe = tag_dir / exe_name
-                if direct_exe.exists():
+                if direct_exe.is_file():
                     return direct_exe
 
     path_exe = which(exe_name)
-    if path_exe is not None:
+    if path_exe is not None and Path(path_exe).is_file():
         return Path(path_exe)
 
     # Default path for error messages.
     return Path(__file__).parent / "bin" / exe_name
 
 
-_PLANTRI_EXE = _find_plantri_exe()
 _BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES = 64
-_BUNDLED_MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES - 2
+MIN_DUAL_VERTEX_COUNT = 3
+MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES - 2
 
 
 class PlantriError(Exception):
@@ -108,12 +132,16 @@ def _raise_executable_not_found(executable: Path) -> None:
 
 class Plantri:
     """Wrapper for the plantri executable."""
-    _COUNT_INCOMPATIBLE_OUTPUT_OPTIONS = frozenset({"-a", "-g", "-s", "-E", "-T", "-u"})
+    _COUNT_INCOMPATIBLE_OUTPUT_FLAGS = frozenset("agsETu")
 
     def __init__(self, executable: Path | None = None) -> None:
         """Initializes Plantri with the executable path."""
-        self.executable = Path(executable) if executable else _PLANTRI_EXE
-        if not self.executable.exists():
+        self.executable = (
+            Path(executable).expanduser().resolve()
+            if executable is not None
+            else _find_plantri_exe()
+        )
+        if not self.executable.is_file():
             _raise_executable_not_found(self.executable)
 
     def run(
@@ -144,13 +172,14 @@ class Plantri:
         """Builds a plantri command line for the given options."""
         if output_format not in ("planar_code", "ascii"):
             raise ValueError(f"plantri: unsupported output_format {output_format!r}; use 'planar_code' or 'ascii'")
+        _validate_n_vertices(n_vertices)
 
         cmd = [str(self.executable)]
         if options:
             cmd.extend(options)
 
         # Set output format flag.
-        if output_format == "ascii" and "-a" not in (options or []):
+        if output_format == "ascii" and not _has_plantri_flag(options, frozenset("a")):
             cmd.append("-a")
 
         cmd.append(str(n_vertices))
@@ -164,7 +193,14 @@ class Plantri:
     ) -> Iterator[bytes]:
         """Stream non-empty stdout lines for line-oriented plantri output."""
         cmd = self._build_command(n_vertices, options=options, output_format=output_format)
+        # Binary planar_code may contain newline bytes, so streaming requires a line format.
+        if output_format != "ascii" and not _has_plantri_flag(options, _LINE_ORIENTED_OUTPUT_FLAGS):
+            raise ValueError(
+                "plantri: iter_stdout_lines requires line-oriented output; "
+                "use output_format='ascii' or include -a, -g, -s, or -T"
+            )
 
+        # Spool stderr to disk so long streams cannot deadlock on a full stderr pipe.
         with tempfile.TemporaryFile() as stderr_file:
             try:
                 proc = subprocess.Popen(
@@ -190,6 +226,7 @@ class Plantri:
             finally:
                 proc.stdout.close()
 
+                # Only natural EOF makes nonzero exit authoritative; early close terminates plantri.
                 if fully_consumed:
                     return_code = proc.wait()
                 else:
@@ -215,11 +252,11 @@ class Plantri:
         timeout: float = 3600.0,
     ) -> int:
         """Counts graphs with arbitrary generation options via plantri ``-u``."""
-        normalized_options = [
-            opt
-            for opt in (options or [])
-            if opt not in self._COUNT_INCOMPATIBLE_OUTPUT_OPTIONS
-        ]
+        _validate_n_vertices(n_vertices)
+        normalized_options = _without_plantri_flags(
+            options,
+            self._COUNT_INCOMPATIBLE_OUTPUT_FLAGS,
+        )
 
         try:
             result = subprocess.run(
@@ -283,7 +320,8 @@ class QuadrangulationEnumerator:
     }
 
     def __init__(self) -> None:
-        """Initializes the SQS enumerator with a Plantri instance."""
+        """Initialize the SQS enumerator."""
+        # Delay executable resolution so known-empty requests do not require plantri.
         self._plantri: Plantri | None = None
 
     def _get_plantri(self) -> Plantri:
@@ -332,10 +370,17 @@ class QuadrangulationEnumerator:
     @staticmethod
     def _validate_supported_dual_vertex_count(dual_vertex_count: int) -> None:
         """Reject dual sizes outside the bundled plantri build range."""
-        if dual_vertex_count < 3:
-            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count} < 3")
-        if dual_vertex_count > _BUNDLED_MAX_DUAL_VERTEX_COUNT:
-            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count} > {_BUNDLED_MAX_DUAL_VERTEX_COUNT} (bundled plantri MAXN={_BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES})")
+        if type(dual_vertex_count) is not int:
+            raise ValueError(
+                "dual_vertex_count must be an integer; "
+                f"got {dual_vertex_count!r}"
+            )
+        if dual_vertex_count < MIN_DUAL_VERTEX_COUNT:
+            raise ValueError(
+                f"dual_vertex_count unsupported: {dual_vertex_count} < {MIN_DUAL_VERTEX_COUNT}"
+            )
+        if dual_vertex_count > MAX_DUAL_VERTEX_COUNT:
+            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count} > {MAX_DUAL_VERTEX_COUNT} (bundled plantri MAXN={_BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES})")
 
     def generate_pairs(
         self,
@@ -379,9 +424,10 @@ class QuadrangulationEnumerator:
         # Euler's formula for plane graphs: V - E + F = 2
         # For quadrangulations: primal_vertices = dual_vertices + 2
         primal_vertex_count = dual_vertex_count + 2
-        for line in self._get_plantri().iter_stdout_lines(primal_vertex_count, self._flags_for_dual_class(resolved_dual_class)):
-            if _token_starts_with_digit(line):
-                yield line
+        yield from self._get_plantri().iter_stdout_lines(
+            primal_vertex_count,
+            self._flags_for_dual_class(resolved_dual_class),
+        )
 
     @staticmethod
     def parse_double_code(
@@ -510,14 +556,14 @@ class QuadrangulationEnumerator:
         # Collect (vertex, position) pairs where each edge name appears.
         edge_name_to_half_edges: dict[EdgeLabel, list[HalfEdge]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            for pos, edge_name in enumerate(_iter_edge_labels(edges_str)):
+            for pos, edge_name in enumerate(edges_str):
                 edge_name_to_half_edges.setdefault(edge_name, []).append((vertex_idx, pos))
 
         # Build adjacency list.
         adjacency: dict[int, list[int]] = {}
         for vertex_idx, edges_str in enumerate(edge_lists, start=1):
             neighbors: list[int] = []
-            for edge_name in _iter_edge_labels(edges_str):
+            for edge_name in edges_str:
                 half_edges = edge_name_to_half_edges.get(edge_name)
                 if half_edges is None or len(half_edges) != 2:
                     edge_name_str = QuadrangulationEnumerator._format_edge_name_for_error(edge_name)
@@ -532,12 +578,10 @@ class QuadrangulationEnumerator:
         # Twin mapping: match two half-edges sharing the same edge name.
         twin_map: dict[HalfEdge, HalfEdge] = {}
         edge_label_pairs: EdgeLabelPairs = {}
-        for half_edges in edge_name_to_half_edges.values():
-            if len(half_edges) == 2:
-                twin_map[half_edges[0]] = half_edges[1]
-                twin_map[half_edges[1]] = half_edges[0]
         for edge_name, half_edges in edge_name_to_half_edges.items():
-            if len(half_edges) == 2:
-                edge_label_pairs[edge_name] = (half_edges[0], half_edges[1])
+            half_edge_a, half_edge_b = half_edges
+            twin_map[half_edge_a] = half_edge_b
+            twin_map[half_edge_b] = half_edge_a
+            edge_label_pairs[edge_name] = (half_edge_a, half_edge_b)
 
         return adjacency, twin_map, edge_label_pairs

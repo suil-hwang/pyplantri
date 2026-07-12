@@ -34,7 +34,7 @@ This package wraps plantri's **Simple Quadrangulation** enumeration functionalit
 | ----------- | ---------------------------------------------------- |
 | Plane graph | Embedded on a sphere with fixed cyclic edge ordering |
 | Multigraph  | Double edges allowed                                 |
-| Loop-free   | No loops (since Q has no degree-1 vertex)            |
+| Loop-free   | No loops because `-c2` makes Q bridge-free           |
 | 4-regular   | Every vertex has exactly degree 4                    |
 
 ### Vertex Count Relationship (Euler's Formula)
@@ -48,11 +48,13 @@ For plane graphs: `V - E + F = 2`
 
 **Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
 
-**Input Constraint:** `n >= 3`. Values below 3 are invalid for the quadrangulation enumeration API.
+**Input Constraint:** The bundled build supports `3 <= n <= 62`. The simple-quartic subclass is empty for `n < 6`.
+
+Set `include_primal=False` to omit primal topology when only the dual is needed. Such objects still rely on plantri's generation guarantees for properties that cannot be certified from the stored dual alone.
 
 ### Adjacency List Order (Combinatorial Embedding)
 
-The neighbor order in the output `adjacency_list` represents the **cyclic order** of edges at each vertex, given in **clockwise (CW)** direction. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
+The neighbor order in `PlaneGraph.dual_embedding` (or a parsed section's `cyclic_adjacency`) represents the **cyclic order** of edges at each vertex, given in **clockwise (CW)** direction. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
 
 plantri's `-T` (double_code) option outputs edges in clockwise order around each vertex.
 
@@ -72,6 +74,13 @@ pip install -e .
 ```
 
 CMake automatically builds plantri during installation.
+
+## Output and Cache Safety
+
+- `Plantri.run()` returns raw bytes and supports binary `planar_code`.
+- `Plantri.iter_stdout_lines()` accepts only line-oriented ASCII, graph6, sparse6, or double-code output.
+- Caches use optionally gzip-compressed pickle and require `trusted=True` when loading.
+- Pass `validate_graphs=True` for semantic validation. The restricted unpickler limits classes but does not prove graph validity.
 
 ## Number of Non-isomorphic Plane Graphs by n
 

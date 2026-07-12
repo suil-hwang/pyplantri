@@ -2,37 +2,84 @@
 from __future__ import annotations
 
 import gzip
-import json
 import logging
 import pickle
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from .plane_graph import FrozenEdgeMultiplicity, PlaneGraph
+from .plane_graph import PlaneGraph
 
 logger = logging.getLogger(__name__)
 
-# Cache format version. Increment when PlaneGraph fields change.
-_CACHE_FORMAT_VERSION = 5
+# v5 remains readable; v6 records graph-ID provenance and primal inclusion.
+CACHE_FORMAT_VERSION = 6
+LEGACY_CACHE_FORMAT_VERSION = 5
+SUPPORTED_CACHE_FORMAT_VERSIONS = frozenset(
+    {LEGACY_CACHE_FORMAT_VERSION, CACHE_FORMAT_VERSION}
+)
+CacheGraphClass = Literal["quartic_multigraph", "simple_quartic"]
+_SUPPORTED_GRAPH_CLASSES = frozenset({"quartic_multigraph", "simple_quartic"})
+
+
+def _require_int_at_least(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: int,
+    filepath: Path | None = None,
+) -> None:
+    """Validate a non-boolean integer cache field."""
+    if type(value) is not int or value < minimum:
+        location = f" ({filepath})" if filepath is not None else ""
+        raise ValueError(
+            f"cache: {field_name} must be an integer >= {minimum}; got {value!r}{location}"
+        )
 
 
 @dataclass(frozen=True)
 class CacheMetadata:
-    """Metadata for cache files."""
+    """Versioned cache identity, size, and generation provenance."""
 
     format_version: int
     pyplantri_version: str
     dual_vertex_count: int
     graph_count: int
     pickle_protocol: int
+    graph_class: str | None = None
+    include_primal: bool | None = None
+
+    def __setstate__(self, state: Any) -> None:
+        """Restore current metadata and legacy v5 state."""
+        if not isinstance(state, dict):
+            raise TypeError(
+                f"CacheMetadata pickle state must be dict; got {type(state).__name__}"
+            )
+
+        required_keys = (
+            "format_version",
+            "pyplantri_version",
+            "dual_vertex_count",
+            "graph_count",
+            "pickle_protocol",
+        )
+        missing_keys = [key for key in required_keys if key not in state]
+        if missing_keys:
+            raise KeyError(
+                f"CacheMetadata pickle state missing keys: {', '.join(missing_keys)}"
+            )
+
+        for name in required_keys:
+            object.__setattr__(self, name, state[name])
+        object.__setattr__(self, "graph_class", state.get("graph_class"))
+        object.__setattr__(self, "include_primal", state.get("include_primal"))
 
 
 class SafeUnpickler(pickle.Unpickler):
-    """Restricted unpickler that only allows PlaneGraph and built-in types."""
+    """Restricted unpickler for pyplantri cache payloads."""
 
-    # Whitelist of allowed modules and classes
+    # Current cache classes plus compatibility types used by legacy payloads.
     SAFE_MODULES: dict[str, set[str]] = {
         "pyplantri.plane_graph": {
             "PlaneGraph",
@@ -45,21 +92,12 @@ class SafeUnpickler(pickle.Unpickler):
         "collections": {"defaultdict"},
     }
 
-    def __init__(self, file: Any):
-        """Initialize SafeUnpickler."""
-        super().__init__(file)
-
     def find_class(self, module: str, name: str) -> Any:
         """Override to restrict loadable classes."""
         allowed = self.SAFE_MODULES.get(module, set())
 
         if name not in allowed:
-            raise pickle.UnpicklingError(
-                f"Attempted to unpickle forbidden class: "
-                f"{module}.{name}\n"
-                f"Only PlaneGraph and built-in types are allowed.\n"
-                "This may indicate a malicious or corrupted file."
-            )
+            raise pickle.UnpicklingError(f"Forbidden pickle class {module}.{name}; cache may be malicious or corrupted")
 
         return super().find_class(module, name)
 
@@ -74,10 +112,116 @@ def _get_version() -> str:
         return "unknown"
 
 
-def _validate_format_version(metadata: CacheMetadata, filepath: Path) -> None:
+def _validate_format_version(
+    metadata: CacheMetadata,
+    filepath: Path | None,
+) -> None:
     """Validate cache format version compatibility."""
-    if metadata.format_version != _CACHE_FORMAT_VERSION:
-        raise ValueError(f"cache: unsupported format_version {metadata.format_version} != {_CACHE_FORMAT_VERSION} ({filepath})")
+    if (
+        type(metadata.format_version) is int
+        and metadata.format_version in SUPPORTED_CACHE_FORMAT_VERSIONS
+    ):
+        return
+    location = f" ({filepath})" if filepath is not None else ""
+    supported = sorted(SUPPORTED_CACHE_FORMAT_VERSIONS)
+    raise ValueError(
+        f"cache: unsupported format_version {metadata.format_version!r}; supported={supported}{location}"
+    )
+
+
+def _validate_metadata_fields(
+    metadata: CacheMetadata,
+    *,
+    filepath: Path | None = None,
+) -> None:
+    """Validate cache metadata fields without coercion."""
+    _validate_format_version(metadata, filepath)
+    location = f" ({filepath})" if filepath is not None else ""
+    if type(metadata.pyplantri_version) is not str:
+        raise ValueError(
+            f"cache: metadata.pyplantri_version must be str; got {metadata.pyplantri_version!r}{location}"
+        )
+    for field_name, value, minimum in (
+        ("metadata.dual_vertex_count", metadata.dual_vertex_count, 3),
+        ("metadata.graph_count", metadata.graph_count, 0),
+        ("metadata.pickle_protocol", metadata.pickle_protocol, 0),
+    ):
+        _require_int_at_least(
+            value,
+            field_name=field_name,
+            minimum=minimum,
+            filepath=filepath,
+        )
+
+    if metadata.format_version == LEGACY_CACHE_FORMAT_VERSION:
+        if metadata.graph_class is not None or metadata.include_primal is not None:
+            raise ValueError(
+                f"cache: v5 metadata cannot declare graph_class/include_primal{location}"
+            )
+        return
+
+    if (
+        type(metadata.graph_class) is not str
+        or metadata.graph_class not in _SUPPORTED_GRAPH_CLASSES
+    ):
+        raise ValueError(
+            f"cache: metadata.graph_class must be one of {sorted(_SUPPORTED_GRAPH_CLASSES)}; got {metadata.graph_class!r}{location}"
+        )
+    if type(metadata.include_primal) is not bool:
+        raise ValueError(
+            f"cache: metadata.include_primal must be bool; got {metadata.include_primal!r}{location}"
+        )
+
+
+def validate_cache_metadata(
+    metadata: CacheMetadata,
+    *,
+    expected_dual_vertex_count: int | None = None,
+    expected_graph_class: CacheGraphClass | None = None,
+    expected_include_primal: bool | None = None,
+    filepath: str | Path | None = None,
+) -> None:
+    """Validate metadata and optional caller-owned cache expectations."""
+    if not isinstance(metadata, CacheMetadata):
+        raise ValueError(f"cache: invalid metadata type {type(metadata).__name__}")
+    resolved_path = Path(filepath) if filepath is not None else None
+    _validate_metadata_fields(metadata, filepath=resolved_path)
+    location = f" ({resolved_path})" if resolved_path is not None else ""
+
+    if (
+        expected_dual_vertex_count is not None
+        and metadata.dual_vertex_count != expected_dual_vertex_count
+    ):
+        raise ValueError(
+            f"cache: metadata.dual_vertex_count {metadata.dual_vertex_count} != expected {expected_dual_vertex_count}{location}"
+        )
+    if expected_graph_class is not None:
+        if (
+            type(expected_graph_class) is not str
+            or expected_graph_class not in _SUPPORTED_GRAPH_CLASSES
+        ):
+            raise ValueError(
+                f"cache: unsupported expected graph_class {expected_graph_class!r}"
+            )
+        if (
+            metadata.graph_class is not None
+            and metadata.graph_class != expected_graph_class
+        ):
+            raise ValueError(
+                f"cache: metadata.graph_class {metadata.graph_class!r} != expected {expected_graph_class!r}{location}"
+            )
+    if expected_include_primal is not None:
+        if type(expected_include_primal) is not bool:
+            raise ValueError(
+                f"cache: expected_include_primal must be bool; got {expected_include_primal!r}"
+            )
+        if (
+            metadata.include_primal is not None
+            and metadata.include_primal is not expected_include_primal
+        ):
+            raise ValueError(
+                f"cache: metadata.include_primal {metadata.include_primal!r} != expected {expected_include_primal!r}{location}"
+            )
 
 
 def _build_cache_metadata(
@@ -85,33 +229,34 @@ def _build_cache_metadata(
     dual_vertex_count: int,
     graph_count: int,
     pickle_protocol: int,
+    graph_class: CacheGraphClass,
+    include_primal: bool,
 ) -> CacheMetadata:
     """Build canonical cache metadata for the current pyplantri version."""
-    return CacheMetadata(
-        format_version=_CACHE_FORMAT_VERSION,
+    metadata = CacheMetadata(
+        format_version=CACHE_FORMAT_VERSION,
         pyplantri_version=_get_version(),
         dual_vertex_count=dual_vertex_count,
         graph_count=graph_count,
         pickle_protocol=pickle_protocol,
+        graph_class=graph_class,
+        include_primal=include_primal,
     )
+    _validate_metadata_fields(metadata)
+    return metadata
 
 
 def _atomic_write(
     filepath: Path,
     *,
-    mode: str,
     writer: Any,
-    encoding: str | None = None,
 ) -> None:
-    """Write a file atomically via a same-directory temp file and rename."""
+    """Write a binary file atomically via a same-directory temp file."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=filepath.parent, suffix=".tmp")
 
     try:
-        open_kwargs: dict[str, Any] = {"mode": mode}
-        if "b" not in mode:
-            open_kwargs["encoding"] = encoding or "utf-8"
-        with open(fd, **open_kwargs) as f:
+        with open(fd, "wb") as f:
             writer(f)
         Path(tmp_path).replace(filepath)
     except BaseException:
@@ -119,48 +264,33 @@ def _atomic_write(
         raise
 
 
-def _coerce_pickle_metadata(raw_metadata: Any, filepath: Path) -> CacheMetadata:
-    """Coerce pickle metadata payload into CacheMetadata."""
+def _validate_pickle_metadata(raw_metadata: Any, filepath: Path) -> CacheMetadata:
+    """Validate and return pickle cache metadata."""
     if not isinstance(raw_metadata, CacheMetadata):
         raise ValueError(f"cache: invalid metadata type {type(raw_metadata).__name__}")
-    _validate_format_version(raw_metadata, filepath)
+    validate_cache_metadata(raw_metadata, filepath=filepath)
     return raw_metadata
 
 
-def _coerce_json_metadata(raw_metadata: Any, filepath: Path) -> CacheMetadata:
-    """Coerce canonical JSON metadata payload into CacheMetadata."""
-    if not isinstance(raw_metadata, dict):
-        raise ValueError(f"cache: JSON metadata must be object ({filepath})")
-    required_keys = (
-        "format_version",
-        "pyplantri_version",
-        "dual_vertex_count",
-        "graph_count",
-        "pickle_protocol",
-    )
-    missing_keys = [key for key in required_keys if key not in raw_metadata]
-    if missing_keys:
-        raise ValueError(f"cache: JSON metadata missing keys: {', '.join(missing_keys)} ({filepath})")
-    metadata = CacheMetadata(
-        format_version=int(raw_metadata["format_version"]),
-        pyplantri_version=str(raw_metadata["pyplantri_version"]),
-        dual_vertex_count=int(raw_metadata["dual_vertex_count"]),
-        graph_count=int(raw_metadata["graph_count"]),
-        pickle_protocol=int(raw_metadata["pickle_protocol"]),
-    )
-    _validate_format_version(metadata, filepath)
-    return metadata
-
-
-def _raw_graph_dual_vertex_count(raw_graph: Any, filepath: Path) -> int | None:
-    """Extract dual vertex count from a raw cache payload item."""
-    if isinstance(raw_graph, PlaneGraph):
-        return raw_graph.dual_num_vertices
-    if isinstance(raw_graph, dict):
-        if "dual_num_vertices" not in raw_graph:
-            raise ValueError(f"cache: graph payload missing dual_num_vertices ({filepath})")
-        return int(raw_graph["dual_num_vertices"])
-    return None
+def _validate_graph_metadata(
+    graph: PlaneGraph,
+    metadata: CacheMetadata,
+    *,
+    graph_index: int,
+    filepath: Path,
+) -> None:
+    """Validate graph payload against declared v6 provenance."""
+    if metadata.graph_class == "simple_quartic" and graph.double_edges:
+        raise ValueError(
+            f"cache: graph {graph_index} has double edges but graph_class is 'simple_quartic' ({filepath})"
+        )
+    if metadata.include_primal is None:
+        return
+    has_primal = graph.primal_num_vertices > 0
+    if has_primal is not metadata.include_primal:
+        raise ValueError(
+            f"cache: graph {graph_index} include_primal={has_primal} != metadata {metadata.include_primal} ({filepath})"
+        )
 
 
 def _infer_dual_vertex_count_for_save(
@@ -168,57 +298,96 @@ def _infer_dual_vertex_count_for_save(
     dual_vertex_count: int | None,
 ) -> int:
     """Infer or validate the dual vertex count when saving a cache file."""
+    if dual_vertex_count is not None:
+        _require_int_at_least(
+            dual_vertex_count,
+            field_name="dual_vertex_count",
+            minimum=3,
+        )
+
     if graphs:
         graph_dual_counts = {graph.dual_num_vertices for graph in graphs}
         if len(graph_dual_counts) != 1:
-            raise ValueError("cache: graphs contain mixed dual_vertex_count values; cannot save a heterogeneous cache")
+            raise ValueError(
+                "cache: graphs contain mixed dual_vertex_count values; cannot save a heterogeneous cache"
+            )
         inferred_dual_vertex_count = next(iter(graph_dual_counts))
+        _require_int_at_least(
+            inferred_dual_vertex_count,
+            field_name="dual_vertex_count",
+            minimum=3,
+        )
         if dual_vertex_count is None:
             return inferred_dual_vertex_count
         if dual_vertex_count != inferred_dual_vertex_count:
-            raise ValueError(f"cache: dual_vertex_count mismatch: explicit {dual_vertex_count} != inferred {inferred_dual_vertex_count}")
+            raise ValueError(
+                f"cache: dual_vertex_count mismatch: explicit {dual_vertex_count} != inferred {inferred_dual_vertex_count}"
+            )
         return dual_vertex_count
 
     if dual_vertex_count is None:
-        raise ValueError("cache: dual_vertex_count must be provided when graphs is empty")
+        raise ValueError(
+            "cache: dual_vertex_count must be provided when graphs is empty"
+        )
     return dual_vertex_count
 
 
-def _normalize_loaded_graphs(
+def _validate_graph_semantics(graphs: list[PlaneGraph]) -> None:
+    """Reject the first graph whose domain invariants do not validate."""
+    for graph_index, graph in enumerate(graphs):
+        try:
+            is_valid, errors = graph.validate()
+        except Exception as exc:
+            raise ValueError(
+                f"cache: invalid graph {graph_index}: validation raised {type(exc).__name__}: {exc}"
+            ) from exc
+        if is_valid:
+            continue
+
+        shown_errors = errors[:3]
+        summary = "; ".join(shown_errors) or "validation failed without details"
+        if len(errors) > len(shown_errors):
+            summary += f"; ... ({len(errors)} errors total)"
+        raise ValueError(f"cache: invalid graph {graph_index}: {summary}")
+
+
+def _select_pickle_graphs(
     raw_graphs: Any,
     *,
+    metadata: CacheMetadata,
     filepath: Path,
     max_count: int | None,
 ) -> tuple[list[PlaneGraph], int, int | None]:
-    """Normalize cached graph payloads into canonical PlaneGraph instances."""
+    """Validate cached PlaneGraph objects and select the requested prefix."""
     if not isinstance(raw_graphs, (list, tuple)):
         raise ValueError(f"cache: graphs payload must be list/tuple ({filepath})")
 
     raw_graph_count = len(raw_graphs)
     inferred_dual_vertex_count: int | None = None
-    graph_items = list(raw_graphs[:max_count] if max_count is not None else raw_graphs)
-    normalized_graphs: list[PlaneGraph] = []
-
-    for raw_graph in raw_graphs:
-        graph_dual_vertex_count = _raw_graph_dual_vertex_count(raw_graph, filepath)
-        if graph_dual_vertex_count is None:
-            raise ValueError(f"cache: unsupported graph payload type {type(raw_graph).__name__}")
+    selected_graphs: list[PlaneGraph] = []
+    # Scan the full payload for consistency even when max_count returns only a prefix.
+    for graph_index, raw_graph in enumerate(raw_graphs):
+        if not isinstance(raw_graph, PlaneGraph):
+            raise ValueError(
+                f"cache: unsupported graph payload type {type(raw_graph).__name__}"
+            )
+        _validate_graph_metadata(
+            raw_graph,
+            metadata,
+            graph_index=graph_index,
+            filepath=filepath,
+        )
+        graph_dual_vertex_count = raw_graph.dual_num_vertices
         if inferred_dual_vertex_count is None:
             inferred_dual_vertex_count = graph_dual_vertex_count
         elif graph_dual_vertex_count != inferred_dual_vertex_count:
-            raise ValueError(f"cache: graphs payload contains mixed dual_vertex_count values ({filepath})")
+            raise ValueError(
+                f"cache: graphs payload contains mixed dual_vertex_count values ({filepath})"
+            )
 
-    for graph in graph_items:
-        if isinstance(graph, PlaneGraph):
-            if isinstance(graph.dual_edge_multiplicity, FrozenEdgeMultiplicity):
-                normalized_graphs.append(graph)
-            else:
-                normalized_graphs.append(PlaneGraph.from_dict(graph.to_dict()))
-        elif isinstance(graph, dict):
-            normalized_graphs.append(PlaneGraph.from_dict(graph))
-        else:
-            raise ValueError(f"cache: unsupported graph payload type {type(graph).__name__}")
-    return normalized_graphs, raw_graph_count, inferred_dual_vertex_count
+        if max_count is None or graph_index < max_count:
+            selected_graphs.append(raw_graph)
+    return selected_graphs, raw_graph_count, inferred_dual_vertex_count
 
 
 def _validate_metadata_against_payload(
@@ -230,18 +399,24 @@ def _validate_metadata_against_payload(
 ) -> None:
     """Validate metadata against the serialized payload."""
     if metadata.graph_count != raw_graph_count:
-        raise ValueError(f"cache: metadata.graph_count mismatch: {metadata.graph_count} != {raw_graph_count} ({filepath})")
+        raise ValueError(
+            f"cache: metadata.graph_count mismatch: {metadata.graph_count} != {raw_graph_count} ({filepath})"
+        )
     if (
         inferred_dual_vertex_count is not None
         and metadata.dual_vertex_count != inferred_dual_vertex_count
     ):
-        raise ValueError(f"cache: metadata.dual_vertex_count mismatch: {metadata.dual_vertex_count} != {inferred_dual_vertex_count} ({filepath})")
+        raise ValueError(
+            f"cache: metadata.dual_vertex_count mismatch: {metadata.dual_vertex_count} != {inferred_dual_vertex_count} ({filepath})"
+        )
 
 
 def _save_pickle(
     graphs: list[PlaneGraph],
     filepath: Path,
     dual_vertex_count: int | None,
+    graph_class: CacheGraphClass,
+    include_primal: bool,
     compress: bool,
     compress_level: int,
 ) -> None:
@@ -251,56 +426,40 @@ def _save_pickle(
         graphs,
         dual_vertex_count,
     )
+    metadata = _build_cache_metadata(
+        dual_vertex_count=resolved_dual_vertex_count,
+        graph_count=len(graphs),
+        pickle_protocol=protocol,
+        graph_class=graph_class,
+        include_primal=include_primal,
+    )
+    for graph_index, graph in enumerate(graphs):
+        _validate_graph_metadata(
+            graph,
+            metadata,
+            graph_index=graph_index,
+            filepath=filepath,
+        )
     payload = {
-        "metadata": _build_cache_metadata(
-            dual_vertex_count=resolved_dual_vertex_count,
-            graph_count=len(graphs),
-            pickle_protocol=protocol,
-        ),
+        "metadata": metadata,
         "graphs": graphs,
     }
 
     def _write_pickle(file_obj: Any) -> None:
         if compress:
+            # Omit variable gzip metadata to keep identical cache payloads reproducible.
             with gzip.GzipFile(
-                fileobj=file_obj, mode="wb", compresslevel=compress_level
+                filename="",
+                mode="wb",
+                compresslevel=compress_level,
+                fileobj=file_obj,
+                mtime=0,
             ) as gz:
                 pickle.dump(payload, gz, protocol=protocol)
         else:
             pickle.dump(payload, file_obj, protocol=protocol)
 
-    _atomic_write(filepath, mode="wb", writer=_write_pickle)
-
-
-def _save_json(
-    graphs: list[PlaneGraph],
-    filepath: Path,
-    dual_vertex_count: int | None,
-) -> None:
-    """JSON serialization with atomic write and compact format."""
-    resolved_dual_vertex_count = _infer_dual_vertex_count_for_save(
-        graphs,
-        dual_vertex_count,
-    )
-    payload = {
-        "metadata": _build_cache_metadata(
-            dual_vertex_count=resolved_dual_vertex_count,
-            graph_count=len(graphs),
-            pickle_protocol=0,
-        ).__dict__,
-        "graphs": [graph.to_dict() for graph in graphs],
-    }
-
-    def _write_json(file_obj: Any) -> None:
-        # Compact format for cache (no indent).
-        json.dump(payload, file_obj, separators=(",", ":"))
-
-    _atomic_write(
-        filepath,
-        mode="w",
-        writer=_write_json,
-        encoding="utf-8",
-    )
+    _atomic_write(filepath, writer=_write_pickle)
 
 
 def _load_pickle(
@@ -322,41 +481,16 @@ def _load_pickle(
 
     # Extract and validate metadata.
     if not isinstance(payload, dict):
-        raise ValueError(f"cache: unsupported payload type {type(payload).__name__}; expected dict with metadata+graphs")
+        raise ValueError(
+            f"cache: unsupported payload type {type(payload).__name__}; expected dict with metadata+graphs"
+        )
     if "metadata" not in payload or "graphs" not in payload:
         raise ValueError(f"cache: missing metadata/graphs keys ({filepath})")
 
-    metadata = _coerce_pickle_metadata(payload["metadata"], filepath)
-    graphs, raw_graph_count, inferred_dual_vertex_count = _normalize_loaded_graphs(
+    metadata = _validate_pickle_metadata(payload["metadata"], filepath)
+    graphs, raw_graph_count, inferred_dual_vertex_count = _select_pickle_graphs(
         payload["graphs"],
-        filepath=filepath,
-        max_count=max_count,
-    )
-    _validate_metadata_against_payload(
-        metadata,
-        filepath=filepath,
-        raw_graph_count=raw_graph_count,
-        inferred_dual_vertex_count=inferred_dual_vertex_count,
-    )
-    return graphs, metadata
-
-
-def _load_json(
-    filepath: Path,
-    max_count: int | None,
-) -> tuple[list[PlaneGraph], CacheMetadata]:
-    """JSON deserialization."""
-    with open(filepath, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"cache: JSON payload must be object with metadata+graphs ({filepath})")
-    if "metadata" not in payload or "graphs" not in payload:
-        raise ValueError(f"cache: JSON payload missing metadata/graphs ({filepath})")
-
-    metadata = _coerce_json_metadata(payload["metadata"], filepath)
-    graphs, raw_graph_count, inferred_dual_vertex_count = _normalize_loaded_graphs(
-        payload["graphs"],
+        metadata=metadata,
         filepath=filepath,
         max_count=max_count,
     )
@@ -374,17 +508,22 @@ def save_graphs_to_cache(
     filepath: str | Path,
     *,
     dual_vertex_count: int | None = None,
+    graph_class: CacheGraphClass,
+    include_primal: bool,
     compress: bool = True,
     compress_level: int = 6,
-    use_json: bool = False,
 ) -> Path:
-    """Save graph list to cache file with atomic write."""
+    """Save graphs atomically with explicit generation provenance."""
     filepath = Path(filepath)
-
-    if use_json:
-        _save_json(graphs, filepath, dual_vertex_count)
-    else:
-        _save_pickle(graphs, filepath, dual_vertex_count, compress, compress_level)
+    _save_pickle(
+        graphs,
+        filepath,
+        dual_vertex_count,
+        graph_class,
+        include_primal,
+        compress,
+        compress_level,
+    )
 
     logger.info(
         "Saved %d graphs to %s (%.1f MB)",
@@ -399,18 +538,30 @@ def load_graphs_from_cache(
     filepath: str | Path,
     *,
     max_count: int | None = None,
-    use_json: bool = False,
     trusted: bool = False,
     safe_mode: bool = True,
+    validate_graphs: bool = False,
 ) -> tuple[list[PlaneGraph], CacheMetadata]:
-    """Load graphs from cache file with security checks."""
+    """Load graphs from a trusted pickle cache and validate them on request."""
+    if max_count is not None:
+        _require_int_at_least(
+            max_count,
+            field_name="max_count",
+            minimum=0,
+        )
+    if not isinstance(validate_graphs, bool):
+        raise ValueError(
+            f"cache: validate_graphs must be bool; got {validate_graphs!r}"
+        )
+
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"Cache file not found: {filepath}")
 
-    if use_json:
-        return _load_json(filepath, max_count)
-    else:
-        if not trusted:
-            raise ValueError("cache: pickle loading requires trusted=True; use use_json=True for untrusted files")
-        return _load_pickle(filepath, max_count, safe_mode)
+    if not trusted:
+        raise ValueError("cache: pickle loading requires trusted=True")
+    graphs, metadata = _load_pickle(filepath, max_count, safe_mode)
+
+    if validate_graphs:
+        _validate_graph_semantics(graphs)
+    return graphs, metadata

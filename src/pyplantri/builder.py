@@ -29,17 +29,11 @@ def _to_zero_based_twin_map(
     graph_name: str,
 ) -> dict[tuple[int, int], tuple[int, int]]:
     """Convert and validate twin_map completeness for -T based enumeration."""
-    if not twin_map_1based:
-        raise ValueError(f"{graph_name} twin_map missing")
-
+    # plantri vertex ids are 1-based, while cyclic-order slots are already 0-based.
     twin_map_0based: dict[tuple[int, int], tuple[int, int]] = {
         (v - 1, i): (u - 1, j)
         for (v, i), (u, j) in twin_map_1based.items()
     }
-
-    expected_half_edges = sum(len(neighbors) for neighbors in embedding.values())
-    if len(twin_map_0based) != expected_half_edges:
-        raise ValueError(f"{graph_name} twin_map size mismatch: {len(twin_map_0based)} != {expected_half_edges}")
 
     GraphConverter.validate_twin_map(embedding, twin_map_0based, graph_name=graph_name)
 
@@ -50,6 +44,7 @@ def _to_zero_based_edge_label_pairs(
     edge_label_pairs_1based: EdgeLabelPairs,
 ) -> EdgeLabelPairs:
     """Convert edge-label to half-edge pair map from 1-based to 0-based."""
+    # Convert endpoint vertices only; half-edge slots are already 0-based.
     return {
         edge_label: ((u1 - 1, i1), (u2 - 1, i2))
         for edge_label, ((u1, i1), (u2, i2)) in edge_label_pairs_1based.items()
@@ -60,15 +55,11 @@ def _build_half_edge_label_map(edge_label_pairs: EdgeLabelPairs) -> dict[HalfEdg
     """Build half-edge -> edge-label mapping from edge-label pair map."""
     half_edge_labels: dict[HalfEdge, EdgeLabel] = {}
     for edge_label, (h1, h2) in edge_label_pairs.items():
-        prev = half_edge_labels.get(h1)
-        if prev is not None and prev != edge_label:
-            raise ValueError(f"half-edge label conflict: {h1}")
-        half_edge_labels[h1] = edge_label
-
-        prev = half_edge_labels.get(h2)
-        if prev is not None and prev != edge_label:
-            raise ValueError(f"half-edge label conflict: {h2}")
-        half_edge_labels[h2] = edge_label
+        for half_edge in (h1, h2):
+            prev = half_edge_labels.get(half_edge)
+            if prev is not None and prev != edge_label:
+                raise ValueError(f"half-edge label conflict: {half_edge}")
+            half_edge_labels[half_edge] = edge_label
     return half_edge_labels
 
 
@@ -96,9 +87,6 @@ def _extract_faces_and_label_signatures(
     """Extract face vertex cycles and label signatures from face half-edge cycles."""
     faces: list[tuple[int, ...]] = []
     signatures: list[LabelSignature] = []
-
-    if not face_cycles:
-        return tuple(), tuple()
 
     for face_cycle in face_cycles:
         face_labels: list[EdgeLabel] = []
@@ -252,6 +240,7 @@ def _build_plane_graph_from_sections(
             vertex_count=primal_num_vertices,
             graph_name="primal",
         )
+        # Planar duality pairs each vertex with the face carrying the same edge-label multiset.
         dual_vertex_to_primal_face = _match_label_signatures(
             dual_vertex_label_signatures,
             primal_face_label_signatures,

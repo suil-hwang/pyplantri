@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.8"]
+requires = ["scikit-build-core>=0.10.4"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "pyplantri"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python wrapper for plantri - Simple Quadrangulation on Sphere (SQS) enumeration"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -34,10 +33,13 @@ dev = ["pytest", "pytest-cov"]
 Homepage = "https://github.com/suil-hwang/pyplantri"
 
 [tool.scikit-build]
+minimum-version = "build-system.requires"
 cmake.build-type = "Release"
 cmake.args = []
-wheel.install-dir = "src/pyplantri/bin"
+wheel.install-dir = "pyplantri/bin"
+wheel.license-files = ["LICENSE", "src/plantri/LICENSE-2.0.txt"]
 wheel.packages = ["src/pyplantri"]
+wheel.py-api = "py3"
 editable.mode = "redirect"
 editable.rebuild = true
 build-dir = "build/{wheel_tag}"

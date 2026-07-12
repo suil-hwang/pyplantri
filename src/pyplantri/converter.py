@@ -39,17 +39,18 @@ class GraphConverter:
 
         for half_edge, twin_half_edge in twin_map.items():
             if twin_half_edge not in expected_half_edges:
-                raise ValueError(
-                    f"{graph_name} twin_map out-of-range target: "
-                    f"{half_edge} -> {twin_half_edge}"
-                )
+                raise ValueError(f"{graph_name} twin_map out-of-range target: {half_edge} -> {twin_half_edge}")
             if half_edge == twin_half_edge:
                 raise ValueError(f"{graph_name} twin_map self-twin: {half_edge}")
             if twin_map.get(twin_half_edge) != half_edge:
-                raise ValueError(
-                    f"{graph_name} twin_map not involutive: "
-                    f"{half_edge} -> {twin_half_edge}"
-                )
+                raise ValueError(f"{graph_name} twin_map not involutive: {half_edge} -> {twin_half_edge}")
+            vertex, slot = half_edge
+            twin_vertex, twin_slot = twin_half_edge
+            if (
+                embedding[vertex][slot] != twin_vertex
+                or embedding[twin_vertex][twin_slot] != vertex
+            ):
+                raise ValueError(f"{graph_name} twin_map endpoint mismatch: {half_edge} -> {twin_half_edge}")
 
     @staticmethod
     def to_zero_based_embedding(
@@ -126,14 +127,12 @@ class GraphConverter:
                     if (curr_v, curr_i) in face_cycle_seen:
                         if (curr_v, curr_i) != start_half_edge:
                             raise ValueError(
-                                f"{graph_name} face traversal repeated non-start "
-                                f"half-edge: {(curr_v, curr_i)}"
+                                f"{graph_name} face traversal repeated non-start half-edge: {(curr_v, curr_i)}"
                             )
                         break
                     if (curr_v, curr_i) in visited:
                         raise ValueError(
-                            f"{graph_name} face traversal crossed visited "
-                            f"half-edge before closure: {(curr_v, curr_i)}"
+                            f"{graph_name} face traversal crossed visited half-edge before closure: {(curr_v, curr_i)}"
                         )
 
                     iterations += 1
@@ -148,16 +147,9 @@ class GraphConverter:
                     face_cycle.append(half_edge)
 
                     twin_v, twin_i = twin_map[half_edge]
-                    twin_neighbors = embedding.get(twin_v)
-                    if twin_neighbors is None:
-                        raise ValueError(
-                            f"{graph_name} twin_map references missing vertex: {twin_v}"
-                        )
-                    if len(twin_neighbors) == 0:
-                        raise ValueError(
-                            f"{graph_name} twin_map references empty vertex: {twin_v}"
-                        )
+                    twin_neighbors = embedding[twin_v]
                     curr_v = twin_v
+                    # In a CW rotation system, a face successor is the predecessor of the twin slot.
                     curr_i = (twin_i - 1) % len(twin_neighbors)
 
                 if len(face_cycle) < 2:
