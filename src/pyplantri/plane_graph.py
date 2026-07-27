@@ -4,87 +4,153 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections.abc import Iterable, Iterator, Mapping
 from types import MappingProxyType
-from typing import Any, SupportsInt, cast
+from typing import Any
 
 from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairEntries, Embedding, HalfEdge
 
-# Internal normalization input type.
-EmbeddingInput = dict[int, tuple[int, ...]] | Embedding | list[tuple[int, ...]]
+LabelSignature = tuple[str, ...]
+_EMPTY_DOUBLE_EDGES: frozenset[tuple[int, int]] = frozenset()
+_PLANE_GRAPH_SCALAR_FIELDS = (
+    "dual_num_vertices",
+    "primal_num_vertices",
+    "graph_id",
+)
+_PLANE_GRAPH_STATE_FIELDS = (
+    "dual_num_vertices",
+    "dual_support_edges",
+    "dual_edge_multiplicity",
+    "dual_embedding",
+    "dual_faces",
+    "primal_num_vertices",
+    "primal_embedding",
+    "primal_faces",
+    "dual_vertex_to_primal_face",
+    "primal_vertex_to_dual_face",
+    "dual_edge_label_pairs",
+    "primal_edge_label_pairs",
+    "graph_id",
+)
+
+
+def _edge_label_token(edge_label: EdgeLabel) -> str:
+    """Encode an edge label as a stable, type-preserving token."""
+    if isinstance(edge_label, int):
+        return f"i:{edge_label}"
+    return f"s:{edge_label}"
+
+
+def _label_signature(labels: Iterable[EdgeLabel]) -> LabelSignature:
+    """Canonicalize an oriented cyclic label sequence up to rotation."""
+    tokens = tuple(_edge_label_token(label) for label in labels)
+    return min(
+        (tokens[index:] + tokens[:index] for index in range(len(tokens))),
+        default=(),
+    )
+
+
+def _match_label_signatures(
+    source_signatures: tuple[LabelSignature, ...],
+    target_signatures: tuple[LabelSignature, ...],
+    *,
+    source_name: str,
+    target_name: str,
+) -> tuple[int, ...]:
+    """Match entities by oriented cyclic edge-label signature."""
+    if len(source_signatures) != len(target_signatures):
+        raise ValueError(
+            f"signature count mismatch: {source_name} -> {target_name} "
+            f"({len(source_signatures)} != {len(target_signatures)})"
+        )
+
+    target_by_signature: dict[LabelSignature, list[int]] = {}
+    for target_idx, signature in enumerate(target_signatures):
+        target_by_signature.setdefault(signature, []).append(target_idx)
+
+    used_targets: set[int] = set()
+    mapping: list[int] = []
+    for source_idx, signature in enumerate(source_signatures):
+        candidates = [
+            target_idx
+            for target_idx in target_by_signature.get(signature, [])
+            if target_idx not in used_targets
+        ]
+        if len(candidates) != 1:
+            raise ValueError(
+                f"signature map ambiguous: {source_name} {source_idx} "
+                f"-> {target_name}"
+            )
+        target_idx = candidates[0]
+        used_targets.add(target_idx)
+        mapping.append(target_idx)
+
+    return tuple(mapping)
 
 
 class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
     """Immutable mapping wrapper for edge multiplicities."""
 
     __slots__ = ("_data", "_items")
+    _data: Mapping[tuple[int, int], int]
+    _items: tuple[tuple[tuple[int, int], int], ...]
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if hasattr(self, name):
-            raise AttributeError(f"{type(self).__name__} is immutable")
-        object.__setattr__(self, name, value)
+        raise AttributeError(f"{type(self).__name__} is immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"{type(self).__name__} is immutable")
 
     def __init__(
         self,
         edge_multiplicity: (
             Mapping[tuple[int, int], int]
-            | list[tuple[tuple[int, int], int]]
             | tuple[tuple[tuple[int, int], int], ...]
         ),
     ) -> None:
+        _set = object.__setattr__
         if isinstance(edge_multiplicity, FrozenEdgeMultiplicity):
-            self._data = edge_multiplicity._data
-            self._items = edge_multiplicity._items
+            _set(self, "_data", edge_multiplicity._data)
+            _set(self, "_items", edge_multiplicity._items)
             return
 
-        # Fast path: trusted plain dict -- skip per-element isinstance/int() coercion.
-        if type(edge_multiplicity) is dict:
-            ordered_items = tuple(sorted(edge_multiplicity.items()))
-            self._items = ordered_items
-            self._data = MappingProxyType(dict(ordered_items))
-            return
-
-        # Fast path: trusted canonical tuple from __reduce__ (unpickle); skip coercion, sort keeps order.
-        if type(edge_multiplicity) is tuple:
-            ordered_items = tuple(sorted(edge_multiplicity))
-            data = dict(ordered_items)
-            if len(data) != len(ordered_items):
-                raise ValueError("Duplicate edge key encountered in canonical tuple")
-            self._items = ordered_items
-            self._data = MappingProxyType(data)
-            return
-
-        items_iter: Iterator[tuple[tuple[int, int], int]]
         if isinstance(edge_multiplicity, Mapping):
-            items_iter = iter(edge_multiplicity.items())
+            raw_items = tuple(edge_multiplicity.items())
+        elif type(edge_multiplicity) is tuple:
+            raw_items = edge_multiplicity
         else:
-            items_iter = iter(edge_multiplicity)
+            raise TypeError(
+                "edge_multiplicity must be a mapping or canonical tuple"
+            )
 
         normalized: dict[tuple[int, int], int] = {}
-        for raw_edge, raw_multiplicity in items_iter:
-            if not isinstance(raw_edge, tuple) or len(raw_edge) != 2:
+        for raw_item in raw_items:
+            if type(raw_item) is not tuple or len(raw_item) != 2:
+                raise TypeError(
+                    "edge_multiplicity entries must be "
+                    "((int, int), int) tuples"
+                )
+            raw_edge, raw_multiplicity = raw_item
+            if type(raw_edge) is not tuple or len(raw_edge) != 2:
                 raise TypeError(
                     f"edge_multiplicity keys must be 2-tuples; got {raw_edge!r}."
                 )
-            raw_u, raw_v = raw_edge
-            if isinstance(raw_u, bool) or isinstance(raw_v, bool):
+            u, v = raw_edge
+            if type(u) is not int or type(v) is not int:
                 raise TypeError(
                     f"edge_multiplicity keys must be integer vertex indices; got {raw_edge!r}."
                 )
-            if isinstance(raw_multiplicity, bool):
+            if type(raw_multiplicity) is not int:
                 raise TypeError(
                     f"edge_multiplicity values must be integers; got {raw_multiplicity!r} on edge {raw_edge!r}."
                 )
-            u = int(cast("SupportsInt", raw_u))
-            v = int(cast("SupportsInt", raw_v))
-            multiplicity = int(cast("SupportsInt", raw_multiplicity))
             edge = (u, v)
             if edge in normalized:
                 raise ValueError(f"Duplicate edge key encountered: {edge}")
-            normalized[edge] = multiplicity
+            normalized[edge] = raw_multiplicity
 
         ordered_items = tuple(sorted(normalized.items()))
-        self._items = ordered_items
-        self._data = MappingProxyType(dict(ordered_items))
+        _set(self, "_items", ordered_items)
+        _set(self, "_data", MappingProxyType(normalized))
 
     def __getitem__(self, edge: tuple[int, int]) -> int:
         return self._data[edge]
@@ -115,7 +181,7 @@ class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
 
 @dataclass(frozen=True, slots=True)
 class PlaneGraph:
-    """Immutable plane graph with fixed clockwise embedding.
+    """Immutable plane graph with fixed exterior-view clockwise embedding.
 
     Dual graph (Q*):
         - 4-regular plane multigraph.
@@ -133,7 +199,7 @@ class PlaneGraph:
     # Canonical undirected support-edge pairs (size s + d); parallel copies live in dual_edge_multiplicity.
     dual_support_edges: tuple[tuple[int, int], ...]
     dual_edge_multiplicity: Mapping[tuple[int, int], int]
-    dual_embedding: Embedding  # CW cyclic order at each vertex.
+    dual_embedding: Embedding  # Exterior-view CW cyclic order at each vertex.
     dual_faces: tuple[tuple[int, ...], ...]
 
     primal_num_vertices: int
@@ -159,69 +225,84 @@ class PlaneGraph:
 
     @staticmethod
     def _coerce_support_edges(
-        edges: Iterable[tuple[SupportsInt, SupportsInt]],
+        edges: tuple[tuple[int, int], ...],
     ) -> tuple[tuple[int, int], ...]:
-        if isinstance(edges, tuple) and all(
-            isinstance(edge, tuple)
-            and len(edge) == 2
-            and isinstance(edge[0], int)
-            and isinstance(edge[1], int)
+        if type(edges) is not tuple or any(
+            type(edge) is not tuple
+            or len(edge) != 2
+            or type(edge[0]) is not int
+            or type(edge[1]) is not int
             for edge in edges
         ):
-            return cast("tuple[tuple[int, int], ...]", edges)
-        return tuple((int(u), int(v)) for u, v in edges)
-
-    @staticmethod
-    def _coerce_faces(
-        faces: Iterable[Iterable[SupportsInt]],
-    ) -> tuple[tuple[int, ...], ...]:
-        if isinstance(faces, tuple) and all(
-            isinstance(face, tuple) and all(isinstance(v, int) for v in face)
-            for face in faces
-        ):
-            return cast(
-                "tuple[tuple[int, ...], ...]",
-                tuple(tuple(v for v in face) for face in faces),
+            raise TypeError(
+                "dual_support_edges must be tuple[tuple[int, int], ...]"
             )
-        return tuple(tuple(int(v) for v in face) for face in faces)
+        return edges
 
     @staticmethod
-    def _coerce_index_tuple(indices: Iterable[SupportsInt]) -> tuple[int, ...]:
-        if isinstance(indices, tuple) and all(isinstance(idx, int) for idx in indices):
-            return cast("tuple[int, ...]", indices)
-        return tuple(int(idx) for idx in indices)
+    def _coerce_nested_int_tuples(
+        values: tuple[tuple[int, ...], ...],
+        *,
+        field_name: str,
+    ) -> tuple[tuple[int, ...], ...]:
+        if type(values) is not tuple or any(
+            type(row) is not tuple or any(type(value) is not int for value in row)
+            for row in values
+        ):
+            raise TypeError(
+                f"{field_name} must be tuple[tuple[int, ...], ...]"
+            )
+        return values
+
+    @staticmethod
+    def _coerce_index_tuple(
+        indices: tuple[int, ...],
+        *,
+        field_name: str,
+    ) -> tuple[int, ...]:
+        if type(indices) is not tuple or any(type(index) is not int for index in indices):
+            raise TypeError(f"{field_name} must be tuple[int, ...]")
+        return indices
+
+    @staticmethod
+    def _require_int(value: int, *, field_name: str) -> int:
+        if type(value) is not int:
+            raise TypeError(f"{field_name} must be int")
+        return value
 
     @staticmethod
     def _coerce_edge_label(label: EdgeLabel) -> EdgeLabel:
-        if isinstance(label, bool):
-            raise TypeError(f"edge label must be int|str, got bool {label!r}")
-        if isinstance(label, int):
+        if type(label) is int:
             return label
-        if isinstance(label, str):
+        if type(label) is str:
             return label
         raise TypeError(f"edge label must be int|str, got {type(label).__name__}")
 
     @staticmethod
-    def _coerce_half_edge(half_edge: Iterable[SupportsInt]) -> HalfEdge:
-        if not isinstance(half_edge, (list, tuple)) or len(half_edge) != 2:
+    def _coerce_half_edge(half_edge: HalfEdge) -> HalfEdge:
+        if (
+            type(half_edge) is not tuple
+            or len(half_edge) != 2
+            or type(half_edge[0]) is not int
+            or type(half_edge[1]) is not int
+        ):
             raise TypeError(
-                f"half-edge must be a 2-sequence (vertex, slot); got {half_edge!r}"
+                f"half-edge must be tuple[int, int]; got {half_edge!r}"
             )
-        return int(half_edge[0]), int(half_edge[1])
+        return half_edge
 
-    @classmethod
-    def _edge_label_sort_key(cls, label: EdgeLabel) -> tuple[int, int | str]:
-        normalized_label = cls._coerce_edge_label(label)
-        if isinstance(normalized_label, int):
-            return (0, normalized_label)
-        return (1, normalized_label)
+    @staticmethod
+    def _edge_label_sort_key(label: EdgeLabel) -> tuple[int, int | str]:
+        if type(label) is int:
+            return (0, label)
+        return (1, label)
 
     @classmethod
     def _normalize_edge_label_entry(
         cls,
         label: EdgeLabel,
-        half_edge_a: Iterable[int],
-        half_edge_b: Iterable[int],
+        half_edge_a: HalfEdge,
+        half_edge_b: HalfEdge,
     ) -> tuple[EdgeLabel, HalfEdge, HalfEdge]:
         normalized_label = cls._coerce_edge_label(label)
         normalized_half_edge_a, normalized_half_edge_b = sorted(
@@ -232,86 +313,33 @@ class PlaneGraph:
     @classmethod
     def _coerce_edge_label_pairs(
         cls,
-        edge_label_pairs: (
-            Mapping[EdgeLabel, tuple[HalfEdge, HalfEdge]]
-            | Iterable[tuple[EdgeLabel, HalfEdge, HalfEdge]]
-            | Iterable[tuple[EdgeLabel, tuple[HalfEdge, HalfEdge]]]
-            | None
-        ),
+        edge_label_pairs: EdgeLabelPairEntries,
     ) -> EdgeLabelPairEntries:
-        if edge_label_pairs is None:
-            return tuple()
-
-        if isinstance(edge_label_pairs, tuple) and all(
-            isinstance(entry, tuple)
-            and len(entry) == 3
-            and isinstance(entry[0], (int, str))
-            and isinstance(entry[1], tuple)
-            and isinstance(entry[2], tuple)
-            and len(entry[1]) == 2
-            and len(entry[2]) == 2
-            for entry in edge_label_pairs
-        ):
-            three_tuple_entries = cast(
-                "tuple[tuple[EdgeLabel, HalfEdge, HalfEdge], ...]",
-                edge_label_pairs,
+        if type(edge_label_pairs) is not tuple:
+            raise TypeError(
+                "edge label pairs must be "
+                "tuple[tuple[int | str, HalfEdge, HalfEdge], ...]"
             )
-            normalized_entries = [
-                cls._normalize_edge_label_entry(label, h1, h2)
-                for label, h1, h2 in three_tuple_entries
-            ]
-            seen_labels: set[EdgeLabel] = set()
-            for label, _, _ in normalized_entries:
-                if label in seen_labels:
-                    raise ValueError(f"duplicate edge label encountered: {label!r}")
-                seen_labels.add(label)
-            return tuple(
-                sorted(
-                    normalized_entries,
-                    key=lambda entry: (
-                        cls._edge_label_sort_key(entry[0]),
-                        entry[1],
-                        entry[2],
-                    ),
-                )
-            )
-
-        if isinstance(edge_label_pairs, Mapping):
-            raw_entries = (
-                (label, pair[0], pair[1]) for label, pair in edge_label_pairs.items()
-            )
-        else:
-            raw_entries = edge_label_pairs
 
         normalized_entries: list[tuple[EdgeLabel, HalfEdge, HalfEdge]] = []
         seen_labels: set[EdgeLabel] = set()
-        for raw_entry in raw_entries:
-            if not isinstance(raw_entry, (list, tuple)):
+        for raw_entry in edge_label_pairs:
+            if type(raw_entry) is not tuple or len(raw_entry) != 3:
                 raise TypeError(
-                    f"edge label entry must be tuple/list; got {type(raw_entry).__name__}"
+                    "edge label entry must be "
+                    "tuple[int | str, HalfEdge, HalfEdge]"
                 )
-            if len(raw_entry) == 2:
-                raw_label = raw_entry[0]
-                raw_pair = raw_entry[1]
-                if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
-                    raise TypeError(
-                        f"edge label pair payload must be a 2-sequence of half-edges; got {raw_pair!r}"
-                    )
-                raw_h1, raw_h2 = raw_pair
-            elif len(raw_entry) == 3:
-                raw_label, raw_h1, raw_h2 = raw_entry
-            else:
-                raise TypeError(
-                    f"edge label entry must have length 2 or 3; got {len(raw_entry)}"
-                )
-
-            label = cls._coerce_edge_label(cast("EdgeLabel", raw_label))
+            raw_label, raw_h1, raw_h2 = raw_entry
+            normalized_entry = cls._normalize_edge_label_entry(
+                raw_label,
+                raw_h1,
+                raw_h2,
+            )
+            label = normalized_entry[0]
             if label in seen_labels:
                 raise ValueError(f"duplicate edge label encountered: {label!r}")
             seen_labels.add(label)
-            normalized_entries.append(
-                cls._normalize_edge_label_entry(label, raw_h1, raw_h2)
-            )
+            normalized_entries.append(normalized_entry)
 
         return tuple(
             sorted(
@@ -324,26 +352,31 @@ class PlaneGraph:
             )
         )
 
-    @staticmethod
-    def _encode_edge_label(label: EdgeLabel) -> str:
-        # Preserve label types so integer 1 and string "1" cannot collide in topology signatures.
-        if isinstance(label, int):
-            return f"i:{label}"
-        return f"s:{label}"
-
     def __post_init__(self) -> None:
-        """Normalize mutable inputs to immutable internal representations."""
+        """Validate canonical inputs and freeze edge multiplicities."""
         _set = object.__setattr__
 
         _set(
-            self, "dual_num_vertices", int(cast("SupportsInt", self.dual_num_vertices))
+            self,
+            "dual_num_vertices",
+            self._require_int(
+                self.dual_num_vertices,
+                field_name="dual_num_vertices",
+            ),
         )
         _set(
             self,
             "primal_num_vertices",
-            int(cast("SupportsInt", self.primal_num_vertices)),
+            self._require_int(
+                self.primal_num_vertices,
+                field_name="primal_num_vertices",
+            ),
         )
-        _set(self, "graph_id", int(cast("SupportsInt", self.graph_id)))
+        _set(
+            self,
+            "graph_id",
+            self._require_int(self.graph_id, field_name="graph_id"),
+        )
 
         _set(
             self,
@@ -361,31 +394,51 @@ class PlaneGraph:
         _set(
             self,
             "dual_embedding",
-            self._normalize_embedding(
+            self._coerce_nested_int_tuples(
                 self.dual_embedding,
-                expected_size=self.dual_num_vertices,
+                field_name="dual_embedding",
             ),
         )
         _set(
             self,
             "primal_embedding",
-            self._normalize_embedding(
+            self._coerce_nested_int_tuples(
                 self.primal_embedding,
-                expected_size=self.primal_num_vertices,
+                field_name="primal_embedding",
             ),
         )
 
-        _set(self, "dual_faces", self._coerce_faces(self.dual_faces))
-        _set(self, "primal_faces", self._coerce_faces(self.primal_faces))
+        _set(
+            self,
+            "dual_faces",
+            self._coerce_nested_int_tuples(
+                self.dual_faces,
+                field_name="dual_faces",
+            ),
+        )
+        _set(
+            self,
+            "primal_faces",
+            self._coerce_nested_int_tuples(
+                self.primal_faces,
+                field_name="primal_faces",
+            ),
+        )
         _set(
             self,
             "dual_vertex_to_primal_face",
-            self._coerce_index_tuple(self.dual_vertex_to_primal_face),
+            self._coerce_index_tuple(
+                self.dual_vertex_to_primal_face,
+                field_name="dual_vertex_to_primal_face",
+            ),
         )
         _set(
             self,
             "primal_vertex_to_dual_face",
-            self._coerce_index_tuple(self.primal_vertex_to_dual_face),
+            self._coerce_index_tuple(
+                self.primal_vertex_to_dual_face,
+                field_name="primal_vertex_to_dual_face",
+            ),
         )
         _set(
             self,
@@ -399,125 +452,71 @@ class PlaneGraph:
         )
 
     def __getstate__(self) -> dict[str, Any]:
-        return {
-            "dual_num_vertices": self.dual_num_vertices,
-            "dual_support_edges": self.dual_support_edges,
-            "dual_edge_multiplicity": self.dual_edge_multiplicity,
-            "dual_embedding": self.dual_embedding,
-            "dual_faces": self.dual_faces,
-            "primal_num_vertices": self.primal_num_vertices,
-            "primal_embedding": self.primal_embedding,
-            "primal_faces": self.primal_faces,
-            "dual_vertex_to_primal_face": self.dual_vertex_to_primal_face,
-            "primal_vertex_to_dual_face": self.primal_vertex_to_dual_face,
-            "dual_edge_label_pairs": self.dual_edge_label_pairs,
-            "primal_edge_label_pairs": self.primal_edge_label_pairs,
-            "graph_id": self.graph_id,
-        }
+        return {name: getattr(self, name) for name in _PLANE_GRAPH_STATE_FIELDS}
 
     def __setstate__(self, state: Any) -> None:
-        if not isinstance(state, dict):
+        if type(state) is not dict:
             raise TypeError(
                 f"PlaneGraph pickle state must be dict; got {type(state).__name__}"
             )
 
-        required_keys = (
-            "dual_num_vertices",
-            "dual_support_edges",
-            "dual_edge_multiplicity",
-            "dual_embedding",
-            "dual_faces",
-            "primal_num_vertices",
-            "primal_embedding",
-            "primal_faces",
-            "dual_vertex_to_primal_face",
-            "primal_vertex_to_dual_face",
-            "dual_edge_label_pairs",
-            "primal_edge_label_pairs",
-            "graph_id",
-        )
-
-        missing_keys = [key for key in required_keys if key not in state]
-        if missing_keys:
-            raise KeyError(
-                f"PlaneGraph pickle state missing keys: {', '.join(missing_keys)}"
+        expected_keys = set(_PLANE_GRAPH_STATE_FIELDS)
+        actual_keys = set(state)
+        if actual_keys != expected_keys:
+            missing = sorted(expected_keys - actual_keys)
+            extra = sorted(actual_keys - expected_keys)
+            raise ValueError(
+                f"PlaneGraph pickle state keys mismatch: missing={missing}, extra={extra}"
             )
 
-        for name in required_keys:
+        for name in _PLANE_GRAPH_STATE_FIELDS:
             object.__setattr__(self, name, state[name])
         object.__setattr__(self, "_double_edges_cache", None)
-        immutable_container_fields = (
-            "dual_support_edges",
-            "dual_embedding",
-            "dual_faces",
-            "primal_embedding",
-            "primal_faces",
-            "dual_vertex_to_primal_face",
-            "primal_vertex_to_dual_face",
-            "dual_edge_label_pairs",
-            "primal_edge_label_pairs",
-        )
-        if not isinstance(self.dual_edge_multiplicity, FrozenEdgeMultiplicity) or any(
-            type(getattr(self, name)) is not tuple
-            for name in immutable_container_fields
-        ):
-            self.__post_init__()
+        self.__post_init__()
 
-    @staticmethod
-    def _normalize_embedding(
-        embedding: EmbeddingInput,
-        *,
-        expected_size: int = 0,
-    ) -> Embedding:
-        """Convert sparse/dict embedding into dense 0..n-1 tuple-of-tuples."""
-        if isinstance(embedding, dict):
-            # Mapping inputs may use string vertex keys, so int() is intentional.
-            keyed = cast("dict[SupportsInt | str, Iterable[SupportsInt]]", embedding)
-            size = max(expected_size, 0)
-            if keyed:
-                max_index = max(int(v) for v in keyed.keys()) + 1
-                size = max(size, max_index)
-            dense: list[tuple[int, ...]] = [tuple() for _ in range(size)]
-            for vertex, neighbors in keyed.items():
-                idx = int(vertex)
-                if idx < 0:
-                    raise ValueError(f"embedding contains negative vertex index: {idx}")
-                if idx >= len(dense):
-                    dense.extend(tuple() for _ in range(idx + 1 - len(dense)))
-                dense[idx] = tuple(int(u) for u in neighbors)
-            return tuple(dense)
-
-        # Fast path: already-normalized tuple from a prior _normalize_embedding call.
-        if (
-            isinstance(embedding, tuple)
-            and len(embedding) >= expected_size
-            and all(
-                isinstance(neighbors, tuple)
-                and all(isinstance(u, int) for u in neighbors)
-                for neighbors in embedding
-            )
-        ):
-            return embedding
-
-        dense_embedding: Embedding = tuple(
-            tuple(int(cast("SupportsInt", u)) for u in neighbors)
-            for neighbors in embedding
-        )
-        if expected_size > len(dense_embedding):
-            dense_embedding = dense_embedding + tuple(
-                tuple() for _ in range(expected_size - len(dense_embedding))
-            )
-        return dense_embedding
-
-    @staticmethod
-    def _neighbors_of(
-        embedding: Embedding,
-        vertex: int,
-    ) -> tuple[int, ...]:
-        """Get neighbors for vertex from dense tuple embedding."""
-        if 0 <= vertex < len(embedding):
-            return embedding[vertex]
-        return tuple()
+    def _validate_field_types(self, errors: list[str]) -> bool:
+        """Reject state that bypassed the canonical constructor boundary."""
+        try:
+            for field_name in _PLANE_GRAPH_SCALAR_FIELDS:
+                self._require_int(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                )
+            self._coerce_support_edges(self.dual_support_edges)
+            if not isinstance(
+                self.dual_edge_multiplicity,
+                FrozenEdgeMultiplicity,
+            ):
+                raise TypeError(
+                    "dual_edge_multiplicity must be FrozenEdgeMultiplicity"
+                )
+            for field_name in (
+                "dual_embedding",
+                "primal_embedding",
+                "dual_faces",
+                "primal_faces",
+            ):
+                self._coerce_nested_int_tuples(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                )
+            for field_name in (
+                "dual_vertex_to_primal_face",
+                "primal_vertex_to_dual_face",
+            ):
+                self._coerce_index_tuple(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                )
+            for field_name in (
+                "dual_edge_label_pairs",
+                "primal_edge_label_pairs",
+            ):
+                self._coerce_edge_label_pairs(getattr(self, field_name))
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+            return False
+        return True
 
     @staticmethod
     def _scan_embedding(
@@ -580,18 +579,6 @@ class PlaneGraph:
             )
 
         return directed_counts, undirected_half_edge_counts
-
-    @staticmethod
-    def _label_signature(labels: Iterable[EdgeLabel]) -> tuple[tuple[str, int], ...]:
-        counts: dict[str, int] = {}
-        for label in labels:
-            token = PlaneGraph._encode_edge_label(label)
-            counts[token] = counts.get(token, 0) + 1
-        return tuple(sorted(counts.items()))
-
-    @staticmethod
-    def _embedding_to_dict(embedding: Embedding) -> dict[int, tuple[int, ...]]:
-        return dict(enumerate(embedding))
 
     def _reconstruct_half_edge_maps(
         self,
@@ -665,7 +652,7 @@ class PlaneGraph:
         errors: list[str],
     ) -> tuple[
         tuple[tuple[int, ...], ...] | None,
-        tuple[tuple[tuple[str, int], ...], ...] | None,
+        tuple[LabelSignature, ...] | None,
         dict[HalfEdge, EdgeLabel] | None,
         dict[EdgeLabel, tuple[int, ...]] | None,
     ]:
@@ -680,7 +667,7 @@ class PlaneGraph:
 
         try:
             face_cycles = GraphConverter.extract_face_half_edge_cycles(
-                self._embedding_to_dict(embedding),
+                dict(enumerate(embedding)),
                 twin_map,
                 graph_name=graph_name,
             )
@@ -689,7 +676,7 @@ class PlaneGraph:
             return None, None, half_edge_labels, None
 
         reconstructed_faces: list[tuple[int, ...]] = []
-        face_label_signatures: list[tuple[tuple[str, int], ...]] = []
+        face_label_signatures: list[LabelSignature] = []
         edge_label_faces: dict[EdgeLabel, list[int]] = {}
         for face_index, face_cycle in enumerate(face_cycles):
             labels: list[EdgeLabel] = []
@@ -703,7 +690,7 @@ class PlaneGraph:
                 labels.append(label)
                 edge_label_faces.setdefault(label, []).append(face_index)
             reconstructed_faces.append(tuple(vertex for vertex, _ in face_cycle))
-            face_label_signatures.append(self._label_signature(labels))
+            face_label_signatures.append(_label_signature(labels))
 
         return (
             tuple(reconstructed_faces),
@@ -744,8 +731,8 @@ class PlaneGraph:
         embedding: Embedding,
         half_edge_labels: dict[HalfEdge, EdgeLabel],
         errors: list[str],
-    ) -> tuple[tuple[tuple[str, int], ...], ...] | None:
-        signatures: list[tuple[tuple[str, int], ...]] = []
+    ) -> tuple[LabelSignature, ...] | None:
+        signatures: list[LabelSignature] = []
         for vertex, neighbors in enumerate(embedding):
             labels: list[EdgeLabel] = []
             for slot_idx in range(len(neighbors)):
@@ -757,48 +744,8 @@ class PlaneGraph:
                     )
                     return None
                 labels.append(label)
-            signatures.append(self._label_signature(labels))
+            signatures.append(_label_signature(labels))
         return tuple(signatures)
-
-    @staticmethod
-    def _match_label_signatures(
-        source_signatures: tuple[tuple[tuple[str, int], ...], ...],
-        target_signatures: tuple[tuple[tuple[str, int], ...], ...],
-        *,
-        source_name: str,
-        target_name: str,
-    ) -> tuple[int, ...]:
-        if len(source_signatures) != len(target_signatures):
-            raise ValueError(
-                f"signature count mismatch: {source_name} -> {target_name} ({len(source_signatures)} != {len(target_signatures)})"
-            )
-
-        target_by_signature: dict[tuple[tuple[str, int], ...], list[int]] = {}
-        for target_idx, signature in enumerate(target_signatures):
-            target_by_signature.setdefault(signature, []).append(target_idx)
-
-        used_targets: set[int] = set()
-        mapping: list[int] = []
-        for source_idx, signature in enumerate(source_signatures):
-            candidates = [
-                target_idx
-                for target_idx in target_by_signature.get(signature, [])
-                if target_idx not in used_targets
-            ]
-            if len(candidates) != 1:
-                raise ValueError(
-                    f"signature map ambiguous: {source_name} {source_idx} -> {target_name}"
-                )
-            target_idx = candidates[0]
-            used_targets.add(target_idx)
-            mapping.append(target_idx)
-
-        if len(used_targets) != len(target_signatures):
-            raise ValueError(
-                f"signature map not bijective: {source_name} -> {target_name}"
-            )
-
-        return tuple(mapping)
 
     @staticmethod
     def _validate_bijection(
@@ -870,7 +817,7 @@ class PlaneGraph:
                 errors.append(
                     f"Dual face {face_idx} has size {len(face)}, expected >= 2"
                 )
-            if len(face) > 2 and len(set(face)) != len(face):
+            if len(set(face)) != len(face):
                 errors.append(f"Dual face {face_idx} repeats vertices: {face}")
             for vertex in face:
                 if vertex < 0 or vertex >= self.dual_num_vertices:
@@ -936,6 +883,24 @@ class PlaneGraph:
             if type(multiplicity) is int
         )
 
+    def _validate_dual_digon_correspondence(self, errors: list[str]) -> None:
+        """Require a one-to-one correspondence between digons and double edges."""
+        digon_edge_counts: dict[tuple[int, int], int] = {}
+        for face in self.dual_faces:
+            if len(face) != 2 or face[0] == face[1]:
+                continue
+            u, v = face
+            edge = (u, v) if u < v else (v, u)
+            digon_edge_counts[edge] = digon_edge_counts.get(edge, 0) + 1
+
+        expected_counts = {edge: 1 for edge in self.double_edges}
+        if digon_edge_counts != expected_counts:
+            errors.append(
+                "dual digon/double-edge correspondence mismatch: "
+                f"digons={tuple(sorted(digon_edge_counts.items()))!r}, "
+                f"double_edges={tuple(sorted(self.double_edges))!r}"
+            )
+
     def _validate_primal_faces(self, errors: list[str]) -> None:
         expected_primal_faces = self.dual_num_vertices
         if len(self.primal_faces) != expected_primal_faces:
@@ -984,11 +949,12 @@ class PlaneGraph:
 
     def _has_primal_data(self) -> bool:
         return (
-            self.primal_num_vertices > 0
+            self.primal_num_vertices != 0
             or bool(self.primal_embedding)
             or bool(self.primal_faces)
             or bool(self.dual_vertex_to_primal_face)
             or bool(self.primal_vertex_to_dual_face)
+            or bool(self.primal_edge_label_pairs)
         )
 
     def _validate_dual_contract(self, errors: list[str]) -> None:
@@ -1014,6 +980,7 @@ class PlaneGraph:
             undirected_half_edge_counts,
             errors,
         )
+        self._validate_dual_digon_correspondence(errors)
 
         euler_lhs = self.dual_num_vertices - edge_count + self.dual_num_faces
         if euler_lhs != 2:
@@ -1107,10 +1074,7 @@ class PlaneGraph:
             dual_faces_reconstructed is not None
             and dual_faces_reconstructed != self.dual_faces
         ):
-            errors.append(
-                "dual_faces topology mismatch: "
-                "stored faces do not match reconstruction from embedding+edge labels"
-            )
+            errors.append("dual_faces topology mismatch")
 
         if not self._has_primal_data():
             return
@@ -1122,7 +1086,7 @@ class PlaneGraph:
             primal_faces_reconstructed,
             primal_face_signatures,
             primal_half_edge_labels,
-            _primal_edge_label_faces,
+            _,
         ) = self._extract_reconstructed_faces(
             graph_name="primal",
             embedding=self.primal_embedding,
@@ -1133,10 +1097,7 @@ class PlaneGraph:
             primal_faces_reconstructed is not None
             and primal_faces_reconstructed != self.primal_faces
         ):
-            errors.append(
-                "primal_faces topology mismatch: "
-                "stored faces do not match reconstruction from embedding+edge labels"
-            )
+            errors.append("primal_faces topology mismatch")
 
         if (
             dual_face_signatures is None
@@ -1168,7 +1129,7 @@ class PlaneGraph:
             return
 
         try:
-            reconstructed_dual_vertex_to_primal_face = self._match_label_signatures(
+            reconstructed_dual_vertex_to_primal_face = _match_label_signatures(
                 dual_vertex_signatures,
                 primal_face_signatures,
                 source_name="dual vertex",
@@ -1178,12 +1139,9 @@ class PlaneGraph:
                 reconstructed_dual_vertex_to_primal_face
                 != self.dual_vertex_to_primal_face
             ):
-                errors.append(
-                    "dual_vertex_to_primal_face topology mismatch: "
-                    "stored mapping does not match reconstruction from edge labels"
-                )
+                errors.append("dual_vertex_to_primal_face topology mismatch")
 
-            reconstructed_primal_vertex_to_dual_face = self._match_label_signatures(
+            reconstructed_primal_vertex_to_dual_face = _match_label_signatures(
                 primal_vertex_signatures,
                 dual_face_signatures,
                 source_name="primal vertex",
@@ -1193,10 +1151,7 @@ class PlaneGraph:
                 reconstructed_primal_vertex_to_dual_face
                 != self.primal_vertex_to_dual_face
             ):
-                errors.append(
-                    "primal_vertex_to_dual_face topology mismatch: "
-                    "stored mapping does not match reconstruction from edge labels"
-                )
+                errors.append("primal_vertex_to_dual_face topology mismatch")
         except ValueError as exc:
             errors.append(str(exc))
 
@@ -1208,42 +1163,40 @@ class PlaneGraph:
     @property
     def double_edges(self) -> frozenset[tuple[int, int]]:
         """Parallel-edge pairs (digons) in the dual embedding."""
-        cache = getattr(self, "_double_edges_cache", None)
+        cache = self._double_edges_cache
         if cache is None:
             cache = frozenset(
                 e for e, m in self.dual_edge_multiplicity.items() if m == 2
-            )
+            ) or _EMPTY_DOUBLE_EDGES
             object.__setattr__(self, "_double_edges_cache", cache)
         return cache
 
-    @property
-    def is_4_regular(self) -> bool:
-        """Whether the dual graph is quartic, i.e. every vertex has degree 4."""
-        return bool(self.dual_embedding) and all(
-            len(neighbors) == 4 for neighbors in self.dual_embedding
-        )
-
-    @property
-    def is_loop_free(self) -> bool:
-        """Whether graph has no self-loops."""
-        return all(
-            v not in neighbors for v, neighbors in enumerate(self.dual_embedding)
-        )
-
-    def neighbors_cw(self, vertex: int) -> tuple[int, ...]:
-        """CW-ordered neighbors of a vertex."""
-        return self._neighbors_of(self.dual_embedding, vertex)
-
-    def neighbors_ccw(self, vertex: int) -> tuple[int, ...]:
-        """CCW-ordered neighbors of a vertex."""
-        return tuple(reversed(self.neighbors_cw(vertex)))
-
     def validate(self) -> tuple[bool, list[str]]:
         """Validates graph invariants."""
+        # Sub-validators append to `errors` rather than raising, so one call reports everything.
         errors: list[str] = []
+        if not self._validate_field_types(errors):
+            return False, errors
+
+        # Mirrors plantri.MIN_DUAL_VERTEX_COUNT, the smallest enumerable dual.
+        if self.dual_num_vertices < 3:
+            errors.append(
+                f"dual_num_vertices must be >= 3, got {self.dual_num_vertices}"
+            )
+        if self.primal_num_vertices < 0:
+            errors.append(
+                f"primal_num_vertices must be non-negative, got {self.primal_num_vertices}"
+            )
+        if self.graph_id < 0:
+            errors.append(
+                f"graph_id must be non-negative, got {self.graph_id}"
+            )
+
         self._validate_dual_contract(errors)
+        # Primal fields are legitimately empty when built with include_primal=False.
         if self._has_primal_data():
             self._validate_primal_contract(errors)
+        # Runs even for dual-only graphs: re-derives faces, checks the implied primal.
         self._validate_topological_consistency(errors)
 
         return len(errors) == 0, errors

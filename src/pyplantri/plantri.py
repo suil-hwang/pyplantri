@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from shutil import which
 from collections.abc import Iterator
-from typing import Literal
+from typing import Literal, NoReturn
 
 from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
@@ -36,6 +36,11 @@ class ParsedGraphSection:
 
 
 _LINE_ORIENTED_OUTPUT_FLAGS = frozenset("agsT")
+_OUTPUT_FLAGS = frozenset("agsETu")
+_DOUBLE_CODE_OUTPUT_FLAG = frozenset("T")
+_QUADRANGULATION_FLAGS = frozenset("qQ")
+# Sorted because frozenset iteration order varies per process; the error message must not.
+_LINE_ORIENTED_FLAG_HINT = "/".join(f"-{flag}" for flag in sorted(_LINE_ORIENTED_OUTPUT_FLAGS))
 
 
 def _has_plantri_flag(options: list[str] | None, flags: frozenset[str]) -> bool:
@@ -44,6 +49,20 @@ def _has_plantri_flag(options: list[str] | None, flags: frozenset[str]) -> bool:
         option.startswith("-") and any(char in flags for char in option[1:])
         for option in (options or [])
     )
+
+
+def _selected_plantri_flags(
+    options: list[str] | None,
+    flags: frozenset[str],
+) -> set[str]:
+    """Return selected boolean plantri flags, including combined options."""
+    return {
+        char
+        for option in (options or [])
+        if option.startswith("-")
+        for char in option[1:]
+        if char in flags
+    }
 
 
 def _without_plantri_flags(
@@ -74,13 +93,18 @@ def _build_tag_sort_key(tag_dir: Path) -> tuple[bool, str]:
     return not tag_dir.name.endswith(platform_tag), tag_dir.name
 
 
+def _is_executable(path: Path) -> bool:
+    """Return whether path names a runnable executable on this platform."""
+    return path.is_file() and (os.name == "nt" or os.access(path, os.X_OK))
+
+
 def _find_plantri_exe() -> Path:
     """Finds the plantri executable path."""
     exe_name = "plantri.exe" if os.name == "nt" else "plantri"
 
     # Package bin folder (installed).
     pkg_bin = Path(__file__).parent / "bin" / exe_name
-    if pkg_bin.is_file():
+    if _is_executable(pkg_bin):
         return pkg_bin
 
     # scikit-build-core build folder (editable/dev): plantri.py -> pyplantri -> src -> project_root.
@@ -91,24 +115,34 @@ def _find_plantri_exe() -> Path:
             if tag_dir.is_dir():
                 # Release folder (Visual Studio build).
                 release_exe = tag_dir / "Release" / exe_name
-                if release_exe.is_file():
+                if _is_executable(release_exe):
                     return release_exe
                 # MinGW/Unix build.
                 direct_exe = tag_dir / exe_name
-                if direct_exe.is_file():
+                if _is_executable(direct_exe):
                     return direct_exe
 
     path_exe = which(exe_name)
-    if path_exe is not None and Path(path_exe).is_file():
-        return Path(path_exe)
+    if path_exe is not None:
+        resolved_path_exe = Path(path_exe)
+        if _is_executable(resolved_path_exe):
+            return resolved_path_exe
 
     # Default path for error messages.
     return Path(__file__).parent / "bin" / exe_name
 
 
-_BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES = 64
+# Bundled plantri limits. Count mode (-u) uses the full MAXN=64 range.
+# The fixed -T output buffer is safe through N=57 for quadrangulations
+# (E=2N-4), or N=39 for the densest built-in planar class (E<=3N-6).
+_BUNDLED_PLANTRI_MAX_N = 64
+_QUADRANGULATION_DOUBLE_CODE_MAX_N = 57
+_GENERAL_PLANAR_DOUBLE_CODE_MAX_N = 39
+
+# Public SQS dual bounds; n=N-2 for a quadrangulation with N primal vertices.
 MIN_DUAL_VERTEX_COUNT = 3
-MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES - 2
+MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_N - 2
+MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT = (_QUADRANGULATION_DOUBLE_CODE_MAX_N - 2)
 
 
 class PlantriError(Exception):
@@ -126,13 +160,23 @@ class QuadrangulationDualClass(str, Enum):
     SIMPLE_QUARTIC = "simple_quartic"
 
 
-def _raise_executable_not_found(executable: Path) -> None:
+def _raise_executable_not_found(executable: Path) -> NoReturn:
     raise PlantriExecutableNotFoundError(f"plantri: executable not found {executable}; run 'pip install -e .' or add plantri to PATH")
+
+
+def _raise_executable_not_runnable(
+    executable: Path,
+    error: OSError | None = None,
+) -> NoReturn:
+    message = f"plantri: executable is not runnable {executable}"
+    if error is not None:
+        message = f"{message}: {error}"
+    raise PlantriError(message) from error
 
 
 class Plantri:
     """Wrapper for the plantri executable."""
-    _COUNT_INCOMPATIBLE_OUTPUT_FLAGS = frozenset("agsETu")
+    _COUNT_INCOMPATIBLE_OUTPUT_FLAGS = _OUTPUT_FLAGS
 
     def __init__(self, executable: Path | None = None) -> None:
         """Initializes Plantri with the executable path."""
@@ -143,6 +187,8 @@ class Plantri:
         )
         if not self.executable.is_file():
             _raise_executable_not_found(self.executable)
+        if not _is_executable(self.executable):
+            _raise_executable_not_runnable(self.executable)
 
     def run(
         self,
@@ -161,6 +207,8 @@ class Plantri:
             raise PlantriError(f"plantri: execution failed (exit {e.returncode}); {_summarize_process_text(stderr_text)}") from e
         except FileNotFoundError as e:
             raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
+        except OSError as e:
+            _raise_executable_not_runnable(self.executable, e)
 
     def _build_command(
         self,
@@ -173,6 +221,15 @@ class Plantri:
         if output_format not in ("planar_code", "ascii"):
             raise ValueError(f"plantri: unsupported output_format {output_format!r}; use 'planar_code' or 'ascii'")
         _validate_n_vertices(n_vertices)
+        selected_output_flags = _selected_plantri_flags(options, _OUTPUT_FLAGS)
+        if output_format == "ascii":
+            selected_output_flags.add("a")
+        if len(selected_output_flags) > 1:
+            formatted_flags = ", ".join(
+                f"-{flag}" for flag in sorted(selected_output_flags)
+            )
+            raise ValueError(f"plantri: conflicting output flags: {formatted_flags}")
+        self._validate_double_code_vertex_count(n_vertices, options)
 
         cmd = [str(self.executable)]
         if options:
@@ -185,6 +242,32 @@ class Plantri:
         cmd.append(str(n_vertices))
         return cmd
 
+    @staticmethod
+    def _validate_double_code_vertex_count(
+        n_vertices: int,
+        options: list[str] | None,
+    ) -> None:
+        """Reject sizes that can overflow the bundled executable's -T buffer."""
+        if not _has_plantri_flag(options, _DOUBLE_CODE_OUTPUT_FLAG):
+            return
+
+        is_quadrangulation = _has_plantri_flag(
+            options,
+            _QUADRANGULATION_FLAGS,
+        )
+        maximum = (
+            _QUADRANGULATION_DOUBLE_CODE_MAX_N
+            if is_quadrangulation
+            else _GENERAL_PLANAR_DOUBLE_CODE_MAX_N
+        )
+        if n_vertices > maximum:
+            graph_class = "quadrangulation" if is_quadrangulation else "planar"
+            raise ValueError(
+                "plantri: n_vertices unsupported for "
+                f"{graph_class} double_code generation: "
+                f"{n_vertices} > {maximum}"
+            )
+
     def iter_stdout_lines(
         self,
         n_vertices: int,
@@ -195,10 +278,7 @@ class Plantri:
         cmd = self._build_command(n_vertices, options=options, output_format=output_format)
         # Binary planar_code may contain newline bytes, so streaming requires a line format.
         if output_format != "ascii" and not _has_plantri_flag(options, _LINE_ORIENTED_OUTPUT_FLAGS):
-            raise ValueError(
-                "plantri: iter_stdout_lines requires line-oriented output; "
-                "use output_format='ascii' or include -a, -g, -s, or -T"
-            )
+            raise ValueError(f"plantri: iter_stdout_lines requires line-oriented output; use output_format='ascii' or a {_LINE_ORIENTED_FLAG_HINT} flag")
 
         # Spool stderr to disk so long streams cannot deadlock on a full stderr pipe.
         with tempfile.TemporaryFile() as stderr_file:
@@ -210,6 +290,8 @@ class Plantri:
                 )
             except FileNotFoundError as e:
                 raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
+            except OSError as e:
+                _raise_executable_not_runnable(self.executable, e)
 
             if proc.stdout is None:
                 proc.kill()
@@ -229,6 +311,20 @@ class Plantri:
                 # Only natural EOF makes nonzero exit authoritative; early close terminates plantri.
                 if fully_consumed:
                     return_code = proc.wait()
+                    if return_code != 0:
+                        stderr_file.seek(0)
+                        stderr_text = stderr_file.read().decode(
+                            "utf-8",
+                            errors="replace",
+                        )
+                        stderr_excerpt = _summarize_process_text(
+                            stderr_text,
+                            limit=4000,
+                        )
+                        raise PlantriError(
+                            "plantri: execution failed "
+                            f"(exit {return_code}); {stderr_excerpt}"
+                        )
                 else:
                     if proc.poll() is None:
                         proc.terminate()
@@ -237,13 +333,6 @@ class Plantri:
                         except subprocess.TimeoutExpired:
                             proc.kill()
                             proc.wait()
-                    return_code = proc.returncode if proc.returncode is not None else 0
-
-                stderr_file.seek(0)
-                stderr_text = stderr_file.read().decode("utf-8", errors="replace")
-                if fully_consumed and return_code != 0:
-                    stderr_excerpt = _summarize_process_text(stderr_text, limit=4000)
-                    raise PlantriError(f"plantri: execution failed (exit {return_code}); {stderr_excerpt}")
 
     def count_from_options(
         self,
@@ -265,40 +354,31 @@ class Plantri:
                 text=True,
                 timeout=timeout,
             )
-
-            # Check exit code
-            if result.returncode != 0:
-                stderr_excerpt = _summarize_process_text(result.stderr)
-                stdout_excerpt = _summarize_process_text(result.stdout)
-                raise PlantriError(f"plantri: count failed (exit {result.returncode}); stderr={stderr_excerpt}; stdout={stdout_excerpt}")
-
-            # Parse count from stderr (e.g., "1 graphs written to stdout" or "1 quadrangulations generated").
-            for line in result.stderr.split("\n"):
-                match = re.search(
-                    r"(\d+)\s+.*\b(?:graph|triangulation|quadrangulation)s?\b",
-                    line.lower(),
-                )
-                if match:
-                    return int(match.group(1))
-
-            # If we reach here, parsing failed
-            stderr_excerpt = _summarize_process_text(result.stderr)
-            stdout_excerpt = _summarize_process_text(result.stdout)
-            raise PlantriError(f"plantri: count parse failed; stderr={stderr_excerpt}; stdout={stdout_excerpt}")
-
         except subprocess.TimeoutExpired as e:
             raise PlantriError(f"plantri: timed out after {timeout}s for n={n_vertices}, options={normalized_options}") from e
-
         except FileNotFoundError as e:
             raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
+        except OSError as e:
+            _raise_executable_not_runnable(self.executable, e)
 
-        except PlantriError:
-            # Re-raise our own errors
-            raise
+        if result.returncode != 0:
+            stderr_excerpt = _summarize_process_text(result.stderr)
+            stdout_excerpt = _summarize_process_text(result.stdout)
+            raise PlantriError(f"plantri: count failed (exit {result.returncode}); stderr={stderr_excerpt}; stdout={stdout_excerpt}")
 
-        except Exception as e:
-            # Catch-all for unexpected errors
-            raise PlantriError(f"plantri: unexpected {type(e).__name__}: {e}") from e
+        # The output class name varies by mode; only the trailing verb is stable.
+        for line in reversed(result.stderr.splitlines()):
+            match = re.match(
+                r"^\s*(\d+)\s+.*\b(?:generated|written)\b",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return int(match.group(1))
+
+        stderr_excerpt = _summarize_process_text(result.stderr)
+        stdout_excerpt = _summarize_process_text(result.stdout)
+        raise PlantriError(f"plantri: count parse failed; stderr={stderr_excerpt}; stdout={stdout_excerpt}")
 
 
 class QuadrangulationEnumerator:
@@ -315,7 +395,7 @@ class QuadrangulationEnumerator:
         QuadrangulationDualClass.SIMPLE_QUARTIC: ["-q", "-c2", "-T"],
     }
     _MIN_NONEMPTY_DUAL_VERTICES: dict[QuadrangulationDualClass, int] = {
-        QuadrangulationDualClass.QUARTIC_MULTIGRAPH: 3,
+        QuadrangulationDualClass.QUARTIC_MULTIGRAPH: MIN_DUAL_VERTEX_COUNT,
         QuadrangulationDualClass.SIMPLE_QUARTIC: 6,
     }
 
@@ -329,9 +409,8 @@ class QuadrangulationEnumerator:
             self._plantri = Plantri()
         return self._plantri
 
-    @classmethod
+    @staticmethod
     def _normalize_dual_class(
-        cls,
         dual_class: QuadrangulationDualClass | str,
     ) -> QuadrangulationDualClass:
         if isinstance(dual_class, QuadrangulationDualClass):
@@ -344,14 +423,12 @@ class QuadrangulationEnumerator:
     @classmethod
     def _flags_for_dual_class(
         cls,
-        dual_class: QuadrangulationDualClass | str,
+        dual_class: QuadrangulationDualClass,
     ) -> list[str]:
-        resolved_dual_class = cls._normalize_dual_class(dual_class)
-        return list(cls._FLAGS_BY_DUAL_CLASS[resolved_dual_class])
+        return list(cls._FLAGS_BY_DUAL_CLASS[dual_class])
 
-    @classmethod
+    @staticmethod
     def _dual_class_from_filter(
-        cls,
         *,
         double_edge_free_only: bool,
     ) -> QuadrangulationDualClass:
@@ -362,34 +439,37 @@ class QuadrangulationEnumerator:
     @classmethod
     def _min_nonempty_dual_vertices(
         cls,
-        dual_class: QuadrangulationDualClass | str,
+        dual_class: QuadrangulationDualClass,
     ) -> int:
-        resolved_dual_class = cls._normalize_dual_class(dual_class)
-        return cls._MIN_NONEMPTY_DUAL_VERTICES[resolved_dual_class]
+        return cls._MIN_NONEMPTY_DUAL_VERTICES[dual_class]
 
     @staticmethod
     def _validate_supported_dual_vertex_count(dual_vertex_count: int) -> None:
-        """Reject dual sizes outside the bundled plantri build range."""
+        """Reject dual sizes outside the bundled plantri count range."""
         if type(dual_vertex_count) is not int:
-            raise ValueError(
-                "dual_vertex_count must be an integer; "
-                f"got {dual_vertex_count!r}"
-            )
+            raise ValueError(f"dual_vertex_count must be an integer; got {dual_vertex_count!r}")
         if dual_vertex_count < MIN_DUAL_VERTEX_COUNT:
-            raise ValueError(
-                f"dual_vertex_count unsupported: {dual_vertex_count} < {MIN_DUAL_VERTEX_COUNT}"
-            )
+            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count} < {MIN_DUAL_VERTEX_COUNT}")
         if dual_vertex_count > MAX_DUAL_VERTEX_COUNT:
-            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count} > {MAX_DUAL_VERTEX_COUNT} (bundled plantri MAXN={_BUNDLED_PLANTRI_MAX_PRIMAL_VERTICES})")
+            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count} > {MAX_DUAL_VERTEX_COUNT} (bundled plantri MAXN={_BUNDLED_PLANTRI_MAX_N})")
+
+    @classmethod
+    def _validate_supported_double_code_dual_vertex_count(
+        cls,
+        dual_vertex_count: int,
+    ) -> None:
+        """Reject dual sizes unsafe for bundled quadrangulation double_code."""
+        cls._validate_supported_dual_vertex_count(dual_vertex_count)
+        if dual_vertex_count > MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT:
+            raise ValueError(f"dual_vertex_count unsupported for double_code generation: {dual_vertex_count} > {MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT}")
 
     def generate_pairs(
         self,
         dual_vertex_count: int,
         *,
-        dual_class: QuadrangulationDualClass = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
+        dual_class: QuadrangulationDualClass | str = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
     ) -> Iterator[tuple[ParsedGraphSection, ParsedGraphSection]]:
         """Yield (primal, dual) pairs from plantri."""
-        self._validate_supported_dual_vertex_count(dual_vertex_count)
         for line in self.iter_double_code_lines(dual_vertex_count, dual_class=dual_class):
             yield self.parse_double_code(line)
 
@@ -397,9 +477,9 @@ class QuadrangulationEnumerator:
         self,
         dual_vertex_count: int,
         *,
-        dual_class: QuadrangulationDualClass = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
+        dual_class: QuadrangulationDualClass | str = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
     ) -> int:
-        """Count non-isomorphic duals of simple quadrangulations."""
+        """Count plane-map isomorphism classes, identifying mirror images."""
         self._validate_supported_dual_vertex_count(dual_vertex_count)
         resolved_dual_class = self._normalize_dual_class(dual_class)
         if dual_vertex_count < self._min_nonempty_dual_vertices(resolved_dual_class):
@@ -414,10 +494,10 @@ class QuadrangulationEnumerator:
         self,
         dual_vertex_count: int,
         *,
-        dual_class: QuadrangulationDualClass = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
+        dual_class: QuadrangulationDualClass | str = QuadrangulationDualClass.QUARTIC_MULTIGRAPH,
     ) -> Iterator[bytes]:
         """Yield raw double_code lines as bytes from plantri stdout."""
-        self._validate_supported_dual_vertex_count(dual_vertex_count)
+        self._validate_supported_double_code_dual_vertex_count(dual_vertex_count)
         resolved_dual_class = self._normalize_dual_class(dual_class)
         if dual_vertex_count < self._min_nonempty_dual_vertices(resolved_dual_class):
             return
@@ -436,10 +516,16 @@ class QuadrangulationEnumerator:
         """Parse a plantri double_code line into (primal, dual) sections.
 
         Without -d, plantri outputs primal first then dual. With -d
-        the order is reversed. This method detects the orientation via
-        4-regularity and vertex-count checks.
+        the order is reversed. This method detects the section order via
+        4-regularity and vertex-count checks. It expects authentic plantri
+        -T output rather than validating planar duality independently.
         """
-        parts = list(double_code_line.split())
+        raw = (
+            double_code_line.encode("latin-1")
+            if isinstance(double_code_line, str)
+            else double_code_line
+        )
+        parts = list(raw.split())
         first_vertex_count, first_edge_lists, next_idx = QuadrangulationEnumerator._parse_section(parts, 0, "first")
         second_vertex_count, second_edge_lists, next_idx = QuadrangulationEnumerator._parse_section(parts, next_idx, "second")
         if next_idx != len(parts):
@@ -454,10 +540,10 @@ class QuadrangulationEnumerator:
 
     @staticmethod
     def _parse_section(
-        parts: list[str | bytes],
+        parts: list[bytes],
         start_idx: int,
         section_name: str,
-    ) -> tuple[int, list[str | bytes], int]:
+    ) -> tuple[int, list[bytes], int]:
         """Parse one double_code section header and its edge-label tokens."""
         if start_idx >= len(parts):
             raise ValueError(f"double_code missing {section_name} section header")
@@ -476,7 +562,7 @@ class QuadrangulationEnumerator:
     @staticmethod
     def _build_section(
         vertex_count: int,
-        edge_lists: list[str | bytes],
+        edge_lists: list[bytes],
     ) -> ParsedGraphSection:
         """Build one parsed section from edge-label token lists."""
         adjacency, twin_map, edge_label_pairs = QuadrangulationEnumerator._build_adjacency_and_twins(edge_lists)
@@ -517,11 +603,6 @@ class QuadrangulationEnumerator:
         second_data: ParsedGraphSection,
     ) -> None:
         """Check that both sections describe the same labeled edge set."""
-        first_edge_count = len(first_data.edge_label_pairs)
-        second_edge_count = len(second_data.edge_label_pairs)
-        if first_edge_count != second_edge_count:
-            raise ValueError(f"double_code edge count mismatch: {first_edge_count} != {second_edge_count}")
-
         first_labels = set(first_data.edge_label_pairs)
         second_labels = set(second_data.edge_label_pairs)
         if first_labels != second_labels:
@@ -546,42 +627,39 @@ class QuadrangulationEnumerator:
 
     @staticmethod
     def _build_adjacency_and_twins(
-        edge_lists: list[str | bytes],
+        edge_lists: list[bytes],
     ) -> tuple[
         dict[int, list[int]],
         dict[HalfEdge, HalfEdge],
         EdgeLabelPairs,
     ]:
         """Build adjacency, twin map, and edge-label/half-edge pairs."""
-        # Collect (vertex, position) pairs where each edge name appears.
-        edge_name_to_half_edges: dict[EdgeLabel, list[HalfEdge]] = {}
-        for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            for pos, edge_name in enumerate(edges_str):
-                edge_name_to_half_edges.setdefault(edge_name, []).append((vertex_idx, pos))
+        occurrences: dict[EdgeLabel, list[HalfEdge]] = {}
+        for vertex, labels in enumerate(edge_lists, start=1):
+            for slot, label in enumerate(labels):
+                occurrences.setdefault(label, []).append((vertex, slot))
 
-        # Build adjacency list.
-        adjacency: dict[int, list[int]] = {}
-        for vertex_idx, edges_str in enumerate(edge_lists, start=1):
-            neighbors: list[int] = []
-            for edge_name in edges_str:
-                half_edges = edge_name_to_half_edges.get(edge_name)
-                if half_edges is None or len(half_edges) != 2:
-                    edge_name_str = QuadrangulationEnumerator._format_edge_name_for_error(edge_name)
-                    raise ValueError(f"double_code edge label count invalid: {edge_name_str!r} -> {0 if half_edges is None else len(half_edges)}")
-                (v1, _), (v2, _) = half_edges
-                if v1 == v2 == vertex_idx:
-                    neighbors.append(vertex_idx)  # Loop edge
-                else:
-                    neighbors.append(v2 if v1 == vertex_idx else v1)
-            adjacency[vertex_idx] = neighbors
-
-        # Twin mapping: match two half-edges sharing the same edge name.
         twin_map: dict[HalfEdge, HalfEdge] = {}
         edge_label_pairs: EdgeLabelPairs = {}
-        for edge_name, half_edges in edge_name_to_half_edges.items():
-            half_edge_a, half_edge_b = half_edges
-            twin_map[half_edge_a] = half_edge_b
-            twin_map[half_edge_b] = half_edge_a
-            edge_label_pairs[edge_name] = (half_edge_a, half_edge_b)
+        for label, half_edges in occurrences.items():
+            if len(half_edges) != 2:
+                label_text = QuadrangulationEnumerator._format_edge_name_for_error(
+                    label
+                )
+                raise ValueError(
+                    f"double_code edge label count invalid: {label_text!r} -> {len(half_edges)}"
+                )
+            first, second = half_edges
+            twin_map[first] = second
+            twin_map[second] = first
+            edge_label_pairs[label] = (first, second)
+
+        adjacency = {
+            vertex: [
+                twin_map[(vertex, slot)][0]
+                for slot in range(len(labels))
+            ]
+            for vertex, labels in enumerate(edge_lists, start=1)
+        }
 
         return adjacency, twin_map, edge_label_pairs

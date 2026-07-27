@@ -1,16 +1,17 @@
 # src/pyplantri/builder.py
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .converter import GraphConverter
-from .plane_graph import PlaneGraph
+from .plane_graph import (
+    LabelSignature,
+    PlaneGraph,
+    _label_signature,
+    _match_label_signatures,
+)
 from .plantri import ParsedGraphSection
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
-
-LabelSignature = tuple[tuple[str, int], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,60 +23,33 @@ class _PreparedSectionData:
     half_edge_labels: dict[HalfEdge, EdgeLabel]
 
 
-def _to_zero_based_twin_map(
-    twin_map_1based: dict[tuple[int, int], tuple[int, int]],
-    embedding: dict[int, tuple[int, ...]],
+def _build_half_edge_label_map(
+    edge_label_pairs: EdgeLabelPairs,
+    twin_map: dict[HalfEdge, HalfEdge],
     *,
     graph_name: str,
-) -> dict[tuple[int, int], tuple[int, int]]:
-    """Convert and validate twin_map completeness for -T based enumeration."""
-    # plantri vertex ids are 1-based, while cyclic-order slots are already 0-based.
-    twin_map_0based: dict[tuple[int, int], tuple[int, int]] = {
-        (v - 1, i): (u - 1, j)
-        for (v, i), (u, j) in twin_map_1based.items()
-    }
-
-    GraphConverter.validate_twin_map(embedding, twin_map_0based, graph_name=graph_name)
-
-    return twin_map_0based
-
-
-def _to_zero_based_edge_label_pairs(
-    edge_label_pairs_1based: EdgeLabelPairs,
-) -> EdgeLabelPairs:
-    """Convert edge-label to half-edge pair map from 1-based to 0-based."""
-    # Convert endpoint vertices only; half-edge slots are already 0-based.
-    return {
-        edge_label: ((u1 - 1, i1), (u2 - 1, i2))
-        for edge_label, ((u1, i1), (u2, i2)) in edge_label_pairs_1based.items()
-    }
-
-
-def _build_half_edge_label_map(edge_label_pairs: EdgeLabelPairs) -> dict[HalfEdge, EdgeLabel]:
-    """Build half-edge -> edge-label mapping from edge-label pair map."""
+) -> dict[HalfEdge, EdgeLabel]:
+    """Invert edge labels and require them to encode the twin involution."""
     half_edge_labels: dict[HalfEdge, EdgeLabel] = {}
     for edge_label, (h1, h2) in edge_label_pairs.items():
+        if twin_map.get(h1) != h2 or twin_map.get(h2) != h1:
+            raise ValueError(
+                f"{graph_name}: label/twin mismatch {edge_label!r}"
+            )
+
         for half_edge in (h1, h2):
-            prev = half_edge_labels.get(half_edge)
-            if prev is not None and prev != edge_label:
-                raise ValueError(f"half-edge label conflict: {half_edge}")
+            if half_edge in half_edge_labels:
+                raise ValueError(
+                    f"{graph_name}: multiple labels {half_edge}"
+                )
             half_edge_labels[half_edge] = edge_label
+
+    if set(half_edge_labels) != set(twin_map):
+        raise ValueError(
+            f"{graph_name}: label/twin domain mismatch"
+        )
+
     return half_edge_labels
-
-
-def _edge_label_token(edge_label: EdgeLabel) -> str:
-    """Normalize edge-label key for multiset signature matching."""
-    if isinstance(edge_label, int):
-        return f"i:{edge_label}"
-    return f"s:{edge_label}"
-
-
-def _label_signature(labels: Iterable[EdgeLabel]) -> LabelSignature:
-    """Convert edge-label multiset into a canonical signature tuple."""
-    counts: dict[str, int] = defaultdict(int)
-    for edge_label in labels:
-        counts[_edge_label_token(edge_label)] += 1
-    return tuple(sorted(counts.items()))
 
 
 def _extract_faces_and_label_signatures(
@@ -93,7 +67,9 @@ def _extract_faces_and_label_signatures(
         for half_edge in face_cycle:
             label = half_edge_labels.get(half_edge)
             if label is None:
-                raise ValueError(f"{graph_name} half-edge unlabeled: {half_edge}")
+                raise ValueError(
+                    f"{graph_name}: unlabeled half-edge {half_edge}"
+                )
             face_labels.append(label)
         faces.append(tuple(vertex for vertex, _ in face_cycle))
         signatures.append(_label_signature(face_labels))
@@ -113,51 +89,20 @@ def _vertex_label_signatures(
     for v in range(vertex_count):
         neighbors = embedding.get(v)
         if neighbors is None:
-            raise ValueError(f"{graph_name} embedding missing vertex: {v}")
+            raise ValueError(
+                f"{graph_name}: missing embedding vertex {v}"
+            )
         labels: list[EdgeLabel] = []
         for i in range(len(neighbors)):
             half_edge = (v, i)
             label = half_edge_labels.get(half_edge)
             if label is None:
-                raise ValueError(f"{graph_name} half-edge unlabeled: {half_edge}")
+                raise ValueError(
+                    f"{graph_name}: unlabeled half-edge {half_edge}"
+                )
             labels.append(label)
         signatures.append(_label_signature(labels))
     return tuple(signatures)
-
-
-def _match_label_signatures(
-    source_signatures: tuple[LabelSignature, ...],
-    target_signatures: tuple[LabelSignature, ...],
-    *,
-    source_name: str,
-    target_name: str,
-) -> tuple[int, ...]:
-    """Match entities by edge-label multiset signature."""
-    if len(source_signatures) != len(target_signatures):
-        raise ValueError(f"signature count mismatch: {source_name} -> {target_name} ({len(source_signatures)} != {len(target_signatures)})")
-
-    target_by_signature: dict[LabelSignature, list[int]] = defaultdict(list)
-    for target_idx, signature in enumerate(target_signatures):
-        target_by_signature[signature].append(target_idx)
-
-    used_targets: set[int] = set()
-    mapping: list[int] = []
-    for source_idx, signature in enumerate(source_signatures):
-        candidates = [
-            target_idx
-            for target_idx in target_by_signature.get(signature, [])
-            if target_idx not in used_targets
-        ]
-        if len(candidates) != 1:
-            raise ValueError(f"signature map ambiguous: {source_name} {source_idx} -> {target_name}")
-        target_idx = candidates[0]
-        used_targets.add(target_idx)
-        mapping.append(target_idx)
-
-    if len(used_targets) != len(target_signatures):
-        raise ValueError(f"signature map not bijective: {source_name} -> {target_name}")
-
-    return tuple(mapping)
 
 
 def _prepare_section_data(
@@ -167,13 +112,20 @@ def _prepare_section_data(
 ) -> _PreparedSectionData:
     """Convert one parsed double_code section to zero-based builder data."""
     embedding = GraphConverter.to_zero_based_embedding(section_data.cyclic_adjacency)
-    twin_map = _to_zero_based_twin_map(
-        section_data.twin_map,
-        embedding,
+    # plantri vertex ids are 1-based, while cyclic-order slots are already 0-based.
+    twin_map = {
+        (v - 1, i): (u - 1, j)
+        for (v, i), (u, j) in section_data.twin_map.items()
+    }
+    edge_label_pairs = {
+        edge_label: ((u1 - 1, i1), (u2 - 1, i2))
+        for edge_label, ((u1, i1), (u2, i2)) in section_data.edge_label_pairs.items()
+    }
+    half_edge_labels = _build_half_edge_label_map(
+        edge_label_pairs,
+        twin_map,
         graph_name=graph_name,
     )
-    edge_label_pairs = _to_zero_based_edge_label_pairs(section_data.edge_label_pairs)
-    half_edge_labels = _build_half_edge_label_map(edge_label_pairs)
     return _PreparedSectionData(
         vertex_count=section_data.vertex_count,
         embedding=embedding,
@@ -181,6 +133,22 @@ def _prepare_section_data(
         edge_label_pairs=edge_label_pairs,
         half_edge_labels=half_edge_labels,
     )
+
+
+def _dense_embedding(
+    embedding: dict[int, tuple[int, ...]],
+    *,
+    vertex_count: int,
+    graph_name: str,
+) -> tuple[tuple[int, ...], ...]:
+    """Convert a complete zero-based adjacency map to its canonical tuple."""
+    expected_vertices = set(range(vertex_count))
+    actual_vertices = set(embedding)
+    if actual_vertices != expected_vertices:
+        raise ValueError(
+            f"{graph_name}: embedding vertices {tuple(sorted(actual_vertices))!r}"
+        )
+    return tuple(embedding[vertex] for vertex in range(vertex_count))
 
 
 def _edge_multiplicity_from_edge_label_pairs(
@@ -207,7 +175,7 @@ def _build_plane_graph_from_sections(
     dual = _prepare_section_data(dual_data, graph_name="dual")
     dual_vertex_count = dual.vertex_count
     edge_multiplicity = _edge_multiplicity_from_edge_label_pairs(dual.edge_label_pairs)
-    edges = tuple(sorted(edge_multiplicity.keys()))
+    edges = tuple(sorted(edge_multiplicity))
     dual_face_cycles = GraphConverter.extract_face_half_edge_cycles(dual.embedding, dual.twin_map, graph_name="dual")
     faces, dual_face_label_signatures = _extract_faces_and_label_signatures(dual_face_cycles, dual.half_edge_labels, graph_name="dual")
 
@@ -240,7 +208,7 @@ def _build_plane_graph_from_sections(
             vertex_count=primal_num_vertices,
             graph_name="primal",
         )
-        # Planar duality pairs each vertex with the face carrying the same edge-label multiset.
+        # Match vertices to faces by oriented cyclic edge labels, up to rotation.
         dual_vertex_to_primal_face = _match_label_signatures(
             dual_vertex_label_signatures,
             primal_face_label_signatures,
@@ -254,8 +222,16 @@ def _build_plane_graph_from_sections(
             target_name="dual face",
         )
 
-    normalized_embedding = PlaneGraph._normalize_embedding(dual.embedding, expected_size=dual_vertex_count)
-    normalized_primal_embedding = PlaneGraph._normalize_embedding(primal_embedding, expected_size=primal_num_vertices)
+    normalized_embedding = _dense_embedding(
+        dual.embedding,
+        vertex_count=dual_vertex_count,
+        graph_name="dual",
+    )
+    normalized_primal_embedding = _dense_embedding(
+        primal_embedding,
+        vertex_count=primal_num_vertices,
+        graph_name="primal",
+    )
     return PlaneGraph(
         dual_num_vertices=dual_vertex_count,
         dual_support_edges=edges,

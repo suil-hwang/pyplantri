@@ -8,6 +8,7 @@ Given the dual vertex count `n`, it enumerates all **non-isomorphic duals of sim
 
 [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) is a C program for fast enumeration of plane graphs.
 
+- **Bundled Version**: plantri 5.5 (May 17, 2024)
 - **Authors**: Gunnar Brinkmann (University of Ghent), Brendan McKay (Australian National University)
 - **Key Feature**: Outputs exactly one representative from each isomorphism class without storing them
 - **Speed**: Generates over 2,000,000 graphs per second
@@ -48,15 +49,19 @@ For plane graphs: `V - E + F = 2`
 
 **Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
 
-**Input Constraint:** The bundled build supports `3 <= n <= 62`. The simple-quartic subclass is empty for `n < 6`.
+**Input Constraint:** The bundled count path supports `3 <= n <= 62`, while `-T` double-code generation supports `3 <= n <= 55`. The simple-quartic subclass is empty for `n < 6`.
 
 Set `include_primal=False` to omit primal topology when only the dual is needed. Such objects still rely on plantri's generation guarantees for properties that cannot be certified from the stored dual alone.
 
 ### Adjacency List Order (Combinatorial Embedding)
 
-The neighbor order in `PlaneGraph.dual_embedding` (or a parsed section's `cyclic_adjacency`) represents the **cyclic order** of edges at each vertex, given in **clockwise (CW)** direction. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
+The neighbor order in `PlaneGraph.dual_embedding` (or a parsed section's `cyclic_adjacency`) represents the **cyclic order** of edges at each vertex, given **clockwise (CW) as viewed from outside the sphere**. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
 
-plantri's `-T` (double_code) option outputs edges in clockwise order around each vertex.
+plantri's `-T` (double_code) option preserves this exterior-view clockwise order around each vertex.
+
+Without `-o`, as in the predefined quadrangulation modes, plantri identifies
+an embedded graph with its mirror image. With `-o`, orientation-preserving
+isomorphism classes are emitted separately.
 
 The combinatorial embedding uniquely determines:
 
@@ -79,8 +84,8 @@ CMake automatically builds plantri during installation.
 
 - `Plantri.run()` returns raw bytes and supports binary `planar_code`.
 - `Plantri.iter_stdout_lines()` accepts only line-oriented ASCII, graph6, sparse6, or double-code output.
-- Caches use optionally gzip-compressed pickle and require `trusted=True` when loading.
-- Pass `validate_graphs=True` for semantic validation. The restricted unpickler limits classes but does not prove graph validity.
+- Caches use the current, optionally gzip-compressed pickle schema and require `trusted=True`; older cache formats must be regenerated.
+- Loading always uses the restricted unpickler. `validate_graphs=True` semantically validates the complete serialized graph set before any `max_count` prefix is returned.
 
 ## Number of Non-isomorphic Plane Graphs by n
 
@@ -98,6 +103,12 @@ CMake automatically builds plantri during installation.
 | 12               | 14         | 15,882               |
 | 13               | 15         | 77,185               |
 | 14               | 16         | 393,075              |
+| 15               | 17         | 2,049,974            |
+| 16               | 18         | 10,938,182           |
+| 17               | 19         | 59,312,272           |
+| 18               | 20         | 326,258,544          |
+| 19               | 21         | 1,815,910,231        |
+| 20               | 22         | 10,213,424,233       |
 
 ## License
 

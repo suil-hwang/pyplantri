@@ -32,37 +32,44 @@ class GraphConverter:
         extra_half_edges = twin_domain - expected_half_edges
         if missing_half_edges:
             missing_half_edge = min(missing_half_edges)
-            raise ValueError(f"{graph_name} twin_map missing: {missing_half_edge}")
+            raise ValueError(
+                f"{graph_name} twin_map missing: {missing_half_edge}"
+            )
         if extra_half_edges:
             extra_half_edge = min(extra_half_edges)
-            raise ValueError(f"{graph_name} twin_map out-of-range source: {extra_half_edge}")
+            raise ValueError(
+                f"{graph_name} twin_map out-of-range source: {extra_half_edge}"
+            )
 
         for half_edge, twin_half_edge in twin_map.items():
             if twin_half_edge not in expected_half_edges:
-                raise ValueError(f"{graph_name} twin_map out-of-range target: {half_edge} -> {twin_half_edge}")
+                raise ValueError(
+                    f"{graph_name} twin_map out-of-range target: {half_edge} -> {twin_half_edge}"
+                )
             if half_edge == twin_half_edge:
-                raise ValueError(f"{graph_name} twin_map self-twin: {half_edge}")
+                raise ValueError(
+                    f"{graph_name} twin_map self-twin: {half_edge}"
+                )
             if twin_map.get(twin_half_edge) != half_edge:
-                raise ValueError(f"{graph_name} twin_map not involutive: {half_edge} -> {twin_half_edge}")
+                raise ValueError(
+                    f"{graph_name} twin_map not involutive: {half_edge} -> {twin_half_edge}"
+                )
             vertex, slot = half_edge
-            twin_vertex, twin_slot = twin_half_edge
-            if (
-                embedding[vertex][slot] != twin_vertex
-                or embedding[twin_vertex][twin_slot] != vertex
-            ):
-                raise ValueError(f"{graph_name} twin_map endpoint mismatch: {half_edge} -> {twin_half_edge}")
+            twin_vertex, _ = twin_half_edge
+            if embedding[vertex][slot] != twin_vertex:
+                raise ValueError(
+                    f"{graph_name} twin_map endpoint mismatch: {half_edge} -> {twin_half_edge}"
+                )
 
     @staticmethod
     def to_zero_based_embedding(
         adjacency_list: dict[int, list[int]],
     ) -> dict[int, tuple[int, ...]]:
         """Converts 1-based adjacency list to 0-based embedding."""
-        embedding: dict[int, tuple[int, ...]] = {}
-        for vertex, neighbors in adjacency_list.items():
-            vertex_idx = vertex - 1
-            neighbor_tuple = tuple(u - 1 for u in neighbors)
-            embedding[vertex_idx] = neighbor_tuple
-        return embedding
+        return {
+            vertex - 1: tuple(neighbor - 1 for neighbor in neighbors)
+            for vertex, neighbors in adjacency_list.items()
+        }
 
     @staticmethod
     def extract_faces_with_twins(
@@ -71,7 +78,7 @@ class GraphConverter:
         *,
         graph_name: str = "graph",
     ) -> tuple[tuple[int, ...], ...]:
-        """Extract face vertex cycles using the shared half-edge walker."""
+        """Project face half-edge orbits to vertex walks, losing edge identity."""
         face_cycles = GraphConverter.extract_face_half_edge_cycles(
             embedding,
             twin_map,
@@ -89,11 +96,7 @@ class GraphConverter:
         *,
         graph_name: str = "graph",
     ) -> tuple[tuple[HalfEdge, ...], ...]:
-        """Extract face half-edge cycles from a plane embedding and twin map."""
-        for vertex, neighbors in embedding.items():
-            if len(neighbors) == 1 and neighbors[0] == vertex:
-                raise ValueError(f"{graph_name} face too short: 1")
-
+        """Return the right-face orbits of rotation^-1 composed with twin."""
         GraphConverter.validate_twin_map(
             embedding,
             twin_map,
@@ -103,14 +106,6 @@ class GraphConverter:
         visited: set[HalfEdge] = set()
         face_cycles: list[tuple[HalfEdge, ...]] = []
 
-        if not embedding:
-            return tuple()
-
-        max_iterations = max(
-            1,
-            sum(len(neighbors) for neighbors in embedding.values()),
-        )
-
         for vertex in sorted(embedding):
             degree = len(embedding[vertex])
             for slot_idx in range(degree):
@@ -119,48 +114,30 @@ class GraphConverter:
                     continue
 
                 face_cycle: list[HalfEdge] = []
-                face_cycle_seen: set[HalfEdge] = set()
-                curr_v, curr_i = start_half_edge
-                iterations = 0
+                half_edge = start_half_edge
 
                 while True:
-                    if (curr_v, curr_i) in face_cycle_seen:
-                        if (curr_v, curr_i) != start_half_edge:
-                            raise ValueError(
-                                f"{graph_name} face traversal repeated non-start half-edge: {(curr_v, curr_i)}"
-                            )
-                        break
-                    if (curr_v, curr_i) in visited:
-                        raise ValueError(
-                            f"{graph_name} face traversal crossed visited half-edge before closure: {(curr_v, curr_i)}"
-                        )
-
-                    iterations += 1
-                    if iterations > max_iterations:
-                        raise RuntimeError(
-                            f"{graph_name} face traversal overflow: {max_iterations}"
-                        )
-
-                    half_edge = (curr_v, curr_i)
-                    face_cycle_seen.add(half_edge)
                     visited.add(half_edge)
                     face_cycle.append(half_edge)
 
                     twin_v, twin_i = twin_map[half_edge]
                     twin_neighbors = embedding[twin_v]
-                    curr_v = twin_v
-                    # In a CW rotation system, a face successor is the predecessor of the twin slot.
-                    curr_i = (twin_i - 1) % len(twin_neighbors)
+                    # For exterior-view CW rotations, the face successor precedes the twin slot.
+                    half_edge = (
+                        twin_v,
+                        (twin_i - 1) % len(twin_neighbors),
+                    )
+                    if half_edge == start_half_edge:
+                        break
 
-                if len(face_cycle) < 2:
-                    raise ValueError(f"{graph_name} face too short: {len(face_cycle)}")
                 face_cycles.append(tuple(face_cycle))
 
         return tuple(face_cycles)
 
     @staticmethod
     def is_4_regular(adjacency_list: dict[int, list[int]]) -> bool:
-        """Check whether every vertex has degree 4(quartic)."""
-        if not adjacency_list:
-            return False
-        return all(len(neighbors) == 4 for neighbors in adjacency_list.values())
+        """Check whether a nonempty adjacency list is 4-regular."""
+        return bool(adjacency_list) and all(
+            len(neighbors) == 4
+            for neighbors in adjacency_list.values()
+        )

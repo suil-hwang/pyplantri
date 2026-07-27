@@ -1,8 +1,7 @@
 # src/pyplantri/__init__.py
 from .cache import (
     CACHE_FORMAT_VERSION,
-    LEGACY_CACHE_FORMAT_VERSION,
-    SUPPORTED_CACHE_FORMAT_VERSIONS,
+    CACHE_PICKLE_PROTOCOL,
     CacheGraphClass,
     CacheMetadata,
     load_graphs_from_cache,
@@ -22,6 +21,7 @@ from .plane_graph import (
     PlaneGraph,
 )
 from .plantri import (
+    MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT,
     MAX_DUAL_VERTEX_COUNT,
     MIN_DUAL_VERTEX_COUNT,
     ParsedGraphSection,
@@ -32,7 +32,7 @@ from .plantri import (
     QuadrangulationEnumerator,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     # Plantri wrapper
     "ParsedGraphSection",
@@ -43,6 +43,7 @@ __all__ = [
     "QuadrangulationEnumerator",
     "MIN_DUAL_VERTEX_COUNT",
     "MAX_DUAL_VERTEX_COUNT",
+    "MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT",
     # Converter
     "GraphConverter",
     # Plane Graph model
@@ -52,8 +53,7 @@ __all__ = [
     "CacheMetadata",
     "CacheGraphClass",
     "CACHE_FORMAT_VERSION",
-    "LEGACY_CACHE_FORMAT_VERSION",
-    "SUPPORTED_CACHE_FORMAT_VERSIONS",
+    "CACHE_PICKLE_PROTOCOL",
     "save_graphs_to_cache",
     "load_graphs_from_cache",
     "validate_cache_metadata",
