@@ -11,11 +11,6 @@ from .types import EdgeLabel, EdgeLabelPairEntries, Embedding, HalfEdge
 
 LabelSignature = tuple[str, ...]
 _EMPTY_DOUBLE_EDGES: frozenset[tuple[int, int]] = frozenset()
-_PLANE_GRAPH_SCALAR_FIELDS = (
-    "dual_num_vertices",
-    "primal_num_vertices",
-    "graph_id",
-)
 _PLANE_GRAPH_STATE_FIELDS = (
     "dual_num_vertices",
     "dual_support_edges",
@@ -224,53 +219,6 @@ class PlaneGraph:
     )
 
     @staticmethod
-    def _coerce_support_edges(
-        edges: tuple[tuple[int, int], ...],
-    ) -> tuple[tuple[int, int], ...]:
-        if type(edges) is not tuple or any(
-            type(edge) is not tuple
-            or len(edge) != 2
-            or type(edge[0]) is not int
-            or type(edge[1]) is not int
-            for edge in edges
-        ):
-            raise TypeError(
-                "dual_support_edges must be tuple[tuple[int, int], ...]"
-            )
-        return edges
-
-    @staticmethod
-    def _coerce_nested_int_tuples(
-        values: tuple[tuple[int, ...], ...],
-        *,
-        field_name: str,
-    ) -> tuple[tuple[int, ...], ...]:
-        if type(values) is not tuple or any(
-            type(row) is not tuple or any(type(value) is not int for value in row)
-            for row in values
-        ):
-            raise TypeError(
-                f"{field_name} must be tuple[tuple[int, ...], ...]"
-            )
-        return values
-
-    @staticmethod
-    def _coerce_index_tuple(
-        indices: tuple[int, ...],
-        *,
-        field_name: str,
-    ) -> tuple[int, ...]:
-        if type(indices) is not tuple or any(type(index) is not int for index in indices):
-            raise TypeError(f"{field_name} must be tuple[int, ...]")
-        return indices
-
-    @staticmethod
-    def _require_int(value: int, *, field_name: str) -> int:
-        if type(value) is not int:
-            raise TypeError(f"{field_name} must be int")
-        return value
-
-    @staticmethod
     def _coerce_edge_label(label: EdgeLabel) -> EdgeLabel:
         if type(label) is int:
             return label
@@ -354,102 +302,67 @@ class PlaneGraph:
 
     def __post_init__(self) -> None:
         """Validate canonical inputs and freeze edge multiplicities."""
-        _set = object.__setattr__
-
-        _set(
-            self,
+        for field_name in (
             "dual_num_vertices",
-            self._require_int(
-                self.dual_num_vertices,
-                field_name="dual_num_vertices",
-            ),
-        )
-        _set(
-            self,
             "primal_num_vertices",
-            self._require_int(
-                self.primal_num_vertices,
-                field_name="primal_num_vertices",
-            ),
-        )
-        _set(
-            self,
             "graph_id",
-            self._require_int(self.graph_id, field_name="graph_id"),
-        )
+        ):
+            if type(getattr(self, field_name)) is not int:
+                raise TypeError(f"{field_name} must be int")
 
-        _set(
-            self,
-            "dual_support_edges",
-            self._coerce_support_edges(self.dual_support_edges),
-        )
+        if type(self.dual_support_edges) is not tuple or any(
+            type(edge) is not tuple
+            or len(edge) != 2
+            or type(edge[0]) is not int
+            or type(edge[1]) is not int
+            for edge in self.dual_support_edges
+        ):
+            raise TypeError(
+                "dual_support_edges must be tuple[tuple[int, int], ...]"
+            )
 
         if not isinstance(self.dual_edge_multiplicity, FrozenEdgeMultiplicity):
-            _set(
+            object.__setattr__(
                 self,
                 "dual_edge_multiplicity",
                 FrozenEdgeMultiplicity(self.dual_edge_multiplicity),
             )
 
-        _set(
-            self,
+        for field_name in (
             "dual_embedding",
-            self._coerce_nested_int_tuples(
-                self.dual_embedding,
-                field_name="dual_embedding",
-            ),
-        )
-        _set(
-            self,
             "primal_embedding",
-            self._coerce_nested_int_tuples(
-                self.primal_embedding,
-                field_name="primal_embedding",
-            ),
-        )
-
-        _set(
-            self,
             "dual_faces",
-            self._coerce_nested_int_tuples(
-                self.dual_faces,
-                field_name="dual_faces",
-            ),
-        )
-        _set(
-            self,
             "primal_faces",
-            self._coerce_nested_int_tuples(
-                self.primal_faces,
-                field_name="primal_faces",
-            ),
-        )
-        _set(
-            self,
+        ):
+            values = getattr(self, field_name)
+            if type(values) is not tuple or any(
+                type(row) is not tuple
+                or any(type(value) is not int for value in row)
+                for row in values
+            ):
+                raise TypeError(
+                    f"{field_name} must be tuple[tuple[int, ...], ...]"
+                )
+
+        for field_name in (
             "dual_vertex_to_primal_face",
-            self._coerce_index_tuple(
-                self.dual_vertex_to_primal_face,
-                field_name="dual_vertex_to_primal_face",
-            ),
-        )
-        _set(
-            self,
             "primal_vertex_to_dual_face",
-            self._coerce_index_tuple(
-                self.primal_vertex_to_dual_face,
-                field_name="primal_vertex_to_dual_face",
-            ),
-        )
-        _set(
-            self,
+        ):
+            indices = getattr(self, field_name)
+            if type(indices) is not tuple or any(
+                type(index) is not int for index in indices
+            ):
+                raise TypeError(f"{field_name} must be tuple[int, ...]")
+
+        for field_name in (
             "dual_edge_label_pairs",
-            self._coerce_edge_label_pairs(self.dual_edge_label_pairs),
-        )
-        _set(
-            self,
             "primal_edge_label_pairs",
-            self._coerce_edge_label_pairs(self.primal_edge_label_pairs),
-        )
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                self._coerce_edge_label_pairs(getattr(self, field_name)),
+            )
 
     def __getstate__(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in _PLANE_GRAPH_STATE_FIELDS}
@@ -473,50 +386,6 @@ class PlaneGraph:
             object.__setattr__(self, name, state[name])
         object.__setattr__(self, "_double_edges_cache", None)
         self.__post_init__()
-
-    def _validate_field_types(self, errors: list[str]) -> bool:
-        """Reject state that bypassed the canonical constructor boundary."""
-        try:
-            for field_name in _PLANE_GRAPH_SCALAR_FIELDS:
-                self._require_int(
-                    getattr(self, field_name),
-                    field_name=field_name,
-                )
-            self._coerce_support_edges(self.dual_support_edges)
-            if not isinstance(
-                self.dual_edge_multiplicity,
-                FrozenEdgeMultiplicity,
-            ):
-                raise TypeError(
-                    "dual_edge_multiplicity must be FrozenEdgeMultiplicity"
-                )
-            for field_name in (
-                "dual_embedding",
-                "primal_embedding",
-                "dual_faces",
-                "primal_faces",
-            ):
-                self._coerce_nested_int_tuples(
-                    getattr(self, field_name),
-                    field_name=field_name,
-                )
-            for field_name in (
-                "dual_vertex_to_primal_face",
-                "primal_vertex_to_dual_face",
-            ):
-                self._coerce_index_tuple(
-                    getattr(self, field_name),
-                    field_name=field_name,
-                )
-            for field_name in (
-                "dual_edge_label_pairs",
-                "primal_edge_label_pairs",
-            ):
-                self._coerce_edge_label_pairs(getattr(self, field_name))
-        except (TypeError, ValueError) as exc:
-            errors.append(str(exc))
-            return False
-        return True
 
     @staticmethod
     def _scan_embedding(
@@ -593,14 +462,9 @@ class PlaneGraph:
 
         twin_map: dict[HalfEdge, HalfEdge] = {}
         half_edge_labels: dict[HalfEdge, EdgeLabel] = {}
-        seen_edge_labels: set[EdgeLabel] = set()
         expected_half_edge_count = sum(len(neighbors) for neighbors in embedding)
 
         for edge_label, half_edge_a, half_edge_b in edge_label_pairs:
-            if edge_label in seen_edge_labels:
-                errors.append(f"{graph_name} duplicate edge label: {edge_label!r}")
-            seen_edge_labels.add(edge_label)
-
             for half_edge in (half_edge_a, half_edge_b):
                 vertex, slot_idx = half_edge
                 if vertex < 0 or vertex >= len(embedding):
@@ -671,7 +535,7 @@ class PlaneGraph:
                 twin_map,
                 graph_name=graph_name,
             )
-        except Exception as exc:
+        except ValueError as exc:
             errors.append(f"{graph_name} face reconstruction failed: {exc}")
             return None, None, half_edge_labels, None
 
@@ -842,12 +706,6 @@ class PlaneGraph:
                 )
             if u > v:
                 errors.append(f"dual_edge_multiplicity not canonical: ({u}, {v})")
-            if type(multiplicity) is not int:
-                errors.append(
-                    f"Edge ({u}, {v}) multiplicity must be an integer; "
-                    f"got {type(multiplicity).__name__}"
-                )
-                continue
             if multiplicity not in (1, 2):
                 errors.append(
                     f"Edge ({u}, {v}) multiplicity mismatch: {multiplicity} != 1|2"
@@ -877,11 +735,7 @@ class PlaneGraph:
                     f"{half_edge_count} != {2 * edge_multiplicity}"
                 )
 
-        return sum(
-            multiplicity
-            for multiplicity in self.dual_edge_multiplicity.values()
-            if type(multiplicity) is int
-        )
+        return sum(self.dual_edge_multiplicity.values())
 
     def _validate_dual_digon_correspondence(self, errors: list[str]) -> None:
         """Require a one-to-one correspondence between digons and double edges."""
@@ -1172,11 +1026,9 @@ class PlaneGraph:
         return cache
 
     def validate(self) -> tuple[bool, list[str]]:
-        """Validates graph invariants."""
+        """Validate semantic and topological invariants."""
         # Sub-validators append to `errors` rather than raising, so one call reports everything.
         errors: list[str] = []
-        if not self._validate_field_types(errors):
-            return False, errors
 
         # Mirrors plantri.MIN_DUAL_VERTEX_COUNT, the smallest enumerable dual.
         if self.dual_num_vertices < 3:

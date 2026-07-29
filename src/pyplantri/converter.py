@@ -72,24 +72,6 @@ class GraphConverter:
         }
 
     @staticmethod
-    def extract_faces_with_twins(
-        embedding: dict[int, tuple[int, ...]],
-        twin_map: dict[tuple[int, int], tuple[int, int]],
-        *,
-        graph_name: str = "graph",
-    ) -> tuple[tuple[int, ...], ...]:
-        """Project face half-edge orbits to vertex walks, losing edge identity."""
-        face_cycles = GraphConverter.extract_face_half_edge_cycles(
-            embedding,
-            twin_map,
-            graph_name=graph_name,
-        )
-        return tuple(
-            tuple(vertex for vertex, _ in face_cycle)
-            for face_cycle in face_cycles
-        )
-
-    @staticmethod
     def extract_face_half_edge_cycles(
         embedding: dict[int, tuple[int, ...]],
         twin_map: dict[HalfEdge, HalfEdge],

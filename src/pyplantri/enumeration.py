@@ -318,16 +318,18 @@ class EnumerationTiming:
 
     startup_s: float
     post_startup_s: float
-    total_s: float
-    graph_count: int
+
+    @property
+    def total_s(self) -> float:
+        """Return total enumeration time."""
+        return self.startup_s + self.post_startup_s
 
 
 @dataclass(slots=True)
 class FilteredEnumerationResult:
-    """Enumeration result with returned count and timing details."""
+    """Enumeration result and timing details."""
 
     graphs: list[PlaneGraph]
-    generated_count: int
     timing: EnumerationTiming
 
 
@@ -341,12 +343,9 @@ def _make_filtered_result(
     t_total = time.perf_counter() - t_start
     return FilteredEnumerationResult(
         graphs=graphs,
-        generated_count=len(graphs),
         timing=EnumerationTiming(
             startup_s=startup_s,
             post_startup_s=t_total - startup_s,
-            total_s=t_total,
-            graph_count=len(graphs),
         ),
     )
 

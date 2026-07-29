@@ -176,7 +176,6 @@ def _raise_executable_not_runnable(
 
 class Plantri:
     """Wrapper for the plantri executable."""
-    _COUNT_INCOMPATIBLE_OUTPUT_FLAGS = _OUTPUT_FLAGS
 
     def __init__(self, executable: Path | None = None) -> None:
         """Initializes Plantri with the executable path."""
@@ -344,7 +343,7 @@ class Plantri:
         _validate_n_vertices(n_vertices)
         normalized_options = _without_plantri_flags(
             options,
-            self._COUNT_INCOMPATIBLE_OUTPUT_FLAGS,
+            _OUTPUT_FLAGS,
         )
 
         try:

@@ -84,8 +84,9 @@ CMake automatically builds plantri during installation.
 
 - `Plantri.run()` returns raw bytes and supports binary `planar_code`.
 - `Plantri.iter_stdout_lines()` accepts only line-oriented ASCII, graph6, sparse6, or double-code output.
-- Caches use the current, optionally gzip-compressed pickle schema and require `trusted=True`; older cache formats must be regenerated.
-- Loading always uses the restricted unpickler. `validate_graphs=True` semantically validates the complete serialized graph set before any `max_count` prefix is returned.
+- Schema-v10 caches use compact footer manifests, a dense Graph-ID index, and independent pickle chunks. Chunk offsets and index layout are derived rather than stored. `load_graph_catalog()` opens cheaply and verifies chunks on access; `audit_all_graphs()` performs an explicit full audit. Cache loading requires `trusted=True`, and older formats must be regenerated.
+- Saving semantically validates graphs by default. Only a producer that just enumerated with `validate=True` should pass `validate_graphs=False`.
+- Loading always uses the restricted unpickler. `validate_graphs=True` semantically validates only the returned prefix; use `audit_all_graphs()` for the complete cache.
 
 ## Number of Non-isomorphic Plane Graphs by n
 

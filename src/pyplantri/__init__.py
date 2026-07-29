@@ -1,9 +1,11 @@
 # src/pyplantri/__init__.py
 from .cache import (
+    CACHE_DEFAULT_CHUNK_SIZE,
     CACHE_FORMAT_VERSION,
-    CACHE_PICKLE_PROTOCOL,
     CacheGraphClass,
     CacheMetadata,
+    PlaneGraphCatalog,
+    load_graph_catalog,
     load_graphs_from_cache,
     save_graphs_to_cache,
     validate_cache_metadata,
@@ -52,9 +54,11 @@ __all__ = [
     # Cache
     "CacheMetadata",
     "CacheGraphClass",
+    "PlaneGraphCatalog",
+    "CACHE_DEFAULT_CHUNK_SIZE",
     "CACHE_FORMAT_VERSION",
-    "CACHE_PICKLE_PROTOCOL",
     "save_graphs_to_cache",
+    "load_graph_catalog",
     "load_graphs_from_cache",
     "validate_cache_metadata",
     # Enumeration
