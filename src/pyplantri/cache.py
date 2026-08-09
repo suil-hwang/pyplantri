@@ -15,12 +15,12 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Literal, overload
 
-from .plane_graph import PlaneGraph
+from .plane_graph import QuarticPlaneMap
 from .plantri import QuadrangulationDualClass
 
 logger = logging.getLogger(__name__)
 
-CACHE_FORMAT_VERSION = 10
+CACHE_FORMAT_VERSION = 11
 CACHE_DEFAULT_CHUNK_SIZE = 512
 _CACHE_PICKLE_PROTOCOL = 5
 _CACHE_FOOTER_STRUCT = struct.Struct(">Q32s")
@@ -108,7 +108,6 @@ class CacheMetadata:
     dual_vertex_count: int
     graph_count: int
     graph_class: CacheGraphClass
-    include_primal: bool
     storage_order_name: str = "source"
     storage_order_version: int = 1
 
@@ -149,10 +148,7 @@ class _SafeUnpickler(pickle.Unpickler):
     """Restricted unpickler for graph-chunk payloads."""
 
     SAFE_MODULES: dict[str, set[str]] = {
-        "pyplantri.plane_graph": {
-            "PlaneGraph",
-            "FrozenEdgeMultiplicity",
-        },
+        "pyplantri.plane_graph": {"QuarticPlaneMap"},
     }
 
     def find_class(self, module: str, name: str) -> Any:
@@ -200,10 +196,6 @@ def _validate_metadata_fields(
         raise ValueError(
             f"cache: invalid graph_class={metadata.graph_class!r}{location}"
         )
-    if type(metadata.include_primal) is not bool:
-        raise ValueError(
-            f"cache: invalid include_primal={metadata.include_primal!r}{location}"
-        )
     _require_order_name(
         metadata.storage_order_name,
         field_name="metadata.storage_order_name",
@@ -216,7 +208,6 @@ def validate_cache_metadata(
     *,
     expected_dual_vertex_count: int | None = None,
     expected_graph_class: _CacheGraphClassInput | None = None,
-    expected_include_primal: bool | None = None,
     expected_storage_order_name: str | None = None,
     expected_storage_order_version: int | None = None,
     filepath: str | Path | None = None,
@@ -248,15 +239,6 @@ def validate_cache_metadata(
         if metadata.graph_class != resolved_graph_class:
             raise ValueError(
                 f"cache: graph_class {metadata.graph_class!r}!={resolved_graph_class!r}{location}"
-            )
-    if expected_include_primal is not None:
-        _require_bool(
-            expected_include_primal,
-            field_name="expected_include_primal",
-        )
-        if metadata.include_primal is not expected_include_primal:
-            raise ValueError(
-                f"cache: include_primal {metadata.include_primal!r}!={expected_include_primal!r}{location}"
             )
     if expected_storage_order_name is not None:
         _require_order_name(
@@ -293,7 +275,6 @@ def _metadata_from_dict(raw: Any, filepath: Path) -> CacheMetadata:
         "dual_vertex_count",
         "graph_count",
         "graph_class",
-        "include_primal",
         "storage_order_name",
         "storage_order_version",
     }
@@ -343,7 +324,6 @@ def _manifest_to_bytes(
             "dual_vertex_count": metadata.dual_vertex_count,
             "graph_count": metadata.graph_count,
             "graph_class": metadata.graph_class,
-            "include_primal": metadata.include_primal,
             "storage_order_name": metadata.storage_order_name,
             "storage_order_version": metadata.storage_order_version,
         },
@@ -498,14 +478,14 @@ def _atomic_write(
 
 
 def _validate_graph_envelope(
-    graph: PlaneGraph,
+    graph: QuarticPlaneMap,
     metadata: CacheMetadata,
     *,
     graph_index: int,
     filepath: Path,
 ) -> int:
-    """Validate cache identity and O(1) graph cardinalities."""
-    if type(graph) is not PlaneGraph:
+    """Validate cache identity and cheap graph cardinalities."""
+    if type(graph) is not QuarticPlaneMap:
         raise ValueError(
             f"cache: invalid graph {graph_index} type {type(graph).__name__}"
         )
@@ -526,53 +506,28 @@ def _validate_graph_envelope(
         )
 
     n = metadata.dual_vertex_count
-    if graph.dual_num_vertices != n:
+    if len(graph.twin) != 4 * n:
         raise ValueError(
-            f"cache: graph {graph_index} n={graph.dual_num_vertices}!={n} ({filepath})"
+            f"cache: graph {graph_index} dart count {len(graph.twin)}!={4 * n} ({filepath})"
         )
 
-    num_support_edges = len(graph.dual_support_edges)
-    if (
-        len(graph.dual_embedding) != n
-        or len(graph.dual_faces) != n + 2
-        or len(graph.dual_edge_label_pairs) != 2 * n
-        or num_support_edges != len(graph.dual_edge_multiplicity)
-        or not n <= num_support_edges <= 2 * n
-    ):
+    num_support_edges, double_edge_count, _ = graph.dual_topology_profile()
+    if not n <= num_support_edges <= 2 * n:
         raise ValueError(
-            f"cache: graph {graph_index} dual cardinality mismatch ({filepath})"
+            f"cache: graph {graph_index} support-edge cardinality mismatch ({filepath})"
         )
     if (
         metadata.graph_class == "simple_quartic"
-        and num_support_edges != 2 * n
+        and (double_edge_count or num_support_edges != 2 * n)
     ):
         raise ValueError(
             f"cache: graph {graph_index} is not simple_quartic ({filepath})"
-        )
-
-    has_primal = graph._has_primal_data()
-    if has_primal is not metadata.include_primal:
-        raise ValueError(
-            f"cache: graph {graph_index} include_primal={has_primal}!={metadata.include_primal} ({filepath})"
-        )
-    if not has_primal:
-        return graph_id
-    if (
-        graph.primal_num_vertices != n + 2
-        or len(graph.primal_embedding) != n + 2
-        or len(graph.primal_faces) != n
-        or len(graph.dual_vertex_to_primal_face) != n
-        or len(graph.primal_vertex_to_dual_face) != n + 2
-        or len(graph.primal_edge_label_pairs) != 2 * n
-    ):
-        raise ValueError(
-            f"cache: graph {graph_index} primal cardinality mismatch ({filepath})"
         )
     return graph_id
 
 
 def _resolve_dual_vertex_count(
-    graphs: list[PlaneGraph],
+    graphs: list[QuarticPlaneMap],
     dual_vertex_count: int | None,
 ) -> int:
     """Infer or validate the dual vertex count when saving."""
@@ -586,7 +541,7 @@ def _resolve_dual_vertex_count(
                 "cache: dual_vertex_count required for empty graphs"
             )
         first_graph = graphs[0]
-        if type(first_graph) is not PlaneGraph:
+        if type(first_graph) is not QuarticPlaneMap:
             raise ValueError(
                 f"cache: invalid graph 0 type {type(first_graph).__name__}"
             )
@@ -600,7 +555,7 @@ def _resolve_dual_vertex_count(
 
 
 def _validate_graph_semantics_one(
-    graph: PlaneGraph,
+    graph: QuarticPlaneMap,
     graph_index: int,
 ) -> None:
     """Reject one graph whose complete domain invariants fail."""
@@ -616,7 +571,7 @@ def _validate_graph_semantics_one(
 
 
 def _prepare_graph_payload(
-    graphs: list[PlaneGraph],
+    graphs: list[QuarticPlaneMap],
     *,
     metadata: CacheMetadata,
     filepath: Path,
@@ -668,7 +623,7 @@ def _validate_graph_chunk_payload(
     metadata: CacheMetadata,
     chunk: _CacheChunk,
     filepath: Path,
-) -> tuple[PlaneGraph, ...]:
+) -> tuple[QuarticPlaneMap, ...]:
     """Validate one accessed chunk without inspecting unseen chunks."""
     if type(raw_graphs) is not list:
         raise ValueError(
@@ -697,7 +652,7 @@ def _validate_graph_chunk_payload(
 
 
 def _serialize_graph_chunk(
-    graphs: list[PlaneGraph],
+    graphs: list[QuarticPlaneMap],
     *,
     compression: _Compression,
     compress_level: int,
@@ -763,12 +718,11 @@ def _deserialize_graph_chunk(
 
 
 def _save_chunked_cache(
-    graphs: list[PlaneGraph],
+    graphs: list[QuarticPlaneMap],
     filepath: Path,
     *,
     dual_vertex_count: int | None,
     graph_class: CacheGraphClass,
-    include_primal: bool,
     compression: _Compression,
     compress_level: int,
     chunk_size: int,
@@ -786,7 +740,6 @@ def _save_chunked_cache(
         dual_vertex_count=resolved_dual_vertex_count,
         graph_count=len(graphs),
         graph_class=graph_class,
-        include_primal=include_primal,
         storage_order_name=storage_order_name,
         storage_order_version=storage_order_version,
     )
@@ -892,7 +845,7 @@ def _open_manifest(
     )
 
 
-class PlaneGraphCatalog(Sequence[PlaneGraph]):
+class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
     """Lazy physical-order view over one footer-manifest graph cache."""
 
     __slots__ = (
@@ -908,7 +861,7 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
     ) -> None:
         self._filepath = filepath
         self._manifest = manifest
-        self._cached_chunk: tuple[int, tuple[PlaneGraph, ...]] | None = None
+        self._cached_chunk: tuple[int, tuple[QuarticPlaneMap, ...]] | None = None
 
     @property
     def metadata(self) -> CacheMetadata:
@@ -932,7 +885,7 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
     def _load_chunk(
         self,
         chunk_index: int,
-    ) -> tuple[PlaneGraph, ...]:
+    ) -> tuple[QuarticPlaneMap, ...]:
         cached = self._cached_chunk
         if cached is not None and cached[0] == chunk_index:
             return cached[1]
@@ -947,7 +900,7 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
         self,
         chunk_index: int,
         payload: bytes,
-    ) -> tuple[PlaneGraph, ...]:
+    ) -> tuple[QuarticPlaneMap, ...]:
         """Verify and decode one already-read chunk payload."""
         chunk = self._manifest.chunks[chunk_index]
         if hashlib.sha256(payload).digest() != chunk.digest:
@@ -968,7 +921,7 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
         )
         return graphs
 
-    def _get_stored(self, stored_index: int) -> PlaneGraph:
+    def _get_stored(self, stored_index: int) -> QuarticPlaneMap:
         chunk_index = stored_index // self._manifest.chunk_size
         chunk = self._manifest.chunks[chunk_index]
         return self._load_chunk(chunk_index)[
@@ -976,15 +929,15 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
         ]
 
     @overload
-    def __getitem__(self, index: int) -> PlaneGraph: ...
+    def __getitem__(self, index: int) -> QuarticPlaneMap: ...
 
     @overload
-    def __getitem__(self, index: slice) -> list[PlaneGraph]: ...
+    def __getitem__(self, index: slice) -> list[QuarticPlaneMap]: ...
 
     def __getitem__(
         self,
         index: int | slice,
-    ) -> PlaneGraph | list[PlaneGraph]:
+    ) -> QuarticPlaneMap | list[QuarticPlaneMap]:
         if isinstance(index, slice):
             return [
                 self[position]
@@ -998,10 +951,10 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
         if position < 0:
             position += len(self)
         if not 0 <= position < len(self):
-            raise IndexError("PlaneGraphCatalog index out of range")
+            raise IndexError("QuarticPlaneMapCatalog index out of range")
         return self._get_stored(position)
 
-    def __iter__(self) -> Iterator[PlaneGraph]:
+    def __iter__(self) -> Iterator[QuarticPlaneMap]:
         with self._filepath.open("rb") as stream:
             for chunk_index, chunk in enumerate(self._manifest.chunks):
                 cached = self._cached_chunk
@@ -1042,7 +995,7 @@ class PlaneGraphCatalog(Sequence[PlaneGraph]):
             )
         return payload
 
-    def get_by_graph_id(self, graph_id: int) -> PlaneGraph:
+    def get_by_graph_id(self, graph_id: int) -> QuarticPlaneMap:
         """Return the graph with one dense source-stream Graph ID."""
         if type(graph_id) is not int:
             raise TypeError(
@@ -1090,23 +1043,22 @@ def load_graph_catalog(
     filepath: str | Path,
     *,
     trusted: bool = False,
-) -> PlaneGraphCatalog:
+) -> QuarticPlaneMapCatalog:
     """Open a cheap physical-order catalog; chunks are checked on access."""
     _require_bool(trusted, field_name="trusted")
     resolved_path = Path(filepath)
     if not trusted:
         raise ValueError("cache: trusted=True required")
 
-    return PlaneGraphCatalog(resolved_path, _open_manifest(resolved_path))
+    return QuarticPlaneMapCatalog(resolved_path, _open_manifest(resolved_path))
 
 
 def save_graphs_to_cache(
-    graphs: list[PlaneGraph],
+    graphs: list[QuarticPlaneMap],
     filepath: str | Path,
     *,
     dual_vertex_count: int | None = None,
     graph_class: _CacheGraphClassInput,
-    include_primal: bool,
     compress: bool = True,
     compress_level: int = 1,
     chunk_size: int = CACHE_DEFAULT_CHUNK_SIZE,
@@ -1115,7 +1067,6 @@ def save_graphs_to_cache(
     validate_graphs: bool = True,
 ) -> Path:
     """Save a dense-ID footer-manifest cache atomically."""
-    _require_bool(include_primal, field_name="include_primal")
     _require_bool(compress, field_name="compress")
     if type(compress_level) is not int or not 0 <= compress_level <= 9:
         raise ValueError(
@@ -1146,7 +1097,6 @@ def save_graphs_to_cache(
         resolved_path,
         dual_vertex_count=dual_vertex_count,
         graph_class=resolved_graph_class,
-        include_primal=include_primal,
         compression="gzip" if compress else "none",
         compress_level=compress_level,
         chunk_size=chunk_size,
@@ -1170,7 +1120,7 @@ def load_graphs_from_cache(
     max_count: int | None = None,
     trusted: bool = False,
     validate_graphs: bool = False,
-) -> tuple[list[PlaneGraph], CacheMetadata]:
+) -> tuple[list[QuarticPlaneMap], CacheMetadata]:
     """Load a physical-order prefix; use audit_all_graphs() for global checks."""
     if max_count is not None:
         _require_int_at_least(

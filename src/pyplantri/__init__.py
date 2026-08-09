@@ -6,33 +6,27 @@ from .cache import (
     CACHE_FORMAT_VERSION,
     CacheGraphClass,
     CacheMetadata,
-    PlaneGraphCatalog,
+    QuarticPlaneMapCatalog,
     load_graph_catalog,
     load_graphs_from_cache,
     save_graphs_to_cache,
     validate_cache_metadata,
 )
 from .enumeration import (
-    EnumerationTiming,
-    FilteredEnumerationResult,
+    PlantriEnumerationResult,
     enumerate_simple_quadrangulation_duals,
-    enumerate_simple_quadrangulation_duals_filtered,
-    enumerate_simple_quadrangulation_duals_parallel,
 )
-from .plane_graph import (
-    FrozenEdgeMultiplicity,
-    PlaneGraph,
-)
+from .plane_graph import QuarticPlaneMap
 from .plantri import (
-    MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT,
     MAX_DUAL_VERTEX_COUNT,
     MIN_DUAL_VERTEX_COUNT,
-    ParsedGraphSection,
+    PlanarCodeError,
     Plantri,
     QuadrangulationDualClass,
     PlantriExecutableNotFoundError,
     PlantriError,
     QuadrangulationEnumerator,
+    iter_planar_code,
 )
 
 try:
@@ -42,7 +36,7 @@ except _metadata.PackageNotFoundError:
 
 __all__ = [
     # Plantri wrapper
-    "ParsedGraphSection",
+    "PlanarCodeError",
     "Plantri",
     "QuadrangulationDualClass",
     "PlantriExecutableNotFoundError",
@@ -50,14 +44,13 @@ __all__ = [
     "QuadrangulationEnumerator",
     "MIN_DUAL_VERTEX_COUNT",
     "MAX_DUAL_VERTEX_COUNT",
-    "MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT",
-    # Plane Graph model
-    "PlaneGraph",
-    "FrozenEdgeMultiplicity",
+    "iter_planar_code",
+    # Quartic plane-map model
+    "QuarticPlaneMap",
     # Cache
     "CacheMetadata",
     "CacheGraphClass",
-    "PlaneGraphCatalog",
+    "QuarticPlaneMapCatalog",
     "CACHE_DEFAULT_CHUNK_SIZE",
     "CACHE_FORMAT_VERSION",
     "save_graphs_to_cache",
@@ -66,8 +59,5 @@ __all__ = [
     "validate_cache_metadata",
     # Enumeration
     "enumerate_simple_quadrangulation_duals",
-    "enumerate_simple_quadrangulation_duals_filtered",
-    "enumerate_simple_quadrangulation_duals_parallel",
-    "FilteredEnumerationResult",
-    "EnumerationTiming",
+    "PlantriEnumerationResult",
 ]

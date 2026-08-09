@@ -2,7 +2,7 @@
 
 A Python wrapper for [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) to enumerate **Simple Quadrangulations on a Sphere (SQS)**.
 
-Given the dual vertex count `n`, it enumerates all **non-isomorphic duals of simple quadrangulations of the sphere**, together with the corresponding primal and dual plane-graph topology.
+Given the dual vertex count `n`, it enumerates all **non-isomorphic duals of simple quadrangulations of the sphere** as compact quartic plane maps. Their primal and dual topology is derived exactly from the stored dart involution.
 
 ## What is plantri?
 
@@ -49,15 +49,25 @@ For plane graphs: `V - E + F = 2`
 
 **Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
 
-**Input Constraint:** The bundled count path supports `3 <= n <= 62`, while `-T` double-code generation supports `3 <= n <= 55`. The simple-quartic subclass is empty for `n < 6`.
+**Input Constraint:** The bundled count and materialization paths support `3 <= n <= 62`. The simple-quartic subclass is empty for `n < 6`.
 
-Set `include_primal=False` to omit primal topology when only the dual is needed. Such objects still rely on plantri's generation guarantees for properties that cannot be certified from the stored dual alone.
+`QuarticPlaneMap` numbers the four clockwise darts at vertex `v` as
+`4*v, ..., 4*v+3` and stores only the opposite-dart involution `twin` plus the
+source-stream `graph_id`. The rotation is implicit, so dual adjacency, support
+edges, multiplicities, face cycles, and the canonical simple primal are all
+derived values. For the supported `n <= 62`, at most 248 darts are present and
+every opposite-dart index fits in one byte.
 
 ### Adjacency List Order (Combinatorial Embedding)
 
-The neighbor order in `PlaneGraph.dual_embedding` (or a parsed section's `cyclic_adjacency`) represents the **cyclic order** of edges at each vertex, given **clockwise (CW) as viewed from outside the sphere**. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
+The neighbor order in `QuarticPlaneMap.dual_embedding` and in streamed primal embeddings represents the **cyclic order** of edges at each vertex, given **clockwise (CW) as viewed from outside the sphere**. This cyclic ordering defines the **combinatorial embedding** of the plane graph.
 
-plantri's `-T` (double_code) option preserves this exterior-view clockwise order around each vertex.
+Production enumeration asks the unmodified bundled plantri executable to write
+headerless one-byte `planar_code` to a unique temporary binary file. Python
+drains complete records while the child runs and removes the file on normal,
+failed, and early-closed paths. This avoids platform text-mode translation
+without changing the bundled C source. The simple primal rotation system is
+dualized exactly while preserving the exterior-view-CW convention.
 
 Without `-o`, as in the predefined quadrangulation modes, plantri identifies
 an embedded graph with its mirror image. With `-o`, orientation-preserving
@@ -80,17 +90,30 @@ pip install -e .
 
 CMake automatically builds plantri during installation.
 
-### Version 0.4 API change
+### Version 0.5 API change
 
-Version 0.4 removes the public `GraphConverter` static namespace without an
-alias. Use the enumeration, parsing, and `PlaneGraph.validate()` entry points;
-half-edge traversal remains an internal plane-graph invariant.
+Version 0.5 removes the former text codec and multi-field builder API without
+aliases. Production enumeration decodes the simple primal `planar_code` stream
+and constructs `QuarticPlaneMap` directly through
+`QuarticPlaneMap.from_primal_embedding()`. The persistent map state is only
+`twin: bytes` and `graph_id`; embeddings, faces, multiplicities, and
+primal-dual maps are derived.
+
+`enumerate_simple_quadrangulation_duals()` is now the sole enumeration API:
+`dual_class` selects the Graph-ID namespace, while `num_workers`, `chunk_size`,
+and `start_method` select the execution policy without changing source order.
+It returns an immutable
+`PlantriEnumerationResult` containing a tuple of maps plus direct `startup_s`,
+`post_startup_s`, and derived `total_s` fields. The former
+`enumerate_simple_quadrangulation_duals_filtered()`,
+`enumerate_simple_quadrangulation_duals_parallel()`,
+`FilteredEnumerationResult`, and `EnumerationTiming` APIs and aliases are
+removed.
 
 ## Output and Cache Safety
 
-- `Plantri.run()` returns raw bytes and supports binary `planar_code`.
-- `Plantri.iter_stdout_lines()` accepts only line-oriented ASCII, graph6, sparse6, or double-code output.
-- Schema-v10 caches use compact footer manifests, a dense Graph-ID index, and independent pickle chunks. Chunk offsets and index layout are derived rather than stored. `load_graph_catalog()` opens cheaply and verifies chunks on access; `audit_all_graphs()` performs an explicit full audit. Cache loading requires `trusted=True`, and older formats must be regenerated.
+- `Plantri.iter_planar_code()` is the binary record boundary; generic line iteration remains restricted to line-oriented ASCII formats.
+- Schema-v11 caches store only `QuarticPlaneMap` records in independent pickle chunks, with compact footer manifests and a dense Graph-ID index. Chunk offsets and index layout are derived rather than stored. `load_graph_catalog()` opens cheaply and verifies chunks on access; `audit_all_graphs()` performs an explicit full audit. Cache loading requires `trusted=True`, and older formats must be regenerated.
 - Saving semantically validates graphs by default. Only a producer that just enumerated with `validate=True` should pass `validate_graphs=False`.
 - Loading always uses the restricted unpickler. `validate_graphs=True` semantically validates only the returned prefix; use `audit_all_graphs()` for the complete cache.
 
