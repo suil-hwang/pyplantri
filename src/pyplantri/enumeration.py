@@ -16,49 +16,48 @@ from .plantri import QuadrangulationDualClass, QuadrangulationEnumerator
 from .types import Embedding
 
 
-_DEFAULT_NUM_WORKERS = 16
-_DEFAULT_CHUNK_SIZE = 256
-_MIN_PARALLEL_RECORDS = 1_024
-
-
-def _build_graph_task(
-    indexed_embedding: tuple[int, Embedding],
-    *,
-    dual_class: QuadrangulationDualClass,
-    validate: bool,
-) -> QuarticPlaneMap:
-    """Build one map through the module-level multiprocessing pickle boundary."""
-    graph_id, primal_embedding = indexed_embedding
-    graph = QuarticPlaneMap.from_primal_embedding(
-        primal_embedding,
-        graph_id=graph_id,
-        validate=validate,
-    )
-    if (
-        dual_class is QuadrangulationDualClass.SIMPLE_QUARTIC
-        and graph.dual_topology_profile()[0] != 2 * graph.dual_num_vertices
-    ):
-        parallel_edges = sorted(
-            (edge, multiplicity)
-            for edge, multiplicity in graph.dual_edge_multiplicity.items()
-            if multiplicity != 1
-        )
-        raise ValueError(f"graph_id={graph_id}: simple-quartic record contains parallel edges: {parallel_edges}")
-    return graph
+_MAX_AUTO_WORKERS = 16
+_DEFAULT_POOL_CHUNK_SIZE = 256
+_MIN_POOL_RECORDS = 1_024
 
 
 @dataclass(frozen=True, slots=True)
 class PlantriEnumerationResult:
-    """Immutable enumeration result with startup-separated timing."""
+    """Immutable map batch with zero time-to-first for an empty stream."""
 
     graphs: tuple[QuarticPlaneMap, ...]
-    startup_s: float
-    post_startup_s: float
+    time_to_first_embedding_s: float
+    remaining_s: float
 
     @property
     def total_s(self) -> float:
         """Return total enumeration time."""
-        return self.startup_s + self.post_startup_s
+        return self.time_to_first_embedding_s + self.remaining_s
+
+
+def _build_quartic_plane_map_task(
+    indexed_primal_embedding: tuple[int, Embedding],
+    *,
+    dual_class: QuadrangulationDualClass,
+    validate: bool,
+) -> QuarticPlaneMap:
+    """Build one quartic map through the multiprocessing pickle boundary."""
+    graph_id, primal_embedding = indexed_primal_embedding
+    plane_map = QuarticPlaneMap.from_primal_embedding(
+        primal_embedding,
+        graph_id=graph_id,
+        validate=validate,
+    )
+    if dual_class is QuadrangulationDualClass.SIMPLE_QUARTIC:
+        support_edge_count, _, _ = plane_map.dual_topology_profile()
+        if support_edge_count != 2 * plane_map.dual_num_vertices:
+            parallel_edges = sorted(
+                (edge, multiplicity)
+                for edge, multiplicity in plane_map.dual_edge_multiplicity.items()
+                if multiplicity != 1
+            )
+            raise ValueError(f"graph_id={graph_id}: simple-quartic record contains parallel edges: {parallel_edges}")
+    return plane_map
 
 
 def enumerate_simple_quadrangulation_duals(
@@ -72,7 +71,10 @@ def enumerate_simple_quadrangulation_duals(
     chunk_size: int | None = None,
     start_method: str | None = None,
 ) -> PlantriEnumerationResult:
-    """Enumerate one plantri dual-class stream in deterministic source order."""
+    """Materialize dual plane maps of simple quadrangulations in source order.
+
+    ``max_count`` bounds the source prefix; ``chunk_size`` is the pool chunksize.
+    """
     if max_count is not None and (type(max_count) is not int or max_count < 0):
         raise ValueError(f"max_count must be None or a non-negative int, got {max_count!r}")
     for name, value in (("num_workers", num_workers), ("chunk_size", chunk_size)):
@@ -89,49 +91,60 @@ def enumerate_simple_quadrangulation_duals(
         or start_method not in multiprocessing.get_all_start_methods()
     ):
         raise ValueError(f"unsupported start_method: {start_method!r}")
-    dual_class = QuadrangulationEnumerator._normalize_dual_class(dual_class)
+    resolved_dual_class = QuadrangulationEnumerator._normalize_dual_class(dual_class)
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
 
-    t_start = time.perf_counter()
-    if max_count == 0 or dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(dual_class):
-        return PlantriEnumerationResult((), 0.0, time.perf_counter() - t_start)
+    enumeration_started_at = time.perf_counter()
+    if max_count == 0 or dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(resolved_dual_class):
+        return PlantriEnumerationResult(
+            graphs=(),
+            time_to_first_embedding_s=0.0,
+            remaining_s=time.perf_counter() - enumeration_started_at,
+        )
 
-    t_plantri_start = time.perf_counter()
-    embedding_iter = iter(
+    primal_embedding_iter = iter(
         QuadrangulationEnumerator().iter_embeddings(
             dual_vertex_count,
-            dual_class=dual_class,
+            dual_class=resolved_dual_class,
         )
     )
     try:
-        prefetched = list(islice(embedding_iter, 1))
-        t_plantri = time.perf_counter() - t_plantri_start
+        prefetched_primal_embeddings = list(islice(primal_embedding_iter, 1))
+        time_to_first_embedding_s = (
+            time.perf_counter() - enumeration_started_at
+            if prefetched_primal_embeddings
+            else 0.0
+        )
 
-        if num_workers is None:
-            num_workers = max(
+        worker_count = num_workers
+        if worker_count is None:
+            worker_count = max(
                 1,
-                min(os.cpu_count() or 4, _DEFAULT_NUM_WORKERS),
+                min(os.cpu_count() or 4, _MAX_AUTO_WORKERS),
             )
-        effective_chunk_size = (
-            chunk_size if chunk_size is not None else _DEFAULT_CHUNK_SIZE
+        pool_chunk_size = (
+            chunk_size if chunk_size is not None else _DEFAULT_POOL_CHUNK_SIZE
         )
-        parallel_threshold = max(
-            _MIN_PARALLEL_RECORDS,
-            effective_chunk_size * 2,
+        required_pool_records = max(
+            _MIN_POOL_RECORDS,
+            pool_chunk_size * 2,
         )
-        use_parallel = bool(prefetched) and num_workers > 1 and (
-            max_count is None or max_count > parallel_threshold
+        use_pool = bool(prefetched_primal_embeddings) and worker_count > 1 and (
+            max_count is None or max_count >= required_pool_records
         )
-        if use_parallel:
-            prefetched.extend(
-                islice(embedding_iter, parallel_threshold - len(prefetched))
+        if use_pool:
+            prefetched_primal_embeddings.extend(
+                islice(
+                    primal_embedding_iter,
+                    required_pool_records - len(prefetched_primal_embeddings),
+                )
             )
-            use_parallel = len(prefetched) >= parallel_threshold
+            use_pool = len(prefetched_primal_embeddings) >= required_pool_records
 
-        ctx = None
-        if use_parallel:
-            ctx = multiprocessing.get_context(start_method)
-            resolved_start_method = ctx.get_start_method()
+        mp_context = None
+        if use_pool:
+            mp_context = multiprocessing.get_context(start_method)
+            resolved_start_method = mp_context.get_start_method()
             if resolved_start_method in {"spawn", "forkserver"}:
                 raw_main_path = getattr(sys.modules.get("__main__"), "__file__", None)
                 main_path = Path(raw_main_path) if isinstance(raw_main_path, str) and raw_main_path else None
@@ -144,24 +157,34 @@ def enumerate_simple_quadrangulation_duals(
                     or not main_path.is_file()
                 ):
                     warnings.warn(f"{resolved_start_method} requires importable __main__; using sequential", RuntimeWarning, stacklevel=2)
-                    ctx = None
+                    mp_context = None
 
-        use_parallel = ctx is not None
+        used_parallel_workers = mp_context is not None
 
-        selected_embeddings = chain(prefetched, embedding_iter)
-        if max_count is not None:
-            selected_embeddings = islice(selected_embeddings, max_count)
-        indexed_embeddings = enumerate(selected_embeddings)
-        build_graph = partial(
-            _build_graph_task,
-            validate=validate,
-            dual_class=dual_class,
+        selected_primal_embeddings = chain(
+            prefetched_primal_embeddings,
+            primal_embedding_iter,
         )
-        if ctx is not None:
-            pool = ctx.Pool(processes=num_workers)
+        if max_count is not None:
+            selected_primal_embeddings = islice(
+                selected_primal_embeddings,
+                max_count,
+            )
+        indexed_primal_embeddings = enumerate(selected_primal_embeddings)
+        build_plane_map = partial(
+            _build_quartic_plane_map_task,
+            validate=validate,
+            dual_class=resolved_dual_class,
+        )
+        if mp_context is not None:
+            pool = mp_context.Pool(processes=worker_count)
             try:
-                graphs = tuple(
-                    pool.imap(build_graph, indexed_embeddings, effective_chunk_size)
+                plane_maps = tuple(
+                    pool.imap(
+                        build_plane_map,
+                        indexed_primal_embeddings,
+                        pool_chunk_size,
+                    )
                 )
             except BaseException:
                 pool.terminate()
@@ -171,16 +194,19 @@ def enumerate_simple_quadrangulation_duals(
             finally:
                 pool.join()
         else:
-            graphs = tuple(map(build_graph, indexed_embeddings))
+            plane_maps = tuple(map(build_plane_map, indexed_primal_embeddings))
     finally:
-        close = getattr(embedding_iter, "close", None)
+        close = getattr(primal_embedding_iter, "close", None)
         if callable(close):
             close()
 
+    elapsed_s = time.perf_counter() - enumeration_started_at
+    result = PlantriEnumerationResult(
+        graphs=plane_maps,
+        time_to_first_embedding_s=time_to_first_embedding_s,
+        remaining_s=elapsed_s - time_to_first_embedding_s,
+    )
     if verbose:
-        mode = "simple-quartic " if dual_class is QuadrangulationDualClass.SIMPLE_QUARTIC else ""
-        processing = "Parallel" if use_parallel else "Sequential"
-        print(f"[Plantri] {processing} enumeration ({mode}n={dual_vertex_count}): {len(graphs)} graphs")
-
-    total_s = time.perf_counter() - t_start
-    return PlantriEnumerationResult(graphs, t_plantri, total_s - t_plantri)
+        execution_mode = "parallel" if used_parallel_workers else "sequential"
+        print(f"[Plantri] {resolved_dual_class.value} n={dual_vertex_count}: {len(plane_maps)} maps ({execution_mode} map construction)")
+    return result

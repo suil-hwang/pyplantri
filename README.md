@@ -102,9 +102,10 @@ primal-dual maps are derived.
 `enumerate_simple_quadrangulation_duals()` is now the sole enumeration API:
 `dual_class` selects the Graph-ID namespace, while `num_workers`, `chunk_size`,
 and `start_method` select the execution policy without changing source order.
-It returns an immutable
-`PlantriEnumerationResult` containing a tuple of maps plus direct `startup_s`,
-`post_startup_s`, and derived `total_s` fields. The former
+It returns an immutable `PlantriEnumerationResult` containing a tuple of maps,
+the exact `time_to_first_embedding_s` and `remaining_s` timing partition, and
+derived `total_s`. Timing starts after argument validation; an empty stream has
+zero time to first embedding. The former
 `enumerate_simple_quadrangulation_duals_filtered()`,
 `enumerate_simple_quadrangulation_duals_parallel()`,
 `FilteredEnumerationResult`, and `EnumerationTiming` APIs and aliases are

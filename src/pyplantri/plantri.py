@@ -7,6 +7,7 @@ import subprocess
 import sysconfig
 import tempfile
 from enum import Enum
+from importlib.resources import files
 from pathlib import Path
 from shutil import which
 from collections.abc import Iterable, Iterator
@@ -15,26 +16,18 @@ from typing import BinaryIO, Callable, Literal, NoReturn, TypeVar, cast
 from .types import Embedding
 
 
-def _summarize_process_text(text: str, *, limit: int = 400) -> str:
-    """Collapse process output into a short single-line excerpt."""
+def _summarize_process_text(text: str | bytes, *, limit: int = 400) -> str:
+    """Decode and collapse process output into a bounded single-line excerpt."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
     normalized = " ".join(text.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 3] + "..."
+    return normalized if len(normalized) <= limit else normalized[: limit - 3] + "..."
 
 
 _LINE_ORIENTED_OUTPUT_FLAGS = frozenset("ags")
 _OUTPUT_FLAGS = frozenset("agsETu")
 # Sorted because frozenset iteration order varies per process; the error message must not.
 _LINE_ORIENTED_FLAG_HINT = "/".join(f"-{flag}" for flag in sorted(_LINE_ORIENTED_OUTPUT_FLAGS))
-
-
-def _has_plantri_flag(options: list[str] | None, flags: frozenset[str]) -> bool:
-    """Return whether separate or combined plantri options contain a flag."""
-    return any(
-        option.startswith("-") and any(char in flags for char in option[1:])
-        for option in (options or [])
-    )
 
 
 def _selected_plantri_flags(
@@ -73,40 +66,38 @@ def _validate_n_vertices(n_vertices: int) -> None:
         raise ValueError(f"plantri: n_vertices must be a positive int; got {n_vertices!r}")
 
 
-def _build_tag_sort_key(tag_dir: Path) -> tuple[bool, str]:
-    """Prefer build directories for the current platform, then sort by name."""
-    platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
-    return not tag_dir.name.endswith(platform_tag), tag_dir.name
-
-
 def _is_executable(path: Path) -> bool:
-    """Return whether path names a runnable executable on this platform."""
+    """Return whether path is an executable candidate on this platform."""
     return path.is_file() and (os.name == "nt" or os.access(path, os.X_OK))
 
 
 def _find_plantri_exe() -> Path:
-    """Finds the plantri executable path."""
+    """Find the active package, build, or PATH plantri executable."""
     exe_name = "plantri.exe" if os.name == "nt" else "plantri"
+    package_dir = Path(__file__).parent
+    fallback_executable = package_dir / "bin" / exe_name
 
-    # Package bin folder (installed).
-    pkg_bin = Path(__file__).parent / "bin" / exe_name
-    if _is_executable(pkg_bin):
-        return pkg_bin
+    # The active editable or wheel resource must precede stale local build tags.
+    resource_executable = files("pyplantri").joinpath("bin").joinpath(exe_name)
+    if isinstance(resource_executable, Path) and _is_executable(resource_executable):
+        return resource_executable
+    if _is_executable(fallback_executable):
+        return fallback_executable
 
     # scikit-build-core build folder (editable/dev): plantri.py -> pyplantri -> src -> project_root.
-    project_root = Path(__file__).parent.parent.parent
+    project_root = package_dir.parent.parent
     build_dir = project_root / "build"
     if build_dir.is_dir():
-        for tag_dir in sorted(build_dir.iterdir(), key=_build_tag_sort_key):
-            if tag_dir.is_dir():
-                # Release folder (Visual Studio build).
-                release_exe = tag_dir / "Release" / exe_name
-                if _is_executable(release_exe):
-                    return release_exe
-                # MinGW/Unix build.
-                direct_exe = tag_dir / exe_name
-                if _is_executable(direct_exe):
-                    return direct_exe
+        platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+        tag_dirs = (
+            path
+            for path in build_dir.iterdir()
+            if path.is_dir() and path.name.endswith(f"-{platform_tag}")
+        )
+        for tag_dir in sorted(tag_dirs, key=lambda path: path.name):
+            for candidate in (tag_dir / "Release" / exe_name, tag_dir / exe_name):
+                if _is_executable(candidate):
+                    return candidate
 
     path_exe = which(exe_name)
     if path_exe is not None:
@@ -114,8 +105,7 @@ def _find_plantri_exe() -> Path:
         if _is_executable(resolved_path_exe):
             return resolved_path_exe
 
-    # Default path for error messages.
-    return Path(__file__).parent / "bin" / exe_name
+    return fallback_executable
 
 
 # Bundled plantri limit for one-byte planar_code records.
@@ -273,11 +263,12 @@ class Plantri:
 
     def __init__(self, executable: Path | None = None) -> None:
         """Initializes Plantri with the executable path."""
-        self.executable = (
+        candidate = (
             Path(executable).expanduser().resolve()
             if executable is not None
             else _find_plantri_exe()
         )
+        self.executable = candidate.resolve()
         if not self.executable.is_file():
             _raise_executable_not_found(self.executable)
         if not _is_executable(self.executable):
@@ -312,8 +303,7 @@ class Plantri:
             result = subprocess.run(cmd, capture_output=True, check=True)
             return result.stdout
         except subprocess.CalledProcessError as e:
-            stderr_text = e.stderr.decode(errors="replace") if e.stderr else str(e)
-            raise PlantriError(f"plantri: execution failed (exit {e.returncode}); {_summarize_process_text(stderr_text)}") from e
+            raise PlantriError(f"plantri: execution failed (exit {e.returncode}); {_summarize_process_text(e.stderr or str(e))}") from e
         except FileNotFoundError as e:
             raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
         except OSError as e:
@@ -330,14 +320,15 @@ class Plantri:
         if output_format not in ("planar_code", "ascii"):
             raise ValueError(f"plantri: unsupported output_format {output_format!r}; use 'planar_code' or 'ascii'")
         _validate_n_vertices(n_vertices)
-        selected_output_flags = _selected_plantri_flags(options, _OUTPUT_FLAGS)
-        if "T" in selected_output_flags:
+        requested_output_flags = _selected_plantri_flags(options, _OUTPUT_FLAGS)
+        if "T" in requested_output_flags:
             raise ValueError("plantri: -T output is unsupported; use planar_code")
-        if output_format == "ascii":
-            selected_output_flags.add("a")
-        if len(selected_output_flags) > 1:
+        effective_output_flags = requested_output_flags | (
+            {"a"} if output_format == "ascii" else set()
+        )
+        if len(effective_output_flags) > 1:
             formatted_flags = ", ".join(
-                f"-{flag}" for flag in sorted(selected_output_flags)
+                f"-{flag}" for flag in sorted(effective_output_flags)
             )
             raise ValueError(f"plantri: conflicting output flags: {formatted_flags}")
 
@@ -345,8 +336,7 @@ class Plantri:
         if options:
             cmd.extend(options)
 
-        # Set output format flag.
-        if output_format == "ascii" and not _has_plantri_flag(options, frozenset("a")):
+        if output_format == "ascii" and "a" not in requested_output_flags:
             cmd.append("-a")
 
         cmd.append(str(n_vertices))
@@ -402,10 +392,7 @@ class Plantri:
             return_code = process.wait()
             if return_code != 0:
                 stderr_file.seek(0)
-                stderr_excerpt = _summarize_process_text(
-                    stderr_file.read().decode("utf-8", errors="replace"),
-                    limit=4000,
-                )
+                stderr_excerpt = _summarize_process_text(stderr_file.read(), limit=4000)
                 raise PlantriError(
                     f"plantri: execution failed (exit {return_code}); {stderr_excerpt}"
                 ) from None
@@ -438,7 +425,7 @@ class Plantri:
             options=options,
             output_format="planar_code",
         )
-        if not _has_plantri_flag(options, frozenset("h")):
+        if not _selected_plantri_flags(options, frozenset("h")):
             cmd.insert(-1, "-h")
 
         with (
@@ -504,7 +491,7 @@ class Plantri:
         """Stream non-empty stdout lines for line-oriented plantri output."""
         cmd = self._build_command(n_vertices, options=options, output_format=output_format)
         # Binary planar_code may contain newline bytes, so streaming requires a line format.
-        if output_format != "ascii" and not _has_plantri_flag(options, _LINE_ORIENTED_OUTPUT_FLAGS):
+        if output_format != "ascii" and not _selected_plantri_flags(options, _LINE_ORIENTED_OUTPUT_FLAGS):
             raise ValueError(f"plantri: iter_stdout_lines requires line-oriented output; use output_format='ascii' or a {_LINE_ORIENTED_FLAG_HINT} flag")
         yield from self._iter_process_stdout(cmd, _iter_nonempty_lines)
 
@@ -536,9 +523,7 @@ class Plantri:
             _raise_executable_not_runnable(self.executable, e)
 
         if result.returncode != 0:
-            stderr_excerpt = _summarize_process_text(result.stderr)
-            stdout_excerpt = _summarize_process_text(result.stdout)
-            raise PlantriError(f"plantri: count failed (exit {result.returncode}); stderr={stderr_excerpt}; stdout={stdout_excerpt}")
+            raise PlantriError(f"plantri: count failed (exit {result.returncode}); stderr={_summarize_process_text(result.stderr)}; stdout={_summarize_process_text(result.stdout)}")
 
         # The output class name varies by mode; only the trailing verb is stable.
         for line in reversed(result.stderr.splitlines()):
@@ -550,9 +535,7 @@ class Plantri:
             if match:
                 return int(match.group(1))
 
-        stderr_excerpt = _summarize_process_text(result.stderr)
-        stdout_excerpt = _summarize_process_text(result.stdout)
-        raise PlantriError(f"plantri: count parse failed; stderr={stderr_excerpt}; stdout={stdout_excerpt}")
+        raise PlantriError(f"plantri: count parse failed; stderr={_summarize_process_text(result.stderr)}; stdout={_summarize_process_text(result.stdout)}")
 
 
 class QuadrangulationEnumerator:
