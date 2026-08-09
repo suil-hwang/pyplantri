@@ -6,7 +6,6 @@ from collections.abc import Iterable, Iterator, Mapping
 from types import MappingProxyType
 from typing import Any
 
-from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairEntries, Embedding, HalfEdge
 
 LabelSignature = tuple[str, ...]
@@ -80,6 +79,79 @@ def _match_label_signatures(
         mapping.append(target_idx)
 
     return tuple(mapping)
+
+
+def _extract_right_face_half_edge_cycles(
+    embedding: dict[int, tuple[int, ...]],
+    twin_map: dict[HalfEdge, HalfEdge],
+    *,
+    graph_name: str = "graph",
+) -> tuple[tuple[HalfEdge, ...], ...]:
+    """Validate the twin involution and return exterior-CW right-face orbits."""
+    expected_half_edges = {
+        (vertex, slot_idx)
+        for vertex, neighbors in embedding.items()
+        for slot_idx in range(len(neighbors))
+    }
+    twin_domain = set(twin_map)
+
+    missing_half_edges = expected_half_edges - twin_domain
+    extra_half_edges = twin_domain - expected_half_edges
+    if missing_half_edges:
+        missing_half_edge = min(missing_half_edges)
+        raise ValueError(f"{graph_name} twin_map missing: {missing_half_edge}")
+    if extra_half_edges:
+        extra_half_edge = min(extra_half_edges)
+        raise ValueError(
+            f"{graph_name} twin_map out-of-range source: {extra_half_edge}"
+        )
+
+    for half_edge, twin_half_edge in twin_map.items():
+        if twin_half_edge not in expected_half_edges:
+            raise ValueError(
+                f"{graph_name} twin_map out-of-range target: {half_edge} -> {twin_half_edge}"
+            )
+        if half_edge == twin_half_edge:
+            raise ValueError(f"{graph_name} twin_map self-twin: {half_edge}")
+        if twin_map.get(twin_half_edge) != half_edge:
+            raise ValueError(
+                f"{graph_name} twin_map not involutive: {half_edge} -> {twin_half_edge}"
+            )
+        vertex, slot = half_edge
+        twin_vertex, _ = twin_half_edge
+        if embedding[vertex][slot] != twin_vertex:
+            raise ValueError(
+                f"{graph_name} twin_map endpoint mismatch: {half_edge} -> {twin_half_edge}"
+            )
+
+    visited: set[HalfEdge] = set()
+    face_cycles: list[tuple[HalfEdge, ...]] = []
+
+    for vertex in sorted(embedding):
+        for slot_idx in range(len(embedding[vertex])):
+            start_half_edge = (vertex, slot_idx)
+            if start_half_edge in visited:
+                continue
+
+            face_cycle: list[HalfEdge] = []
+            half_edge = start_half_edge
+
+            while True:
+                visited.add(half_edge)
+                face_cycle.append(half_edge)
+
+                twin_vertex, twin_slot = twin_map[half_edge]
+                # Exterior-view CW rotation: the right-face successor precedes the twin slot.
+                half_edge = (
+                    twin_vertex,
+                    (twin_slot - 1) % len(embedding[twin_vertex]),
+                )
+                if half_edge == start_half_edge:
+                    break
+
+            face_cycles.append(tuple(face_cycle))
+
+    return tuple(face_cycles)
 
 
 class FrozenEdgeMultiplicity(Mapping[tuple[int, int], int]):
@@ -530,7 +602,7 @@ class PlaneGraph:
             return None, None, None, None
 
         try:
-            face_cycles = GraphConverter.extract_face_half_edge_cycles(
+            face_cycles = _extract_right_face_half_edge_cycles(
                 dict(enumerate(embedding)),
                 twin_map,
                 graph_name=graph_name,
@@ -588,28 +660,28 @@ class PlaneGraph:
                 )
             seen_face_pairs.add(face_pair)
 
-    def _vertex_label_signatures(
+    def _vertex_edge_label_signatures(
         self,
         *,
         graph_name: str,
         embedding: Embedding,
-        half_edge_labels: dict[HalfEdge, EdgeLabel],
+        edge_label_by_half_edge: dict[HalfEdge, EdgeLabel],
         errors: list[str],
     ) -> tuple[LabelSignature, ...] | None:
-        signatures: list[LabelSignature] = []
-        for vertex, neighbors in enumerate(embedding):
-            labels: list[EdgeLabel] = []
-            for slot_idx in range(len(neighbors)):
-                half_edge = (vertex, slot_idx)
-                label = half_edge_labels.get(half_edge)
-                if label is None:
+        vertex_edge_label_signatures: list[LabelSignature] = []
+        for vertex, cyclic_neighbors in enumerate(embedding):
+            cyclic_edge_labels: list[EdgeLabel] = []
+            for slot in range(len(cyclic_neighbors)):
+                half_edge = (vertex, slot)
+                edge_label = edge_label_by_half_edge.get(half_edge)
+                if edge_label is None:
                     errors.append(
                         f"{graph_name} vertex uses unlabeled half-edge: {half_edge}"
                     )
                     return None
-                labels.append(label)
-            signatures.append(_label_signature(labels))
-        return tuple(signatures)
+                cyclic_edge_labels.append(edge_label)
+            vertex_edge_label_signatures.append(_label_signature(cyclic_edge_labels))
+        return tuple(vertex_edge_label_signatures)
 
     @staticmethod
     def _validate_bijection(
@@ -967,24 +1039,27 @@ class PlaneGraph:
             errors.append("primal/dual edge label sets mismatch")
             return
 
-        dual_vertex_signatures = self._vertex_label_signatures(
+        dual_vertex_edge_label_signatures = self._vertex_edge_label_signatures(
             graph_name="dual",
             embedding=self.dual_embedding,
-            half_edge_labels=dual_half_edge_labels,
+            edge_label_by_half_edge=dual_half_edge_labels,
             errors=errors,
         )
-        primal_vertex_signatures = self._vertex_label_signatures(
+        primal_vertex_edge_label_signatures = self._vertex_edge_label_signatures(
             graph_name="primal",
             embedding=self.primal_embedding,
-            half_edge_labels=primal_half_edge_labels,
+            edge_label_by_half_edge=primal_half_edge_labels,
             errors=errors,
         )
-        if dual_vertex_signatures is None or primal_vertex_signatures is None:
+        if (
+            dual_vertex_edge_label_signatures is None
+            or primal_vertex_edge_label_signatures is None
+        ):
             return
 
         try:
             reconstructed_dual_vertex_to_primal_face = _match_label_signatures(
-                dual_vertex_signatures,
+                dual_vertex_edge_label_signatures,
                 primal_face_signatures,
                 source_name="dual vertex",
                 target_name="primal face",
@@ -996,7 +1071,7 @@ class PlaneGraph:
                 errors.append("dual_vertex_to_primal_face topology mismatch")
 
             reconstructed_primal_vertex_to_dual_face = _match_label_signatures(
-                primal_vertex_signatures,
+                primal_vertex_edge_label_signatures,
                 dual_face_signatures,
                 source_name="primal vertex",
                 target_name="dual face",

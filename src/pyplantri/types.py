@@ -15,5 +15,5 @@ EdgeLabelPairs = dict[EdgeLabel, tuple[HalfEdge, HalfEdge]]
 # Immutable serialized edge label entries kept on PlaneGraph for reconstruction.
 EdgeLabelPairEntries = tuple[tuple[EdgeLabel, HalfEdge, HalfEdge], ...]
 
-# Canonical embedding: vertex -> exterior-view CW neighbor tuple (0-based)
+# Vertex-indexed exterior-view CW cyclic adjacency (0-based)
 Embedding = tuple[tuple[int, ...], ...]

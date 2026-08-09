@@ -13,7 +13,6 @@ from shutil import which
 from collections.abc import Iterator
 from typing import Literal, NoReturn
 
-from .converter import GraphConverter
 from .types import EdgeLabel, EdgeLabelPairs, HalfEdge
 
 
@@ -33,6 +32,18 @@ class ParsedGraphSection:
     cyclic_adjacency: dict[int, list[int]]
     twin_map: dict[HalfEdge, HalfEdge]
     edge_label_pairs: EdgeLabelPairs
+
+    @property
+    def is_quartic(self) -> bool:
+        """Return whether this nonempty section is 4-regular."""
+        return (
+            self.vertex_count > 0
+            and set(self.cyclic_adjacency) == set(range(1, self.vertex_count + 1))
+            and all(
+                len(neighbors) == 4
+                for neighbors in self.cyclic_adjacency.values()
+            )
+        )
 
 
 _LINE_ORIENTED_OUTPUT_FLAGS = frozenset("agsT")
@@ -580,8 +591,8 @@ class QuadrangulationEnumerator:
         """Classify the two sections as `(primal, dual)`."""
         QuadrangulationEnumerator._validate_cross_section_edge_labels(first_data, second_data)
 
-        first_is_4_regular = GraphConverter.is_4_regular(first_data.cyclic_adjacency)
-        second_is_4_regular = GraphConverter.is_4_regular(second_data.cyclic_adjacency)
+        first_is_4_regular = first_data.is_quartic
+        second_is_4_regular = second_data.is_quartic
 
         if first_is_4_regular == second_is_4_regular:
             raise ValueError(f"double_code quartic classification invalid: ({first_is_4_regular}, {second_is_4_regular})")

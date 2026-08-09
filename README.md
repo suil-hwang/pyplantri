@@ -80,6 +80,12 @@ pip install -e .
 
 CMake automatically builds plantri during installation.
 
+### Version 0.4 API change
+
+Version 0.4 removes the public `GraphConverter` static namespace without an
+alias. Use the enumeration, parsing, and `PlaneGraph.validate()` entry points;
+half-edge traversal remains an internal plane-graph invariant.
+
 ## Output and Cache Safety
 
 - `Plantri.run()` returns raw bytes and supports binary `planar_code`.

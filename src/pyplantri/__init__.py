@@ -1,4 +1,6 @@
 # src/pyplantri/__init__.py
+from importlib import metadata as _metadata
+
 from .cache import (
     CACHE_DEFAULT_CHUNK_SIZE,
     CACHE_FORMAT_VERSION,
@@ -10,7 +12,6 @@ from .cache import (
     save_graphs_to_cache,
     validate_cache_metadata,
 )
-from .converter import GraphConverter
 from .enumeration import (
     EnumerationTiming,
     FilteredEnumerationResult,
@@ -34,7 +35,11 @@ from .plantri import (
     QuadrangulationEnumerator,
 )
 
-__version__ = "0.3.0"
+try:
+    __version__ = _metadata.version("pyplantri")
+except _metadata.PackageNotFoundError:
+    __version__ = "0+unknown"
+
 __all__ = [
     # Plantri wrapper
     "ParsedGraphSection",
@@ -46,8 +51,6 @@ __all__ = [
     "MIN_DUAL_VERTEX_COUNT",
     "MAX_DUAL_VERTEX_COUNT",
     "MAX_DOUBLE_CODE_DUAL_VERTEX_COUNT",
-    # Converter
-    "GraphConverter",
     # Plane Graph model
     "PlaneGraph",
     "FrozenEdgeMultiplicity",
