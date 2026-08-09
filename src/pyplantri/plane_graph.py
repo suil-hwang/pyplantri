@@ -7,10 +7,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from .types import Embedding, HalfEdge
+from .types import Embedding, FaceCycle, HalfEdge, SupportEdge
 
-SupportEdge = tuple[int, int]
-FaceCycle = tuple[int, ...]
 _PICKLE_STATE_FIELDS = frozenset(("twin", "graph_id"))
 
 

@@ -90,34 +90,6 @@ pip install -e .
 
 CMake automatically builds plantri during installation.
 
-### Version 0.5 API change
-
-Version 0.5 removes the former text codec and multi-field builder API without
-aliases. Production enumeration decodes the simple primal `planar_code` stream
-and constructs `QuarticPlaneMap` directly through
-`QuarticPlaneMap.from_primal_embedding()`. The persistent map state is only
-`twin: bytes` and `graph_id`; embeddings, faces, multiplicities, and
-primal-dual maps are derived.
-
-`enumerate_simple_quadrangulation_duals()` is now the sole enumeration API:
-`dual_class` selects the Graph-ID namespace, while `num_workers`, `chunk_size`,
-and `start_method` select the execution policy without changing source order.
-It returns an immutable `PlantriEnumerationResult` containing a tuple of maps,
-the exact `time_to_first_embedding_s` and `remaining_s` timing partition, and
-derived `total_s`. Timing starts after argument validation; an empty stream has
-zero time to first embedding. The former
-`enumerate_simple_quadrangulation_duals_filtered()`,
-`enumerate_simple_quadrangulation_duals_parallel()`,
-`FilteredEnumerationResult`, and `EnumerationTiming` APIs and aliases are
-removed.
-
-## Output and Cache Safety
-
-- `Plantri.iter_planar_code()` is the binary record boundary; generic line iteration remains restricted to line-oriented ASCII formats.
-- Schema-v11 caches store only `QuarticPlaneMap` records in independent pickle chunks, with compact footer manifests and a dense Graph-ID index. Chunk offsets and index layout are derived rather than stored. `load_graph_catalog()` opens cheaply and verifies chunks on access; `audit_all_graphs()` performs an explicit full audit. Cache loading requires `trusted=True`, and older formats must be regenerated.
-- Saving semantically validates graphs by default. Only a producer that just enumerated with `validate=True` should pass `validate_graphs=False`.
-- Loading always uses the restricted unpickler. `validate_graphs=True` semantically validates only the returned prefix; use `audit_all_graphs()` for the complete cache.
-
 ## Number of Non-isomorphic Plane Graphs by n
 
 | n (Q\* vertices) | Q vertices | Non-isomorphic count |

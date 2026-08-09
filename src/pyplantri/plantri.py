@@ -6,15 +6,29 @@ import re
 import subprocess
 import sysconfig
 import tempfile
+from contextlib import ExitStack, suppress
 from enum import Enum
 from importlib.resources import files
 from pathlib import Path
 from shutil import which
 from collections.abc import Iterable, Iterator
-from typing import BinaryIO, Callable, Literal, NoReturn, TypeVar, cast
+from typing import BinaryIO, Literal, cast
 
 from .types import Embedding
 
+
+_LINE_ORIENTED_OUTPUT_FLAGS = frozenset("ags")
+_OUTPUT_FLAGS = frozenset("agsETu")
+# Sorted because frozenset iteration order varies per process; the error message must not.
+_LINE_ORIENTED_FLAG_HINT = "/".join(f"-{flag}" for flag in sorted(_LINE_ORIENTED_OUTPUT_FLAGS))
+
+# One-byte planar_code supports 1..255 labels; bundled input is smaller.
+_ONE_BYTE_PLANAR_CODE_MAX_N = 255
+_BUNDLED_PLANTRI_MAX_N = 64
+
+# Public SQS dual bounds; n=N-2 for a quadrangulation with N primal vertices.
+MIN_DUAL_VERTEX_COUNT = 3
+MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_N - 2
 
 def _summarize_process_text(text: str | bytes, *, limit: int = 400) -> str:
     """Decode and collapse process output into a bounded single-line excerpt."""
@@ -22,12 +36,6 @@ def _summarize_process_text(text: str | bytes, *, limit: int = 400) -> str:
         text = text.decode("utf-8", errors="replace")
     normalized = " ".join(text.split())
     return normalized if len(normalized) <= limit else normalized[: limit - 3] + "..."
-
-
-_LINE_ORIENTED_OUTPUT_FLAGS = frozenset("ags")
-_OUTPUT_FLAGS = frozenset("agsETu")
-# Sorted because frozenset iteration order varies per process; the error message must not.
-_LINE_ORIENTED_FLAG_HINT = "/".join(f"-{flag}" for flag in sorted(_LINE_ORIENTED_OUTPUT_FLAGS))
 
 
 def _selected_plantri_flags(
@@ -66,7 +74,7 @@ def _validate_n_vertices(n_vertices: int) -> None:
         raise ValueError(f"plantri: n_vertices must be a positive int; got {n_vertices!r}")
 
 
-def _is_executable(path: Path) -> bool:
+def _is_executable_candidate(path: Path) -> bool:
     """Return whether path is an executable candidate on this platform."""
     return path.is_file() and (os.name == "nt" or os.access(path, os.X_OK))
 
@@ -79,9 +87,9 @@ def _find_plantri_exe() -> Path:
 
     # The active editable or wheel resource must precede stale local build tags.
     resource_executable = files("pyplantri").joinpath("bin").joinpath(exe_name)
-    if isinstance(resource_executable, Path) and _is_executable(resource_executable):
+    if isinstance(resource_executable, Path) and _is_executable_candidate(resource_executable):
         return resource_executable
-    if _is_executable(fallback_executable):
+    if _is_executable_candidate(fallback_executable):
         return fallback_executable
 
     # scikit-build-core build folder (editable/dev): plantri.py -> pyplantri -> src -> project_root.
@@ -96,24 +104,16 @@ def _find_plantri_exe() -> Path:
         )
         for tag_dir in sorted(tag_dirs, key=lambda path: path.name):
             for candidate in (tag_dir / "Release" / exe_name, tag_dir / exe_name):
-                if _is_executable(candidate):
+                if _is_executable_candidate(candidate):
                     return candidate
 
     path_exe = which(exe_name)
     if path_exe is not None:
         resolved_path_exe = Path(path_exe)
-        if _is_executable(resolved_path_exe):
+        if _is_executable_candidate(resolved_path_exe):
             return resolved_path_exe
 
     return fallback_executable
-
-
-# Bundled plantri limit for one-byte planar_code records.
-_BUNDLED_PLANTRI_MAX_N = 64
-
-# Public SQS dual bounds; n=N-2 for a quadrangulation with N primal vertices.
-MIN_DUAL_VERTEX_COUNT = 3
-MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_N - 2
 
 
 class PlantriError(Exception):
@@ -135,21 +135,23 @@ class QuadrangulationDualClass(str, Enum):
     SIMPLE_QUARTIC = "simple_quartic"
 
 
+def _validate_expected_vertex_count(expected_vertex_count: int | None) -> None:
+    """Validate an optional one-byte planar_code record size."""
+    if expected_vertex_count is not None and (
+        type(expected_vertex_count) is not int
+        or not 1 <= expected_vertex_count <= _ONE_BYTE_PLANAR_CODE_MAX_N
+    ):
+        raise ValueError(f"expected_vertex_count must be None or 1..{_ONE_BYTE_PLANAR_CODE_MAX_N} int: {expected_vertex_count!r}")
+
+
 def iter_planar_code(
     stream: BinaryIO,
     *,
     expected_vertex_count: int | None = None,
     chunk_size: int = 65_536,
 ) -> Iterator[Embedding]:
-    """Decode headerless one-byte planar_code records from ``stream``."""
-    if expected_vertex_count is not None and (
-        type(expected_vertex_count) is not int
-        or not 1 <= expected_vertex_count <= _BUNDLED_PLANTRI_MAX_N
-    ):
-        raise ValueError(
-            "expected_vertex_count must be None or an int in "
-            f"[1, {_BUNDLED_PLANTRI_MAX_N}], got {expected_vertex_count!r}"
-        )
+    """Decode headerless planar_code records with one-byte sizes in 1..255."""
+    _validate_expected_vertex_count(expected_vertex_count)
     if type(chunk_size) is not int or chunk_size <= 0:
         raise ValueError(f"chunk_size must be a positive int, got {chunk_size!r}")
 
@@ -168,94 +170,32 @@ def _decode_planar_code_chunks(
 
     record_index = 0
     vertex_count: int | None = None
-    cyclic_adjacency: list[tuple[int, ...]] = []
+    adjacency_rows: list[tuple[int, ...]] = []
     neighbors: list[int] = []
 
     for chunk in chunks:
         for value in chunk:
             if vertex_count is None:
                 if value == 0:
-                    raise PlanarCodeError(
-                        f"record {record_index}: extended planar_code is unsupported"
-                    )
-                if value > _BUNDLED_PLANTRI_MAX_N:
-                    raise PlanarCodeError(
-                        f"record {record_index}: vertex count {value} exceeds "
-                        f"bundled MAXN={_BUNDLED_PLANTRI_MAX_N}"
-                    )
+                    raise PlanarCodeError(f"record {record_index}: extended planar_code is unsupported")
                 if expected_vertex_count is not None and value != expected_vertex_count:
-                    raise PlanarCodeError(
-                        f"record {record_index}: vertex count {value} != "
-                        f"expected {expected_vertex_count}"
-                    )
+                    raise PlanarCodeError(f"record {record_index}: vertex count {value} != expected {expected_vertex_count}")
                 vertex_count = value
-                continue
-
-            if value:
+            elif value:
                 if value > vertex_count:
-                    raise PlanarCodeError(
-                        f"record {record_index}, vertex {len(cyclic_adjacency)}: "
-                        f"neighbor {value} outside [1, {vertex_count}]"
-                    )
+                    raise PlanarCodeError(f"record {record_index}, vertex {len(adjacency_rows)}: neighbor {value} outside [1, {vertex_count}]")
                 neighbors.append(value - 1)
-                continue
-
-            cyclic_adjacency.append(tuple(neighbors))
-            neighbors = []
-            if len(cyclic_adjacency) == vertex_count:
-                yield tuple(cyclic_adjacency)
-                record_index += 1
-                vertex_count = None
-                cyclic_adjacency = []
+            else:
+                adjacency_rows.append(tuple(neighbors))
+                neighbors.clear()
+                if len(adjacency_rows) == vertex_count:
+                    yield tuple(adjacency_rows)
+                    record_index += 1
+                    vertex_count = None
+                    adjacency_rows.clear()
 
     if vertex_count is not None:
-        raise PlanarCodeError(
-            f"record {record_index}: truncated at vertex {len(cyclic_adjacency)}"
-        )
-
-
-_StreamItem = TypeVar("_StreamItem")
-
-
-def _iter_nonempty_lines(stream: BinaryIO) -> Iterator[bytes]:
-    """Yield stripped nonempty binary lines."""
-    for raw_line in stream:
-        if line := raw_line.strip():
-            yield line
-
-
-def _iter_growing_file_chunks(
-    stream: BinaryIO,
-    process: subprocess.Popen[bytes],
-) -> Iterator[bytes]:
-    """Follow a regular file until its writer exits, then drain it."""
-    while True:
-        if chunk := stream.read(65_536):
-            yield chunk
-        elif process.poll() is not None:
-            if chunk := stream.read(65_536):
-                yield chunk
-            else:
-                return
-        else:
-            try:
-                process.wait(timeout=0.01)
-            except subprocess.TimeoutExpired:
-                pass
-
-
-def _raise_executable_not_found(executable: Path) -> NoReturn:
-    raise PlantriExecutableNotFoundError(f"plantri: executable not found {executable}; run 'pip install -e .' or add plantri to PATH")
-
-
-def _raise_executable_not_runnable(
-    executable: Path,
-    error: OSError | None = None,
-) -> NoReturn:
-    message = f"plantri: executable is not runnable {executable}"
-    if error is not None:
-        message = f"{message}: {error}"
-    raise PlantriError(message) from error
+        raise PlanarCodeError(f"record {record_index}: truncated at vertex {len(adjacency_rows)}")
 
 
 class Plantri:
@@ -270,9 +210,9 @@ class Plantri:
         )
         self.executable = candidate.resolve()
         if not self.executable.is_file():
-            _raise_executable_not_found(self.executable)
-        if not _is_executable(self.executable):
-            _raise_executable_not_runnable(self.executable)
+            raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}; run 'pip install -e .' or add plantri to PATH")
+        if not _is_executable_candidate(self.executable):
+            raise PlantriError(f"plantri: executable is not runnable {self.executable}")
 
     def run(
         self,
@@ -283,31 +223,34 @@ class Plantri:
         """Runs plantri with the given parameters."""
         cmd = self._build_command(n_vertices, options=options, output_format=output_format)
 
-        try:
+        with ExitStack() as stack:
+            output_path: Path | None = None
             if output_format == "planar_code":
-                with tempfile.TemporaryDirectory(prefix="pyplantri-") as temp_dir:
-                    output_path = Path(temp_dir) / "output.planar_code"
-                    result = subprocess.run(
-                        [*cmd, str(output_path)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                        check=True,
-                    )
-                    try:
-                        return output_path.read_bytes()
-                    except OSError as exc:
-                        raise PlantriError(
-                            "plantri: planar_code output was not created"
-                        ) from exc
+                temp_dir = stack.enter_context(tempfile.TemporaryDirectory(prefix="pyplantri-"))
+                output_path = Path(temp_dir) / "output.planar_code"
 
-            result = subprocess.run(cmd, capture_output=True, check=True)
-            return result.stdout
-        except subprocess.CalledProcessError as e:
-            raise PlantriError(f"plantri: execution failed (exit {e.returncode}); {_summarize_process_text(e.stderr or str(e))}") from e
-        except FileNotFoundError as e:
-            raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
-        except OSError as e:
-            _raise_executable_not_runnable(self.executable, e)
+            try:
+                result = subprocess.run(
+                    [*cmd, str(output_path)] if output_path is not None else cmd,
+                    stdout=subprocess.DEVNULL if output_path is not None else subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as e:
+                raise PlantriError(f"plantri: execution failed (exit {e.returncode}); {_summarize_process_text(e.stderr or str(e))}") from e
+            except FileNotFoundError as e:
+                raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
+            except OSError as e:
+                raise PlantriError(f"plantri: executable is not runnable {self.executable}: {_summarize_process_text(str(e))}") from e
+
+            if output_path is None:
+                return cast(bytes, result.stdout)
+            try:
+                return output_path.read_bytes()
+            except FileNotFoundError as e:
+                raise PlantriError("plantri: planar_code output was not created") from e
+            except OSError as e:
+                raise PlantriError(f"plantri: failed to read planar_code output: {_summarize_process_text(str(e))}") from e
 
     def _build_command(
         self,
@@ -318,18 +261,16 @@ class Plantri:
     ) -> list[str]:
         """Builds a plantri command line for the given options."""
         if output_format not in ("planar_code", "ascii"):
-            raise ValueError(f"plantri: unsupported output_format {output_format!r}; use 'planar_code' or 'ascii'")
+            raise ValueError(f"plantri: unsupported output_format {output_format!r}")
         _validate_n_vertices(n_vertices)
         requested_output_flags = _selected_plantri_flags(options, _OUTPUT_FLAGS)
         if "T" in requested_output_flags:
-            raise ValueError("plantri: -T output is unsupported; use planar_code")
+            raise ValueError("plantri: -T output is unsupported")
         effective_output_flags = requested_output_flags | (
             {"a"} if output_format == "ascii" else set()
         )
         if len(effective_output_flags) > 1:
-            formatted_flags = ", ".join(
-                f"-{flag}" for flag in sorted(effective_output_flags)
-            )
+            formatted_flags = ", ".join(f"-{flag}" for flag in sorted(effective_output_flags))
             raise ValueError(f"plantri: conflicting output flags: {formatted_flags}")
 
         cmd = [str(self.executable)]
@@ -342,83 +283,80 @@ class Plantri:
         cmd.append(str(n_vertices))
         return cmd
 
-    def _iter_process_stdout(
+    def _iter_nonempty_stdout_lines(
         self,
         cmd: list[str],
-        decoder: Callable[[BinaryIO], Iterator[_StreamItem]],
-    ) -> Iterator[_StreamItem]:
-        """Decode one plantri stdout stream and own its process lifecycle."""
+    ) -> Iterator[bytes]:
+        """Yield nonempty output lines and own the process lifecycle."""
         # Spool stderr to disk so long streams cannot deadlock on a full pipe.
         with tempfile.TemporaryFile() as stderr_file:
             try:
-                proc = subprocess.Popen(
+                process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=stderr_file,
                 )
             except FileNotFoundError as e:
-                raise PlantriExecutableNotFoundError(
-                    f"plantri: executable not found {self.executable}"
-                ) from e
+                raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
             except OSError as e:
-                _raise_executable_not_runnable(self.executable, e)
+                raise PlantriError(f"plantri: executable is not runnable {self.executable}: {_summarize_process_text(str(e))}") from e
 
-            if proc.stdout is None:
-                proc.kill()
-                proc.wait()
+            if process.stdout is None:
+                process.kill()
+                process.wait()
                 raise PlantriError("plantri: failed to capture stdout")
 
-            fully_consumed = False
-            try:
-                yield from decoder(cast(BinaryIO, proc.stdout))
-                fully_consumed = True
-            finally:
-                proc.stdout.close()
-                self._finish_process(
-                    proc,
-                    cast(BinaryIO, stderr_file),
-                    fully_consumed=fully_consumed,
-                )
+            with cast(BinaryIO, process.stdout) as stdout:
+                stream_exhausted = False
+                try:
+                    for raw_line in stdout:
+                        if line := raw_line.strip():
+                            yield line
+                    stream_exhausted = True
+                finally:
+                    self._finalize_stream_process(
+                        process,
+                        cast(BinaryIO, stderr_file),
+                        stream_exhausted=stream_exhausted,
+                    )
 
     @staticmethod
-    def _finish_process(
+    def _finalize_stream_process(
         process: subprocess.Popen[bytes],
         stderr_file: BinaryIO,
         *,
-        fully_consumed: bool,
+        stream_exhausted: bool,
     ) -> None:
         """Check a natural exit or stop an intentionally shortened stream."""
-        if fully_consumed:
+        return_code = process.poll()
+        if stream_exhausted or return_code is not None:
             return_code = process.wait()
             if return_code != 0:
                 stderr_file.seek(0)
                 stderr_excerpt = _summarize_process_text(stderr_file.read(), limit=4000)
-                raise PlantriError(
-                    f"plantri: execution failed (exit {return_code}); {stderr_excerpt}"
-                ) from None
-        elif process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                raise PlantriError(f"plantri: execution failed (exit {return_code}); {stderr_excerpt}") from None
+            return
+
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def iter_planar_code(
         self,
         n_vertices: int,
         options: list[str] | None = None,
+        *,
+        expected_vertex_count: int | None = None,
     ) -> Iterator[Embedding]:
-        """Stream headerless one-byte planar_code as zero-based embeddings."""
+        """Stream records, optionally asserting their output vertex count."""
+        _validate_expected_vertex_count(expected_vertex_count)
         selected_output_flags = _selected_plantri_flags(options, _OUTPUT_FLAGS)
         if selected_output_flags:
-            formatted_flags = ", ".join(
-                f"-{flag}" for flag in sorted(selected_output_flags)
-            )
-            raise ValueError(
-                "plantri: iter_planar_code conflicts with output flags: "
-                f"{formatted_flags}"
-            )
+            formatted_flags = ", ".join(f"-{flag}" for flag in sorted(selected_output_flags))
+            raise ValueError(f"plantri: iter_planar_code conflicts with output flags: {formatted_flags}")
 
         cmd = self._build_command(
             n_vertices,
@@ -441,45 +379,39 @@ class Plantri:
                     stderr=stderr_file,
                 )
             except FileNotFoundError as e:
-                raise PlantriExecutableNotFoundError(
-                    f"plantri: executable not found {self.executable}"
-                ) from e
+                raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
             except OSError as e:
-                _raise_executable_not_runnable(self.executable, e)
+                raise PlantriError(f"plantri: executable is not runnable {self.executable}: {_summarize_process_text(str(e))}") from e
 
-            output_file: BinaryIO | None = None
-            fully_consumed = False
+            stream_exhausted = False
+            writer_exited = False
             try:
-                while output_file is None:
+                while True:
                     try:
                         output_file = output_path.open("rb")
+                        break
                     except (FileNotFoundError, PermissionError):
-                        if process.poll() is not None:
-                            try:
-                                output_file = output_path.open("rb")
-                            except (FileNotFoundError, PermissionError):
-                                fully_consumed = True
-                                raise PlantriError(
-                                    "plantri: planar_code output was not created"
-                                )
-                        else:
-                            try:
-                                process.wait(timeout=0.01)
-                            except subprocess.TimeoutExpired:
-                                pass
+                        if writer_exited:
+                            raise PlantriError("plantri: planar_code output was not created")
+                        with suppress(subprocess.TimeoutExpired):
+                            process.wait(timeout=0.01)
+                            writer_exited = True
 
-                yield from _decode_planar_code_chunks(
-                    _iter_growing_file_chunks(output_file, process),
-                    expected_vertex_count=n_vertices,
-                )
-                fully_consumed = True
+                with output_file:
+                    def read_chunk() -> bytes:
+                        while not (chunk := output_file.read(65_536)):
+                            with suppress(subprocess.TimeoutExpired):
+                                process.wait(timeout=0.01)
+                                return output_file.read(65_536)
+                        return chunk
+
+                    yield from _decode_planar_code_chunks(iter(read_chunk, b""), expected_vertex_count=expected_vertex_count)
+                    stream_exhausted = True
             finally:
-                if output_file is not None:
-                    output_file.close()
-                self._finish_process(
+                self._finalize_stream_process(
                     process,
                     cast(BinaryIO, stderr_file),
-                    fully_consumed=fully_consumed,
+                    stream_exhausted=stream_exhausted,
                 )
 
     def iter_stdout_lines(
@@ -492,8 +424,8 @@ class Plantri:
         cmd = self._build_command(n_vertices, options=options, output_format=output_format)
         # Binary planar_code may contain newline bytes, so streaming requires a line format.
         if output_format != "ascii" and not _selected_plantri_flags(options, _LINE_ORIENTED_OUTPUT_FLAGS):
-            raise ValueError(f"plantri: iter_stdout_lines requires line-oriented output; use output_format='ascii' or a {_LINE_ORIENTED_FLAG_HINT} flag")
-        yield from self._iter_process_stdout(cmd, _iter_nonempty_lines)
+            raise ValueError(f"plantri: line output requires output_format='ascii' or {_LINE_ORIENTED_FLAG_HINT}")
+        yield from self._iter_nonempty_stdout_lines(cmd)
 
     def count_from_options(
         self,
@@ -501,41 +433,37 @@ class Plantri:
         options: list[str] | None = None,
         timeout: float = 3600.0,
     ) -> int:
-        """Counts graphs with arbitrary generation options via plantri ``-u``."""
+        """Count graphs selected by plantri switch options via ``-u``."""
         _validate_n_vertices(n_vertices)
-        normalized_options = _without_plantri_flags(
+        count_options = _without_plantri_flags(
             options,
             _OUTPUT_FLAGS,
         )
 
         try:
             result = subprocess.run(
-                [str(self.executable)] + normalized_options + ["-u", str(n_vertices)],
+                [str(self.executable), *count_options, "-u", str(n_vertices)],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:
-            raise PlantriError(f"plantri: timed out after {timeout}s for n={n_vertices}, options={normalized_options}") from e
+            raise PlantriError(f"plantri: timed out after {timeout}s for n={n_vertices}, options={count_options}") from e
         except FileNotFoundError as e:
             raise PlantriExecutableNotFoundError(f"plantri: executable not found {self.executable}") from e
         except OSError as e:
-            _raise_executable_not_runnable(self.executable, e)
+            raise PlantriError(f"plantri: executable is not runnable {self.executable}: {_summarize_process_text(str(e))}") from e
 
         if result.returncode != 0:
-            raise PlantriError(f"plantri: count failed (exit {result.returncode}); stderr={_summarize_process_text(result.stderr)}; stdout={_summarize_process_text(result.stdout)}")
+            detail = _summarize_process_text(result.stderr) or _summarize_process_text(result.stdout) or "no output"
+            raise PlantriError(f"plantri: count failed (exit {result.returncode}): {detail}")
 
-        # The output class name varies by mode; only the trailing verb is stable.
-        for line in reversed(result.stderr.splitlines()):
-            match = re.match(
-                r"^\s*(\d+)\s+.*\b(?:generated|written)\b",
-                line,
-                flags=re.IGNORECASE,
-            )
-            if match:
-                return int(match.group(1))
+        # With -u, the final summary is always "<count> <class> generated".
+        if generated_counts := re.findall(r"(?im)^\s*(\d+)\s+.*\bgenerated\b", result.stderr):
+            return int(generated_counts[-1])
 
-        raise PlantriError(f"plantri: count parse failed; stderr={_summarize_process_text(result.stderr)}; stdout={_summarize_process_text(result.stdout)}")
+        detail = _summarize_process_text(result.stderr) or _summarize_process_text(result.stdout) or "no output"
+        raise PlantriError(f"plantri: count parse failed: {detail}")
 
 
 class QuadrangulationEnumerator:
@@ -547,11 +475,13 @@ class QuadrangulationEnumerator:
     - `SIMPLE_QUARTIC`: `-q -c2 -h`
     """
 
-    _FLAGS_BY_DUAL_CLASS: dict[QuadrangulationDualClass, list[str]] = {
-        QuadrangulationDualClass.QUARTIC_MULTIGRAPH: ["-q", "-c2", "-m2"],
-        QuadrangulationDualClass.SIMPLE_QUARTIC: ["-q", "-c2"],
+    _PLANTRI_OPTIONS_BY_DUAL_CLASS: dict[
+        QuadrangulationDualClass, tuple[str, ...]
+    ] = {
+        QuadrangulationDualClass.QUARTIC_MULTIGRAPH: ("-q", "-c2", "-m2"),
+        QuadrangulationDualClass.SIMPLE_QUARTIC: ("-q", "-c2"),
     }
-    _MIN_NONEMPTY_DUAL_VERTICES: dict[QuadrangulationDualClass, int] = {
+    _MIN_NONEMPTY_DUAL_VERTEX_COUNT_BY_CLASS: dict[QuadrangulationDualClass, int] = {
         QuadrangulationDualClass.QUARTIC_MULTIGRAPH: MIN_DUAL_VERTEX_COUNT,
         QuadrangulationDualClass.SIMPLE_QUARTIC: 6,
     }
@@ -562,6 +492,7 @@ class QuadrangulationEnumerator:
         self._plantri: Plantri | None = None
 
     def _get_plantri(self) -> Plantri:
+        """Return the shared lazily initialized Plantri wrapper."""
         if self._plantri is None:
             self._plantri = Plantri()
         return self._plantri
@@ -578,18 +509,11 @@ class QuadrangulationEnumerator:
             raise ValueError(f"unsupported quadrangulation dual_class: {dual_class!r}") from exc
 
     @classmethod
-    def _flags_for_dual_class(
-        cls,
-        dual_class: QuadrangulationDualClass,
-    ) -> list[str]:
-        return list(cls._FLAGS_BY_DUAL_CLASS[dual_class])
-
-    @classmethod
-    def _min_nonempty_dual_vertices(
+    def _min_nonempty_dual_vertex_count(
         cls,
         dual_class: QuadrangulationDualClass,
     ) -> int:
-        return cls._MIN_NONEMPTY_DUAL_VERTICES[dual_class]
+        return cls._MIN_NONEMPTY_DUAL_VERTEX_COUNT_BY_CLASS[dual_class]
 
     @staticmethod
     def _validate_supported_dual_vertex_count(dual_vertex_count: int) -> None:
@@ -610,13 +534,14 @@ class QuadrangulationEnumerator:
         """Yield zero-based exterior-view-CW simple primal embeddings."""
         self._validate_supported_dual_vertex_count(dual_vertex_count)
         resolved_dual_class = self._normalize_dual_class(dual_class)
-        if dual_vertex_count < self._min_nonempty_dual_vertices(resolved_dual_class):
+        if dual_vertex_count < self._min_nonempty_dual_vertex_count(resolved_dual_class):
             return
         # Euler's formula and quadrilateral faces give V_primal = V_dual + 2.
         primal_vertex_count = dual_vertex_count + 2
         yield from self._get_plantri().iter_planar_code(
             primal_vertex_count,
-            self._flags_for_dual_class(resolved_dual_class),
+            list(self._PLANTRI_OPTIONS_BY_DUAL_CLASS[resolved_dual_class]),
+            expected_vertex_count=primal_vertex_count,
         )
 
     def count(
@@ -628,10 +553,10 @@ class QuadrangulationEnumerator:
         """Count plane-map isomorphism classes, identifying mirror images."""
         self._validate_supported_dual_vertex_count(dual_vertex_count)
         resolved_dual_class = self._normalize_dual_class(dual_class)
-        if dual_vertex_count < self._min_nonempty_dual_vertices(resolved_dual_class):
+        if dual_vertex_count < self._min_nonempty_dual_vertex_count(resolved_dual_class):
             return 0
         primal_vertex_count = dual_vertex_count + 2
         return self._get_plantri().count_from_options(
             primal_vertex_count,
-            options=self._flags_for_dual_class(resolved_dual_class),
+            options=list(self._PLANTRI_OPTIONS_BY_DUAL_CLASS[resolved_dual_class]),
         )

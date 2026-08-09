@@ -71,10 +71,7 @@ def enumerate_simple_quadrangulation_duals(
     chunk_size: int | None = None,
     start_method: str | None = None,
 ) -> PlantriEnumerationResult:
-    """Materialize dual plane maps of simple quadrangulations in source order.
-
-    ``max_count`` bounds the source prefix; ``chunk_size`` is the pool chunksize.
-    """
+    """Materialize source-ordered dual maps of simple quadrangulations."""
     if max_count is not None and (type(max_count) is not int or max_count < 0):
         raise ValueError(f"max_count must be None or a non-negative int, got {max_count!r}")
     for name, value in (("num_workers", num_workers), ("chunk_size", chunk_size)):
@@ -95,7 +92,7 @@ def enumerate_simple_quadrangulation_duals(
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
 
     enumeration_started_at = time.perf_counter()
-    if max_count == 0 or dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertices(resolved_dual_class):
+    if max_count == 0 or dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertex_count(resolved_dual_class):
         return PlantriEnumerationResult(
             graphs=(),
             time_to_first_embedding_s=0.0,
@@ -108,34 +105,29 @@ def enumerate_simple_quadrangulation_duals(
             dual_class=resolved_dual_class,
         )
     )
+    selected_primal_embeddings = (
+        islice(primal_embedding_iter, max_count)
+        if max_count is not None
+        else primal_embedding_iter
+    )
     try:
-        prefetched_primal_embeddings = list(islice(primal_embedding_iter, 1))
+        prefetched_primal_embeddings = list(islice(selected_primal_embeddings, 1))
         time_to_first_embedding_s = (
             time.perf_counter() - enumeration_started_at
             if prefetched_primal_embeddings
             else 0.0
         )
 
-        worker_count = num_workers
-        if worker_count is None:
-            worker_count = max(
-                1,
-                min(os.cpu_count() or 4, _MAX_AUTO_WORKERS),
-            )
-        pool_chunk_size = (
-            chunk_size if chunk_size is not None else _DEFAULT_POOL_CHUNK_SIZE
-        )
-        required_pool_records = max(
-            _MIN_POOL_RECORDS,
-            pool_chunk_size * 2,
-        )
+        worker_count = num_workers if num_workers is not None else max(1, min(os.cpu_count() or 4, _MAX_AUTO_WORKERS))
+        pool_chunk_size = chunk_size if chunk_size is not None else _DEFAULT_POOL_CHUNK_SIZE
+        required_pool_records = max(_MIN_POOL_RECORDS, pool_chunk_size * 2)
         use_pool = bool(prefetched_primal_embeddings) and worker_count > 1 and (
             max_count is None or max_count >= required_pool_records
         )
         if use_pool:
             prefetched_primal_embeddings.extend(
                 islice(
-                    primal_embedding_iter,
+                    selected_primal_embeddings,
                     required_pool_records - len(prefetched_primal_embeddings),
                 )
             )
@@ -150,27 +142,15 @@ def enumerate_simple_quadrangulation_duals(
                 main_path = Path(raw_main_path) if isinstance(raw_main_path, str) and raw_main_path else None
                 if (
                     main_path is None
-                    or (
-                        main_path.name.startswith("<")
-                        and main_path.name.endswith(">")
-                    )
+                    or (main_path.name.startswith("<") and main_path.name.endswith(">"))
                     or not main_path.is_file()
                 ):
                     warnings.warn(f"{resolved_start_method} requires importable __main__; using sequential", RuntimeWarning, stacklevel=2)
                     mp_context = None
 
-        used_parallel_workers = mp_context is not None
-
-        selected_primal_embeddings = chain(
-            prefetched_primal_embeddings,
-            primal_embedding_iter,
+        indexed_primal_embeddings = enumerate(
+            chain(prefetched_primal_embeddings, selected_primal_embeddings)
         )
-        if max_count is not None:
-            selected_primal_embeddings = islice(
-                selected_primal_embeddings,
-                max_count,
-            )
-        indexed_primal_embeddings = enumerate(selected_primal_embeddings)
         build_plane_map = partial(
             _build_quartic_plane_map_task,
             validate=validate,
@@ -180,11 +160,7 @@ def enumerate_simple_quadrangulation_duals(
             pool = mp_context.Pool(processes=worker_count)
             try:
                 plane_maps = tuple(
-                    pool.imap(
-                        build_plane_map,
-                        indexed_primal_embeddings,
-                        pool_chunk_size,
-                    )
+                    pool.imap(build_plane_map, indexed_primal_embeddings, pool_chunk_size)
                 )
             except BaseException:
                 pool.terminate()
@@ -201,12 +177,11 @@ def enumerate_simple_quadrangulation_duals(
             close()
 
     elapsed_s = time.perf_counter() - enumeration_started_at
-    result = PlantriEnumerationResult(
+    if verbose:
+        execution_mode = "parallel" if mp_context is not None else "sequential"
+        print(f"[Plantri] {resolved_dual_class.value} n={dual_vertex_count}: {len(plane_maps)} maps ({execution_mode} map construction)")
+    return PlantriEnumerationResult(
         graphs=plane_maps,
         time_to_first_embedding_s=time_to_first_embedding_s,
         remaining_s=elapsed_s - time_to_first_embedding_s,
     )
-    if verbose:
-        execution_mode = "parallel" if used_parallel_workers else "sequential"
-        print(f"[Plantri] {resolved_dual_class.value} n={dual_vertex_count}: {len(plane_maps)} maps ({execution_mode} map construction)")
-    return result

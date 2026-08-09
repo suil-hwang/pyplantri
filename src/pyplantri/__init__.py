@@ -7,7 +7,6 @@ from .cache import (
     CacheGraphClass,
     CacheMetadata,
     QuarticPlaneMapCatalog,
-    load_graph_catalog,
     load_graphs_from_cache,
     save_graphs_to_cache,
     validate_cache_metadata,
@@ -54,7 +53,6 @@ __all__ = [
     "CACHE_DEFAULT_CHUNK_SIZE",
     "CACHE_FORMAT_VERSION",
     "save_graphs_to_cache",
-    "load_graph_catalog",
     "load_graphs_from_cache",
     "validate_cache_metadata",
     # Enumeration
