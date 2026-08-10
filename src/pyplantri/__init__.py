@@ -14,6 +14,7 @@ from .cache import (
 from .enumeration import (
     PlantriEnumerationResult,
     enumerate_simple_quadrangulation_duals,
+    iter_simple_quadrangulation_duals,
 )
 from .plane_graph import QuarticPlaneMap
 from .plantri_interface import (
@@ -56,6 +57,7 @@ __all__ = [
     "load_graphs_from_cache",
     "validate_cache_metadata",
     # Enumeration
+    "iter_simple_quadrangulation_duals",
     "enumerate_simple_quadrangulation_duals",
     "PlantriEnumerationResult",
 ]

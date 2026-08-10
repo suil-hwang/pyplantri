@@ -62,6 +62,25 @@ For plane graphs: `V - E + F = 2`
 
 **Input Constraint:** The bundled count and materialization paths support `3 <= n <= 62`. The `SIMPLE_QUARTIC` family is empty for `n < 6`. The full literature `QUARTIC_MULTIGRAPH` family also contains the square's two-vertex dual, which lies outside this wrapper's supported range.
 
+### Streaming enumeration
+
+`iter_simple_quadrangulation_duals()` is the source-ordered primitive and does
+not materialize the complete result tuple; its sequential path retains bounded
+Python graph state. Close a partially consumed iterator explicitly.
+`enumerate_simple_quadrangulation_duals()` is the bounded-workload collector and
+materializes the same stream as a tuple; library calls do not write progress
+messages to stdout.
+
+`num_workers=1` is always sequential, an explicit value above one requests that
+many processes, and `None` selects up to 16 usable CPUs. For a finite
+`max_count`, the effective process count is capped by the number of task chunks.
+`save_graphs_to_cache()` accepts a one-pass iterable; an unsized iterable must
+provide `graph_count` (and an empty iterable must also provide
+`dual_vertex_count`). This can bound retained Python graph objects, but a process
+pool may buffer in-flight results, the growing planar-code file may grow with the
+producer, the v11 dense Graph-ID index remains `O(N)`, and priority-order
+generation still requires the caller's global sort.
+
 `QuarticPlaneMap` numbers the four clockwise darts at vertex `v` as
 `4*v, ..., 4*v+3` and stores only the opposite-dart involution `twin` plus the
 source-stream `graph_id`. The rotation is implicit, so dual adjacency, support

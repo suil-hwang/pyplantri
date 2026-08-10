@@ -10,8 +10,9 @@ import pickle
 import struct
 import tempfile
 from collections import OrderedDict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence, Sized
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -404,34 +405,12 @@ def _validate_graph_envelope(
     return graph_id
 
 
-def _resolve_dual_vertex_count(
-    graphs: list[QuarticPlaneMap],
-    dual_vertex_count: int | None,
-) -> int:
-    """Infer or validate the dual vertex count when saving."""
-    if type(graphs) is not list:
-        raise ValueError(f"cache: invalid graphs type {type(graphs).__name__}")
-    if dual_vertex_count is None:
-        if not graphs:
-            raise ValueError("cache: dual_vertex_count required for empty graphs")
-        first_graph = graphs[0]
-        if type(first_graph) is not QuarticPlaneMap:
-            raise ValueError(f"cache: invalid graph 0 type {type(first_graph).__name__}")
-        dual_vertex_count = first_graph.dual_num_vertices
-    _require_int_at_least(
-        dual_vertex_count,
-        field_name="dual_vertex_count",
-        minimum=3,
-    )
-    return dual_vertex_count
-
-
 def _validate_graph_semantics_one(
     graph: QuarticPlaneMap,
     graph_index: int,
 ) -> None:
     """Reject one graph whose complete domain invariants fail."""
-    is_valid, errors = graph.validate()
+    is_valid, errors = graph.audit_sqs_topology()
     if is_valid:
         return
     summary = " ".join(str(errors[0]).splitlines()) if errors else "validation failed"
@@ -440,47 +419,34 @@ def _validate_graph_semantics_one(
     raise ValueError(f"cache: invalid graph {graph_index}: {summary}")
 
 
-def _prepare_graph_payload(
+def _encode_graph_chunk(
     graphs: list[QuarticPlaneMap],
     *,
-    metadata: CacheMetadata,
-    filepath: Path,
-    validate_graphs: bool,
-) -> bytearray:
-    """Validate the save envelope and build graph-ID index data."""
-    if (
-        metadata.graph_class == "simple_quartic"
-        and graphs
-        and metadata.dual_vertex_count < 6
-    ):
-        raise ValueError(f"cache: nonempty simple_quartic n={metadata.dual_vertex_count}<6 ({filepath})")
-
-    width: Literal[4, 8] = (
-        4 if metadata.graph_count <= _UINT32_LIMIT else 8
-    )
-    pack_index = struct.Struct(
-        "<I" if width == 4 else "<Q"
-    ).pack_into
-    seen_graph_ids = bytearray(metadata.graph_count)
-    index_payload = bytearray(metadata.graph_count * width)
-    for stored_index, graph in enumerate(graphs):
-        graph_id = _validate_graph_envelope(
-            graph,
-            metadata,
-            graph_index=stored_index,
-            filepath=filepath,
+    compression: _Compression,
+    compress_level: int,
+) -> bytes:
+    """Encode one bounded list chunk using deterministic cache settings."""
+    buffer = io.BytesIO()
+    if compression == "gzip":
+        with gzip.GzipFile(
+            filename="",
+            mode="wb",
+            compresslevel=compress_level,
+            fileobj=buffer,
+            mtime=0,
+        ) as chunk_stream:
+            pickle.dump(
+                graphs,
+                chunk_stream,
+                protocol=_CACHE_PICKLE_PROTOCOL,
+            )
+    else:
+        pickle.dump(
+            graphs,
+            buffer,
+            protocol=_CACHE_PICKLE_PROTOCOL,
         )
-        if seen_graph_ids[graph_id]:
-            raise ValueError(f"cache: duplicate graph_id={graph_id} ({filepath})")
-        seen_graph_ids[graph_id] = 1
-        if validate_graphs:
-            _validate_graph_semantics_one(graph, stored_index)
-        pack_index(
-            index_payload,
-            graph_id * width,
-            stored_index,
-        )
-    return index_payload
+    return buffer.getvalue()
 
 
 def _open_manifest(
@@ -763,9 +729,10 @@ def load_graphs_from_cache(
 
 
 def save_graphs_to_cache(
-    graphs: list[QuarticPlaneMap],
+    graphs: Iterable[QuarticPlaneMap],
     filepath: str | Path,
     *,
+    graph_count: int | None = None,
     dual_vertex_count: int | None = None,
     graph_class: _CacheGraphClassInput,
     compress: bool = True,
@@ -775,7 +742,7 @@ def save_graphs_to_cache(
     storage_order_version: int = 1,
     validate_graphs: bool = True,
 ) -> Path:
-    """Save a dense-ID footer-manifest cache atomically."""
+    """Save an expected-size graph stream as a dense-ID cache atomically."""
     _require_bool(compress, field_name="compress")
     if type(compress_level) is not int or not 0 <= compress_level <= 9:
         raise ValueError(f"cache: invalid compress_level={compress_level!r}")
@@ -800,100 +767,182 @@ def save_graphs_to_cache(
     )
     resolved_path = Path(filepath)
     compression: _Compression = "gzip" if compress else "none"
-    resolved_dual_vertex_count = _resolve_dual_vertex_count(
-        graphs,
-        dual_vertex_count,
-    )
-    metadata = CacheMetadata(
-        format_version=CACHE_FORMAT_VERSION,
-        dual_vertex_count=resolved_dual_vertex_count,
-        graph_count=len(graphs),
-        graph_class=resolved_graph_class,
-        storage_order_name=storage_order_name,
-        storage_order_version=storage_order_version,
-    )
-    index_payload = _prepare_graph_payload(
-        graphs,
-        metadata=metadata,
-        filepath=resolved_path,
-        validate_graphs=validate_graphs,
-    )
-
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(dir=resolved_path.parent, suffix=".tmp")
-    temporary_path = Path(temporary_name)
     try:
-        with open(fd, "wb") as stream:
-            chunks: list[tuple[int, str]] = []
-            for first_graph_index in range(0, len(graphs), chunk_size):
-                graph_chunk = graphs[
-                    first_graph_index : first_graph_index + chunk_size
-                ]
-                buffer = io.BytesIO()
-                if compression == "gzip":
-                    with gzip.GzipFile(
-                        filename="",
-                        mode="wb",
-                        compresslevel=compress_level,
-                        fileobj=buffer,
-                        mtime=0,
-                    ) as chunk_stream:
-                        pickle.dump(
-                            graph_chunk,
-                            chunk_stream,
-                            protocol=_CACHE_PICKLE_PROTOCOL,
-                        )
-                else:
-                    pickle.dump(
-                        graph_chunk,
-                        buffer,
-                        protocol=_CACHE_PICKLE_PROTOCOL,
-                    )
-                payload = buffer.getvalue()
-                stream.write(payload)
-                chunks.append(
-                    (len(payload), hashlib.sha256(payload).hexdigest())
-                )
+        graph_iterator = iter(graphs)
+    except TypeError as exc:
+        raise ValueError(f"cache: invalid graphs type {type(graphs).__name__}") from exc
+    close_graph_iterator = getattr(graph_iterator, "close", None)
+    graph_iterator_closed = False
 
-            stream.write(index_payload)
-            manifest_bytes = json.dumps(
-                {
-                    "metadata": {
-                        "format_version": metadata.format_version,
-                        "dual_vertex_count": metadata.dual_vertex_count,
-                        "graph_count": metadata.graph_count,
-                        "graph_class": metadata.graph_class,
-                        "storage_order_name": metadata.storage_order_name,
-                        "storage_order_version": metadata.storage_order_version,
-                    },
-                    "chunk_size": chunk_size,
-                    "compression": compression,
-                    "graph_id_index_sha256": hashlib.sha256(index_payload).hexdigest(),
-                    "chunks": chunks,
-                },
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            manifest_size = len(manifest_bytes)
-            if not 1 <= manifest_size <= _MAX_MANIFEST_SIZE:
-                raise ValueError(f"cache: invalid manifest size {manifest_size} ({resolved_path})")
-            stream.write(manifest_bytes)
-            stream.write(
-                _CACHE_FOOTER_STRUCT.pack(
-                    manifest_size,
-                    hashlib.sha256(manifest_bytes).digest(),
-                )
+    try:
+        if graph_count is None:
+            if not isinstance(graphs, Sized):
+                raise ValueError("cache: graph_count required for unsized graphs")
+            resolved_graph_count = len(graphs)
+        else:
+            _require_int_at_least(
+                graph_count,
+                field_name="graph_count",
+                minimum=0,
             )
-        temporary_path.replace(resolved_path)
-    except BaseException:
-        temporary_path.unlink(missing_ok=True)
-        raise
+            resolved_graph_count = graph_count
+            if isinstance(graphs, Sized) and len(graphs) != resolved_graph_count:
+                raise ValueError(f"cache: graph count mismatch: {len(graphs)}!={resolved_graph_count} ({resolved_path})")
 
-    logger.info(
-        "Saved %d graphs to %s (%.1f MB)",
-        len(graphs),
-        resolved_path,
-        resolved_path.stat().st_size / 1e6,
-    )
-    return resolved_path
+        if dual_vertex_count is not None:
+            _require_int_at_least(
+                dual_vertex_count,
+                field_name="dual_vertex_count",
+                minimum=3,
+            )
+
+        sentinel = object()
+        first_graph = next(graph_iterator, sentinel)
+        if resolved_graph_count == 0:
+            if first_graph is not sentinel:
+                raise ValueError(f"cache: graph count exceeds expected 0 ({resolved_path})")
+            if dual_vertex_count is None:
+                raise ValueError("cache: dual_vertex_count required for empty graphs")
+            graph_stream: Iterable[QuarticPlaneMap] = ()
+            resolved_dual_vertex_count = dual_vertex_count
+        else:
+            if first_graph is sentinel:
+                raise ValueError(f"cache: graph count mismatch: 0!={resolved_graph_count} ({resolved_path})")
+            if type(first_graph) is not QuarticPlaneMap:
+                raise ValueError(f"cache: invalid graph 0 type {type(first_graph).__name__}")
+            resolved_dual_vertex_count = (
+                first_graph.dual_num_vertices
+                if dual_vertex_count is None
+                else dual_vertex_count
+            )
+            graph_stream = chain((first_graph,), graph_iterator)
+
+        metadata = CacheMetadata(
+            format_version=CACHE_FORMAT_VERSION,
+            dual_vertex_count=resolved_dual_vertex_count,
+            graph_count=resolved_graph_count,
+            graph_class=resolved_graph_class,
+            storage_order_name=storage_order_name,
+            storage_order_version=storage_order_version,
+        )
+        if (
+            metadata.graph_class == "simple_quartic"
+            and metadata.graph_count
+            and metadata.dual_vertex_count < 6
+        ):
+            raise ValueError(f"cache: nonempty simple_quartic n={metadata.dual_vertex_count}<6 ({resolved_path})")
+
+        width: Literal[4, 8] = (
+            4 if metadata.graph_count <= _UINT32_LIMIT else 8
+        )
+        pack_index = struct.Struct("<I" if width == 4 else "<Q").pack_into
+        seen_graph_ids = bytearray(metadata.graph_count)
+        index_payload = bytearray(metadata.graph_count * width)
+
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            dir=resolved_path.parent,
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with open(fd, "wb") as stream:
+                chunks: list[tuple[int, str]] = []
+                graph_chunk: list[QuarticPlaneMap] = []
+                stored_graph_count = 0
+                for graph in graph_stream:
+                    if stored_graph_count >= metadata.graph_count:
+                        raise ValueError(f"cache: graph count exceeds expected {metadata.graph_count} ({resolved_path})")
+                    graph_id = _validate_graph_envelope(
+                        graph,
+                        metadata,
+                        graph_index=stored_graph_count,
+                        filepath=resolved_path,
+                    )
+                    if seen_graph_ids[graph_id]:
+                        raise ValueError(f"cache: duplicate graph_id={graph_id} ({resolved_path})")
+                    seen_graph_ids[graph_id] = 1
+                    if validate_graphs:
+                        _validate_graph_semantics_one(graph, stored_graph_count)
+                    pack_index(
+                        index_payload,
+                        graph_id * width,
+                        stored_graph_count,
+                    )
+                    graph_chunk.append(graph)
+                    stored_graph_count += 1
+                    if len(graph_chunk) == chunk_size:
+                        payload = _encode_graph_chunk(
+                            graph_chunk,
+                            compression=compression,
+                            compress_level=compress_level,
+                        )
+                        stream.write(payload)
+                        chunks.append(
+                            (len(payload), hashlib.sha256(payload).hexdigest())
+                        )
+                        graph_chunk = []
+
+                if stored_graph_count != metadata.graph_count:
+                    raise ValueError(f"cache: graph count mismatch: {stored_graph_count}!={metadata.graph_count} ({resolved_path})")
+                if graph_chunk:
+                    payload = _encode_graph_chunk(
+                        graph_chunk,
+                        compression=compression,
+                        compress_level=compress_level,
+                    )
+                    stream.write(payload)
+                    chunks.append(
+                        (len(payload), hashlib.sha256(payload).hexdigest())
+                    )
+
+                stream.write(index_payload)
+                manifest_bytes = json.dumps(
+                    {
+                        "metadata": {
+                            "format_version": metadata.format_version,
+                            "dual_vertex_count": metadata.dual_vertex_count,
+                            "graph_count": metadata.graph_count,
+                            "graph_class": metadata.graph_class,
+                            "storage_order_name": metadata.storage_order_name,
+                            "storage_order_version": metadata.storage_order_version,
+                        },
+                        "chunk_size": chunk_size,
+                        "compression": compression,
+                        "graph_id_index_sha256": hashlib.sha256(
+                            index_payload
+                        ).hexdigest(),
+                        "chunks": chunks,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                manifest_size = len(manifest_bytes)
+                if not 1 <= manifest_size <= _MAX_MANIFEST_SIZE:
+                    raise ValueError(f"cache: invalid manifest size {manifest_size} ({resolved_path})")
+                stream.write(manifest_bytes)
+                stream.write(
+                    _CACHE_FOOTER_STRUCT.pack(
+                        manifest_size,
+                        hashlib.sha256(manifest_bytes).digest(),
+                    )
+                )
+            if callable(close_graph_iterator):
+                graph_iterator_closed = True
+                close_graph_iterator()
+            temporary_path.replace(resolved_path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+
+        logger.info(
+            "Saved %d graphs to %s (%.1f MB)",
+            metadata.graph_count,
+            resolved_path,
+            resolved_path.stat().st_size / 1e6,
+        )
+        return resolved_path
+    finally:
+        if not graph_iterator_closed and callable(close_graph_iterator):
+            close_graph_iterator()
