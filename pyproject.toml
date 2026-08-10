@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "pyplantri"
-version = "0.5.0"
+version = "0.6.0"
 description = "Python wrapper for plantri - Simple Quadrangulation on Sphere (SQS) enumeration"
 readme = "README.md"
 requires-python = ">=3.10"

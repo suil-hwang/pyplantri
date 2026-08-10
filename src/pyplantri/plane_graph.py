@@ -4,14 +4,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
 
 from .types import Embedding, FaceCycle, SupportEdge
 
-_PICKLE_STATE_FIELDS = frozenset(("twin", "graph_id"))
 _VERTEX_SHIFT = 2
 _DARTS_PER_VERTEX = 1 << _VERTEX_SHIFT
 _SLOT_MASK = _DARTS_PER_VERTEX - 1
+MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT = 256 // _DARTS_PER_VERTEX
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +28,7 @@ class QuarticPlaneMap:
 
     twin: bytes
     graph_id: int = field(default=0, compare=False)
-    _topology_cache: _DerivedTopology | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _topology_cache: _DerivedTopology | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Validate compact record fields and the twin encoding."""
@@ -45,7 +42,7 @@ class QuarticPlaneMap:
         dart_count = len(self.twin)
         if dart_count == 0 or dart_count % _DARTS_PER_VERTEX:
             raise ValueError("dart count must be a positive multiple of 4")
-        if dart_count > 256:
+        if dart_count > _DARTS_PER_VERTEX * MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT:
             raise ValueError("byte-valued twin supports at most 256 darts")
         for dart, opposite in enumerate(self.twin):
             if opposite >= dart_count:
@@ -66,11 +63,7 @@ class QuarticPlaneMap:
         """Dualize a supported simple quadrangulation and optionally audit it."""
         if type(audit) is not bool:
             raise TypeError("audit must be bool")
-        if type(primal_embedding) is not tuple or any(
-            type(neighbors) is not tuple
-            or any(type(neighbor) is not int for neighbor in neighbors)
-            for neighbors in primal_embedding
-        ):
+        if type(primal_embedding) is not tuple or any(type(neighbors) is not tuple or any(type(neighbor) is not int for neighbor in neighbors) for neighbors in primal_embedding):
             raise TypeError("primal embedding must be tuple[tuple[int, ...], ...]")
 
         vertex_count = len(primal_embedding)
@@ -136,11 +129,7 @@ class QuarticPlaneMap:
                 opposite = reverse[dart]
                 target_vertex = target[dart]
                 first_target_dart = first_dart[target_vertex]
-                dart = (
-                    opposite - 1
-                    if opposite != first_target_dart
-                    else first_dart[target_vertex + 1] - 1
-                )
+                dart = opposite - 1 if opposite != first_target_dart else first_dart[target_vertex + 1] - 1
             face_cycle = tuple(face_vertices)
             if first_invalid_face is None and (len(face_cycle) != _DARTS_PER_VERTEX or len(set(face_cycle)) != _DARTS_PER_VERTEX):
                 first_invalid_face = face_count, face_cycle
@@ -152,13 +141,13 @@ class QuarticPlaneMap:
         if first_invalid_face is not None:
             face_index, face_cycle = first_invalid_face
             raise ValueError(f"primal face {face_index} is not a simple quadrilateral: {face_cycle}")
-        if face_count > 64:
+        if face_count > MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT:
             raise ValueError("byte-valued twin supports at most 64 dual vertices")
 
         # Four darts per face make discovery order exactly d = 4f + i.
         dual_twin = bytearray(_DARTS_PER_VERTEX * face_count)
         for dart, opposite in enumerate(reverse):
-            dual_twin[dual_dart_by_primal_dart[dart]] = (dual_dart_by_primal_dart[opposite])
+            dual_twin[dual_dart_by_primal_dart[dart]] = dual_dart_by_primal_dart[opposite]
 
         plane_map = cls(twin=bytes(dual_twin), graph_id=graph_id)
         # The optional topology audit enforces target-class invariants beyond dualization.
@@ -181,21 +170,30 @@ class QuarticPlaneMap:
             audit=True,
         )
 
-    def __getstate__(self) -> dict[str, Any]:
-        """Return compact pickle state without derived topology."""
-        return {"twin": self.twin, "graph_id": self.graph_id}
+    def __reduce__(self) -> tuple[type[QuarticPlaneMap], tuple[bytes, int]]:
+        """Serialize only the validated core across multiprocessing boundaries."""
+        return type(self), (self.twin, self.graph_id)
 
-    def __setstate__(self, state: Any) -> None:
-        """Restore exact compact state, validate its core, and clear the cache."""
-        if type(state) is not dict:
-            raise TypeError(f"QuarticPlaneMap pickle state must be dict, got {type(state).__name__}")
-        actual_fields = set(state)
-        if actual_fields != _PICKLE_STATE_FIELDS:
-            raise ValueError(f"QuarticPlaneMap pickle state keys mismatch: missing={sorted(_PICKLE_STATE_FIELDS - actual_fields)}, extra={sorted(actual_fields - _PICKLE_STATE_FIELDS)}")
-        object.__setattr__(self, "twin", state["twin"])
-        object.__setattr__(self, "graph_id", state["graph_id"])
-        object.__setattr__(self, "_topology_cache", None)
-        self.__post_init__()
+    def _dual_edge_envelope(self) -> tuple[int, bool]:
+        """Return maximum support multiplicity and whether a dual loop exists."""
+        n = self.dual_num_vertices
+        multiplicities = bytearray(n * n)
+        maximum = 0
+        has_loop = False
+        for dart, opposite in enumerate(self.twin):
+            if dart > opposite:
+                continue
+            u = dart >> _VERTEX_SHIFT
+            v = opposite >> _VERTEX_SHIFT
+            if u == v:
+                has_loop = True
+            elif u > v:
+                u, v = v, u
+            key = u * n + v
+            multiplicity = multiplicities[key] + 1
+            multiplicities[key] = multiplicity
+            maximum = max(maximum, multiplicity)
+        return maximum, has_loop
 
     def _compute_dual_edge_multiplicities(self) -> dict[SupportEdge, int]:
         """Count normalized support-edge multiplicities without caching."""
@@ -206,24 +204,15 @@ class QuarticPlaneMap:
             if dart > twin_dart:
                 continue
             # dart <= twin_dart makes the base-n key endpoint-normalized.
-            key = ((dart >> _VERTEX_SHIFT) * dual_vertex_count + (twin_dart >> _VERTEX_SHIFT))
+            key = (dart >> _VERTEX_SHIFT) * dual_vertex_count + (twin_dart >> _VERTEX_SHIFT)
             multiplicity_by_key[key] = multiplicity_by_key.get(key, 0) + 1
-        return {
-            divmod(key, dual_vertex_count): multiplicity
-            for key, multiplicity in sorted(multiplicity_by_key.items())
-        }
+        return {divmod(key, dual_vertex_count): multiplicity for key, multiplicity in sorted(multiplicity_by_key.items())}
 
     def _compute_derived_topology(self) -> _DerivedTopology:
         """Compute immutable dual and primal topology views without caching."""
         twin = self.twin
         # The implicit quartic rotation groups darts 4v, ..., 4v+3 at dual vertex v.
-        dual_embedding: Embedding = tuple(
-            tuple(
-                twin[dart] >> _VERTEX_SHIFT
-                for dart in range(base, base + _DARTS_PER_VERTEX)
-            )
-            for base in range(0, len(twin), _DARTS_PER_VERTEX)
-        )
+        dual_embedding: Embedding = tuple(tuple(twin[dart] >> _VERTEX_SHIFT for dart in range(base, base + _DARTS_PER_VERTEX)) for base in range(0, len(twin), _DARTS_PER_VERTEX))
 
         # Right faces are the orbits of phi = sigma^-1 composed with alpha.
         dual_face_index_by_dart = [-1] * len(twin)
@@ -238,7 +227,7 @@ class QuarticPlaneMap:
                 dual_face_index_by_dart[dart] = dual_face_index
                 face_dart_orbit.append(dart)
                 twin_dart = twin[dart]
-                dart = ((twin_dart & ~_SLOT_MASK) | ((twin_dart - 1) & _SLOT_MASK))
+                dart = (twin_dart & ~_SLOT_MASK) | ((twin_dart - 1) & _SLOT_MASK)
             dual_face_dart_orbits.append(tuple(face_dart_orbit))
 
         # Count each alpha-paired edge once after normalizing its endpoint order.
@@ -247,22 +236,10 @@ class QuarticPlaneMap:
         # Dual face orbits become primal vertices; dual vertices become primal faces.
         return _DerivedTopology(
             dual_embedding=dual_embedding,
-            dual_faces=tuple(
-                tuple(dart >> _VERTEX_SHIFT for dart in face_darts)
-                for face_darts in dual_face_dart_orbits
-            ),
+            dual_faces=tuple(tuple(dart >> _VERTEX_SHIFT for dart in face_darts) for face_darts in dual_face_dart_orbits),
             dual_edge_multiplicity=MappingProxyType(dual_edge_multiplicity),
-            primal_embedding=tuple(
-                tuple(dual_face_index_by_dart[twin[dart]] for dart in face_darts)
-                for face_darts in dual_face_dart_orbits
-            ),
-            primal_faces=tuple(
-                tuple(
-                    dual_face_index_by_dart[twin[dart]]
-                    for dart in range(base, base + _DARTS_PER_VERTEX)
-                )
-                for base in range(0, len(twin), _DARTS_PER_VERTEX)
-            ),
+            primal_embedding=tuple(tuple(dual_face_index_by_dart[twin[dart]] for dart in face_darts) for face_darts in dual_face_dart_orbits),
+            primal_faces=tuple(tuple(dual_face_index_by_dart[twin[dart]] for dart in range(base, base + _DARTS_PER_VERTEX)) for base in range(0, len(twin), _DARTS_PER_VERTEX)),
         )
 
     def _derived_topology(self) -> _DerivedTopology:
@@ -285,13 +262,7 @@ class QuarticPlaneMap:
         if topology is not None:
             return topology.dual_embedding
         twin = self.twin
-        return tuple(
-            tuple(
-                opposite >> _VERTEX_SHIFT
-                for opposite in twin[base : base + _DARTS_PER_VERTEX]
-            )
-            for base in range(0, len(twin), _DARTS_PER_VERTEX)
-        )
+        return tuple(tuple(opposite >> _VERTEX_SHIFT for opposite in twin[base : base + _DARTS_PER_VERTEX]) for base in range(0, len(twin), _DARTS_PER_VERTEX))
 
     @property
     def dual_faces(self) -> tuple[FaceCycle, ...]:
@@ -316,20 +287,12 @@ class QuarticPlaneMap:
     @property
     def double_edges(self) -> frozenset[SupportEdge]:
         """Return dual support edges of multiplicity two."""
-        return frozenset(
-            edge
-            for edge, multiplicity in self.dual_edge_multiplicity.items()
-            if multiplicity == 2
-        )
+        return frozenset(edge for edge, multiplicity in self.dual_edge_multiplicity.items() if multiplicity == 2)
 
     def _dual_edge_cardinality_profile(self) -> tuple[int, int]:
         """Return support- and double-edge counts without retaining topology."""
         topology = self._topology_cache
-        multiplicities = (
-            topology.dual_edge_multiplicity
-            if topology is not None
-            else self._compute_dual_edge_multiplicities()
-        )
+        multiplicities = topology.dual_edge_multiplicity if topology is not None else self._compute_dual_edge_multiplicities()
         return (
             len(multiplicities),
             sum(multiplicity == 2 for multiplicity in multiplicities.values()),
@@ -366,7 +329,7 @@ class QuarticPlaneMap:
                         u, v = v, u
                     key = u * dual_vertex_count + v
                     multiplicity_by_key[key] = multiplicity_by_key.get(key, 0) + 1
-                dart = ((opposite & ~_SLOT_MASK) | ((opposite - 1) & _SLOT_MASK))
+                dart = (opposite & ~_SLOT_MASK) | ((opposite - 1) & _SLOT_MASK)
                 face_size += 1
             face_sizes.append(face_size)
 
@@ -466,16 +429,8 @@ class QuarticPlaneMap:
             if multiplicity not in (1, 2):
                 errors.append(f"dual edge {edge} has unsupported multiplicity {multiplicity}")
 
-        digons = sorted(
-            tuple(sorted(face))
-            for face in topology.dual_faces
-            if len(face) == 2 and face[0] != face[1]
-        )
-        double_edges = sorted(
-            edge
-            for edge, multiplicity in topology.dual_edge_multiplicity.items()
-            if multiplicity == 2
-        )
+        digons = sorted(tuple(sorted(face)) for face in topology.dual_faces if len(face) == 2 and face[0] != face[1])
+        double_edges = sorted(edge for edge, multiplicity in topology.dual_edge_multiplicity.items() if multiplicity == 2)
         if digons != double_edges:
             errors.append("dual digon/double-edge mismatch")
 

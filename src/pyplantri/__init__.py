@@ -5,18 +5,19 @@ from .cache import (
     CACHE_DEFAULT_CHUNK_SIZE,
     CACHE_FORMAT_VERSION,
     CacheGraphClass,
+    CacheIndexMode,
     CacheMetadata,
     QuarticPlaneMapCatalog,
-    load_graphs_from_cache,
-    save_graphs_to_cache,
+    open_graph_catalog,
     validate_cache_metadata,
+    write_graph_catalog,
 )
 from .enumeration import (
     PlantriEnumerationResult,
     enumerate_simple_quadrangulation_duals,
     iter_simple_quadrangulation_duals,
 )
-from .plane_graph import QuarticPlaneMap
+from .plane_graph import MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT, QuarticPlaneMap
 from .plantri_interface import (
     MAX_DUAL_VERTEX_COUNT,
     MIN_DUAL_VERTEX_COUNT,
@@ -44,17 +45,19 @@ __all__ = [
     "QuadrangulationEnumerator",
     "MIN_DUAL_VERTEX_COUNT",
     "MAX_DUAL_VERTEX_COUNT",
+    "MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT",
     "iter_planar_code",
     # Quartic plane-map model
     "QuarticPlaneMap",
     # Cache
     "CacheMetadata",
     "CacheGraphClass",
+    "CacheIndexMode",
     "QuarticPlaneMapCatalog",
     "CACHE_DEFAULT_CHUNK_SIZE",
     "CACHE_FORMAT_VERSION",
-    "save_graphs_to_cache",
-    "load_graphs_from_cache",
+    "write_graph_catalog",
+    "open_graph_catalog",
     "validate_cache_metadata",
     # Enumeration
     "iter_simple_quadrangulation_duals",
