@@ -564,35 +564,24 @@ def _validate_graph_envelope(
     # QuarticPlaneMap already owns core type, twin, and nonnegative-ID checks.
     graph_id = graph.graph_id
     if graph_id >= _MAX_GRAPH_COUNT:
-        detail = (
-            f"graph {graph_index} graph_id={graph_id} expected<={_MAX_GRAPH_COUNT - 1}"
-        )
+        detail = (f"graph {graph_index} graph_id={graph_id} expected<={_MAX_GRAPH_COUNT - 1}")
         raise _cache_error(detail, filepath)
     if graph_count is not None and graph_id >= graph_count:
-        detail = (
-            f"graph {graph_index} graph_id={graph_id} expected=0..{graph_count - 1}"
-        )
+        detail = (f"graph {graph_index} graph_id={graph_id} expected=0..{graph_count - 1}")
         raise _cache_error(detail, filepath)
     if index_mode == "implicit" and graph_id != graph_index:
-        detail = (
-            f"implicit graph {graph_index} graph_id={graph_id} expected={graph_index}"
-        )
+        detail = (f"implicit graph {graph_index} graph_id={graph_id} expected={graph_index}")
         raise _cache_error(detail, filepath)
     expected_dart_count = 4 * dual_vertex_count
     if len(graph.twin) != expected_dart_count:
-        detail = (
-            f"graph {graph_index} dart count {len(graph.twin)}!={expected_dart_count}"
-        )
+        detail = (f"graph {graph_index} dart count {len(graph.twin)}!={expected_dart_count}")
         raise _cache_error(detail, filepath)
     maximum_multiplicity, has_loop = graph._dual_edge_envelope()
     if has_loop:
         raise _cache_error(f"graph {graph_index} contains a dual loop", filepath)
     allowed_multiplicity = 1 if graph_class == "simple_quartic" else 2
     if maximum_multiplicity > allowed_multiplicity:
-        detail = (
-            f"graph {graph_index} edge multiplicity "
-            f"{maximum_multiplicity}>{allowed_multiplicity}"
-        )
+        detail = (f"graph {graph_index} edge multiplicity {maximum_multiplicity}>{allowed_multiplicity}")
         raise _cache_error(detail, filepath)
     return graph_id
 
@@ -640,45 +629,29 @@ def _open_manifest(filepath: Path) -> _CacheManifest:
         file_size = stream.seek(0, io.SEEK_END)
         if file_size < _CACHE_FOOTER_STRUCT.size + 2:
             minimum_size = _CACHE_FOOTER_STRUCT.size + 2
-            detail = (
-                f"truncated v12 container size={file_size} expected>={minimum_size}"
-            )
+            detail = (f"truncated v12 container size={file_size} expected>={minimum_size}")
             raise _cache_error(detail, filepath)
         footer_offset = file_size - _CACHE_FOOTER_STRUCT.size
         stream.seek(footer_offset)
         raw_footer = stream.read(_CACHE_FOOTER_STRUCT.size)
         if len(raw_footer) != _CACHE_FOOTER_STRUCT.size:
-            detail = (
-                f"truncated footer bytes={len(raw_footer)} "
-                f"expected={_CACHE_FOOTER_STRUCT.size}"
-            )
+            detail = (f"truncated footer bytes={len(raw_footer)} expected={_CACHE_FOOTER_STRUCT.size}")
             raise _cache_error(detail, filepath)
-        magic, version, manifest_size, expected_digest = _CACHE_FOOTER_STRUCT.unpack(
-            raw_footer
-        )
+        magic, version, manifest_size, expected_digest = _CACHE_FOOTER_STRUCT.unpack(raw_footer)
         if magic != _CACHE_MAGIC:
-            detail = (
-                f"unsupported cache magic actual={_brief(magic)} "
-                f"expected={_brief(_CACHE_MAGIC)}"
-            )
+            detail = (f"unsupported cache magic actual={_brief(magic)} expected={_brief(_CACHE_MAGIC)}")
             raise _cache_error(detail, filepath)
         if version != CACHE_FORMAT_VERSION:
             raise _mismatch("format_version", version, CACHE_FORMAT_VERSION, filepath)
         if not 2 <= manifest_size <= min(_MAX_MANIFEST_SIZE, footer_offset):
             maximum_size = min(_MAX_MANIFEST_SIZE, footer_offset)
-            detail = (
-                f"invalid manifest range size={manifest_size} "
-                f"expected=2..{maximum_size}"
-            )
+            detail = (f"invalid manifest range size={manifest_size} expected=2..{maximum_size}")
             raise _cache_error(detail, filepath)
         manifest_offset = footer_offset - manifest_size
         stream.seek(manifest_offset)
         manifest_bytes = stream.read(manifest_size)
         if len(manifest_bytes) != manifest_size:
-            detail = (
-                f"truncated manifest bytes={len(manifest_bytes)} "
-                f"expected={manifest_size}"
-            )
+            detail = (f"truncated manifest bytes={len(manifest_bytes)} expected={manifest_size}")
             raise _cache_error(detail, filepath)
         if hashlib.sha256(manifest_bytes).digest() != expected_digest:
             raise _cache_error("manifest hash mismatch", filepath)
@@ -749,9 +722,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                     # One extra byte detects decompression bombs and overlong records.
                     raw = stream.read(expected_size + 1)
             except (OSError, EOFError, zlib.error) as exc:
-                error = _cache_error(
-                    f"invalid chunk {chunk_index} payload", self._filepath
-                )
+                error = _cache_error(f"invalid chunk {chunk_index} payload", self._filepath)
                 raise error from exc
             if len(raw) != expected_size:
                 detail = f"chunk {chunk_index} raw size {len(raw)}!={expected_size}"
@@ -867,10 +838,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                     stream.seek(chunk.offset)
                     payload = stream.read(chunk.size)
                     if len(payload) != chunk.size:
-                        detail = (
-                            f"truncated chunk {chunk_index} bytes={len(payload)} "
-                            f"expected={chunk.size}"
-                        )
+                        detail = (f"truncated chunk {chunk_index} bytes={len(payload)} expected={chunk.size}")
                         raise _cache_error(detail, self._filepath)
                     graphs = self._decode_chunk(chunk_index, payload)
                     self._cache_chunk(chunk_index, graphs)
@@ -886,10 +854,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                 stream.seek(chunk.offset)
                 payload = stream.read(chunk.size)
                 if len(payload) != chunk.size:
-                    detail = (
-                        f"truncated chunk {chunk_index} bytes={len(payload)} "
-                        f"expected={chunk.size}"
-                    )
+                    detail = (f"truncated chunk {chunk_index} bytes={len(payload)} expected={chunk.size}")
                     raise _cache_error(detail, self._filepath)
                 yield from self._decode_chunk(chunk_index, payload)
 
@@ -913,9 +878,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                 "little",
             )
             if encoded == 0 or encoded > len(self):
-                detail = (
-                    f"invalid stored-index sentinel {encoded} for graph_id={graph_id}"
-                )
+                detail = (f"invalid stored-index sentinel {encoded} for graph_id={graph_id}")
                 raise _cache_error(detail, self._filepath)
             stored_index = encoded - 1
         graph = self._get_stored(stored_index)
@@ -973,9 +936,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                         graph.graph_id * descriptor.width,
                     )[0]
                     if encoded != stored_index + 1:
-                        detail = (
-                            f"graph_id_index mismatch for graph_id={graph.graph_id}"
-                        )
+                        detail = (f"graph_id_index mismatch for graph_id={graph.graph_id}")
                         raise _cache_error(detail, self._filepath)
                 # This identifies exact physical records/order, not graph isomorphism.
                 sequence_hasher.update(graph.graph_id.to_bytes(8, "little"))
@@ -1261,9 +1222,7 @@ def write_graph_cache(
             sort_keys=True,
         ).encode("utf-8")
         if len(manifest_bytes) > _MAX_MANIFEST_SIZE:
-            detail = (
-                f"manifest size={len(manifest_bytes)} expected<={_MAX_MANIFEST_SIZE}"
-            )
+            detail = (f"manifest size={len(manifest_bytes)} expected<={_MAX_MANIFEST_SIZE}")
             raise _cache_error(detail, resolved_path)
         destination_stream.write(manifest_bytes)
         destination_stream.write(
