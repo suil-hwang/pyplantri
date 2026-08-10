@@ -35,18 +35,68 @@ _MAX_GRAPH_COUNT = (1 << 64) - 1
 _UINT32_LIMIT = 1 << 32
 _INDEX_ENCODING = "stored-index-plus-one-le"
 _IMPLICIT_RECORD_ENCODING = "twin-u8-implicit-id"
-_MAX_RECORDS_PER_CHUNK = _MAX_RAW_CHUNK_SIZE // (4 * MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT + 8)
+_MAX_RECORDS_PER_CHUNK = _MAX_RAW_CHUNK_SIZE // (
+    4 * MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT + 8
+)
 
 CacheGraphClass = Literal["quartic_multigraph", "simple_quartic"]
 CacheIndexMode = Literal["implicit", "explicit"]
+CacheValidation = Literal["envelope", "topology"]
 _CacheGraphClassInput = CacheGraphClass | QuadrangulationDualClass
 _Compression = Literal["gzip", "none"]
 _SUPPORTED_GRAPH_CLASSES = frozenset({"quartic_multigraph", "simple_quartic"})
 
 
+def _one_line(value: object, *, limit: int) -> str:
+    """Bound one diagnostic fragment without trusting its string conversion."""
+    try:
+        text = str(value)
+    except BaseException:
+        text = type(value).__name__
+    text = " ".join(text.split()) or type(value).__name__
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _brief(value: object) -> str:
+    """Return a bounded, single-line representation for an invalid value."""
+    try:
+        representation = repr(value)
+    except BaseException:
+        representation = type(value).__name__
+    return _one_line(representation, limit=120)
+
+
 def _location(filepath: Path | None) -> str:
     """Format an optional path suffix for compact errors."""
-    return f" ({filepath})" if filepath is not None else ""
+    return f" ({_one_line(filepath, limit=160)})" if filepath is not None else ""
+
+
+def _cache_error(detail: str, filepath: Path | None = None) -> ValueError:
+    """Build one bounded, single-line cache error."""
+    return ValueError(f"cache: {_one_line(detail, limit=320)}{_location(filepath)}")
+
+
+def _invalid(
+    field: str,
+    actual: object,
+    expected: str | None = None,
+    filepath: Path | None = None,
+) -> ValueError:
+    """Build a compact invalid-field error with an optional expected contract."""
+    detail = f"invalid {field}={_brief(actual)}"
+    if expected is not None:
+        detail += f" expected={expected}"
+    return _cache_error(detail, filepath)
+
+
+def _mismatch(
+    field: str,
+    actual: object,
+    expected: object,
+    filepath: Path | None = None,
+) -> ValueError:
+    """Build a compact actual-versus-expected invariant error."""
+    return _cache_error(f"{field} {_brief(actual)}!={_brief(expected)}", filepath)
 
 
 def _note_cleanup_failure(
@@ -58,7 +108,8 @@ def _note_cleanup_failure(
     try:
         cleanup()
     except BaseException as cleanup_error:
-        error.add_note(f"cache: {message}: {cleanup_error}")
+        detail = " ".join(str(cleanup_error).split()) or type(cleanup_error).__name__
+        error.add_note(f"cache: {message}: {detail[:240]}")
 
 
 def _require_int_between(
@@ -71,7 +122,8 @@ def _require_int_between(
 ) -> None:
     """Require an exact integer in one closed interval."""
     if type(value) is not int or not minimum <= value <= maximum:
-        raise ValueError(f"cache: invalid {field_name}={value!r}{_location(filepath)}")
+        expected = f"int[{minimum},{maximum}]"
+        raise _invalid(field_name, value, expected, filepath)
 
 
 def _require_order_name(
@@ -81,8 +133,14 @@ def _require_order_name(
     filepath: Path | None = None,
 ) -> None:
     """Require one nonempty, single-line storage-order name."""
-    if type(value) is not str or not value or value != value.strip() or "\n" in value or "\r" in value:
-        raise ValueError(f"cache: invalid {field_name}={value!r}{_location(filepath)}")
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\n" in value
+        or "\r" in value
+    ):
+        raise _invalid(field_name, value, "nonempty single-line str", filepath)
 
 
 def _normalize_graph_class(
@@ -96,7 +154,7 @@ def _normalize_graph_class(
         return "quartic_multigraph"
     if raw_value == "simple_quartic":
         return "simple_quartic"
-    raise ValueError(f"cache: invalid {field_name}={value!r}")
+    raise _invalid(field_name, value, "supported graph class")
 
 
 def _parse_sha256(
@@ -114,12 +172,12 @@ def _parse_sha256(
         else:
             if digest.hex() == value:
                 return digest
-    raise ValueError(f"cache: invalid {field_name}={value!r}{_location(filepath)}")
+    raise _invalid(field_name, value, "lowercase sha256", filepath)
 
 
 @dataclass(frozen=True, slots=True)
 class CacheMetadata:
-    """Exact record-sequence identity and caller-owned catalogue provenance."""
+    """Exact record-sequence identity and caller-owned cache provenance."""
 
     format_version: int
     dual_vertex_count: int
@@ -175,8 +233,14 @@ def _validate_metadata_fields(
     filepath: Path | None = None,
 ) -> None:
     """Validate the complete public metadata schema."""
-    if type(metadata.format_version) is not int or metadata.format_version != CACHE_FORMAT_VERSION:
-        raise ValueError(f"cache: format_version {metadata.format_version!r}!={CACHE_FORMAT_VERSION}{_location(filepath)}")
+    if (
+        type(metadata.format_version) is not int
+        or metadata.format_version != CACHE_FORMAT_VERSION
+    ):
+        error = _mismatch(
+            "format_version", metadata.format_version, CACHE_FORMAT_VERSION, filepath
+        )
+        raise error
     _require_int_between(
         metadata.dual_vertex_count,
         field_name="metadata.dual_vertex_count",
@@ -198,8 +262,14 @@ def _validate_metadata_fields(
         maximum=_MAX_GRAPH_COUNT,
         filepath=filepath,
     )
-    if type(metadata.graph_class) is not str or metadata.graph_class not in _SUPPORTED_GRAPH_CLASSES:
-        raise ValueError(f"cache: invalid graph_class={metadata.graph_class!r}{_location(filepath)}")
+    if (
+        type(metadata.graph_class) is not str
+        or metadata.graph_class not in _SUPPORTED_GRAPH_CLASSES
+    ):
+        error = _invalid(
+            "graph_class", metadata.graph_class, "supported class", filepath
+        )
+        raise error
     _require_order_name(
         metadata.storage_order_name,
         field_name="metadata.storage_order_name",
@@ -210,8 +280,13 @@ def _validate_metadata_fields(
         field_name="metadata.record_sequence_sha256",
         filepath=filepath,
     )
-    if metadata.graph_class == "simple_quartic" and metadata.graph_count and metadata.dual_vertex_count < 6:
-        raise ValueError(f"cache: nonempty simple_quartic n={metadata.dual_vertex_count}<6{_location(filepath)}")
+    if (
+        metadata.graph_class == "simple_quartic"
+        and metadata.graph_count
+        and metadata.dual_vertex_count < 6
+    ):
+        detail = f"nonempty simple_quartic n={metadata.dual_vertex_count}<6"
+        raise _cache_error(detail, filepath)
 
 
 def validate_cache_metadata(
@@ -223,12 +298,12 @@ def validate_cache_metadata(
     expected_storage_order_version: int | None = None,
     filepath: str | Path | None = None,
 ) -> None:
-    """Validate metadata and optional caller-owned catalogue expectations."""
+    """Validate metadata and optional caller-owned cache expectations."""
     if type(metadata) is not CacheMetadata:
-        raise ValueError(f"cache: invalid metadata type {type(metadata).__name__}")
+        detail = f"invalid metadata type {type(metadata).__name__}"
+        raise _cache_error(detail)
     resolved_path = Path(filepath) if filepath is not None else None
     _validate_metadata_fields(metadata, filepath=resolved_path)
-    location = _location(resolved_path)
     if expected_dual_vertex_count is not None:
         _require_int_between(
             expected_dual_vertex_count,
@@ -237,21 +312,36 @@ def validate_cache_metadata(
             maximum=MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT,
         )
         if metadata.dual_vertex_count != expected_dual_vertex_count:
-            raise ValueError(f"cache: dual_vertex_count {metadata.dual_vertex_count}!={expected_dual_vertex_count}{location}")
+            error = _mismatch(
+                "dual_vertex_count",
+                metadata.dual_vertex_count,
+                expected_dual_vertex_count,
+                resolved_path,
+            )
+            raise error
     if expected_graph_class is not None:
         graph_class = _normalize_graph_class(
             expected_graph_class,
             field_name="expected_graph_class",
         )
         if metadata.graph_class != graph_class:
-            raise ValueError(f"cache: graph_class {metadata.graph_class!r}!={graph_class!r}{location}")
+            error = _mismatch(
+                "graph_class", metadata.graph_class, graph_class, resolved_path
+            )
+            raise error
     if expected_storage_order_name is not None:
         _require_order_name(
             expected_storage_order_name,
             field_name="expected_storage_order_name",
         )
         if metadata.storage_order_name != expected_storage_order_name:
-            raise ValueError(f"cache: storage_order_name {metadata.storage_order_name!r}!={expected_storage_order_name!r}{location}")
+            error = _mismatch(
+                "storage_order_name",
+                metadata.storage_order_name,
+                expected_storage_order_name,
+                resolved_path,
+            )
+            raise error
     if expected_storage_order_version is not None:
         _require_int_between(
             expected_storage_order_version,
@@ -260,7 +350,13 @@ def validate_cache_metadata(
             maximum=_MAX_GRAPH_COUNT,
         )
         if metadata.storage_order_version != expected_storage_order_version:
-            raise ValueError(f"cache: storage_order_version {metadata.storage_order_version}!={expected_storage_order_version}{location}")
+            error = _mismatch(
+                "storage_order_version",
+                metadata.storage_order_version,
+                expected_storage_order_version,
+                resolved_path,
+            )
+            raise error
 
 
 def _manifest_from_bytes(
@@ -273,9 +369,11 @@ def _manifest_from_bytes(
     try:
         manifest_data = json.loads(manifest_bytes)
     except ValueError as exc:
-        raise ValueError(f"cache: invalid manifest JSON ({filepath})") from exc
+        error = _cache_error("invalid manifest JSON", filepath)
+        raise error from exc
     if type(manifest_data) is not dict:
-        raise ValueError(f"cache: invalid manifest type {type(manifest_data).__name__} ({filepath})")
+        detail = f"invalid manifest type {type(manifest_data).__name__}"
+        raise _cache_error(detail, filepath)
     expected_manifest_keys = {
         "metadata",
         "chunk_size",
@@ -285,12 +383,17 @@ def _manifest_from_bytes(
         "graph_id_index",
         "chunks",
     }
-    if set(manifest_data) != expected_manifest_keys:
-        raise ValueError(f"cache: invalid manifest keys ({filepath})")
+    actual_manifest_keys = set(manifest_data)
+    if actual_manifest_keys != expected_manifest_keys:
+        missing = _brief(sorted(expected_manifest_keys - actual_manifest_keys))
+        extra = _brief(sorted(actual_manifest_keys - expected_manifest_keys))
+        detail = f"invalid manifest keys missing={missing} extra={extra}"
+        raise _cache_error(detail, filepath)
 
     metadata_data = manifest_data["metadata"]
     if type(metadata_data) is not dict:
-        raise ValueError(f"cache: invalid metadata type {type(metadata_data).__name__} ({filepath})")
+        detail = f"invalid metadata type {type(metadata_data).__name__}"
+        raise _cache_error(detail, filepath)
     expected_metadata_keys = {
         "format_version",
         "dual_vertex_count",
@@ -302,7 +405,10 @@ def _manifest_from_bytes(
     }
     actual_metadata_keys = set(metadata_data)
     if actual_metadata_keys != expected_metadata_keys:
-        raise ValueError(f"cache: metadata keys mismatch: missing={sorted(expected_metadata_keys - actual_metadata_keys)}, extra={sorted(actual_metadata_keys - expected_metadata_keys)}")
+        missing = _brief(sorted(expected_metadata_keys - actual_metadata_keys))
+        extra = _brief(sorted(actual_metadata_keys - expected_metadata_keys))
+        detail = f"metadata keys mismatch missing={missing} extra={extra}"
+        raise _cache_error(detail, filepath)
     metadata = CacheMetadata(**metadata_data)
     _validate_metadata_fields(metadata, filepath=filepath)
 
@@ -316,7 +422,7 @@ def _manifest_from_bytes(
     )
     compression = manifest_data["compression"]
     if type(compression) is not str or compression not in ("gzip", "none"):
-        raise ValueError(f"cache: invalid compression={compression!r} ({filepath})")
+        raise _invalid("compression", compression, "'gzip'|'none'", filepath)
 
     index_data = manifest_data["graph_id_index"]
     graph_id_index_width: Literal[4, 8] | None
@@ -331,16 +437,28 @@ def _manifest_from_bytes(
             "encoding",
             "sha256",
         }:
-            raise ValueError(f"cache: invalid graph_id_index descriptor ({filepath})")
+            raise _cache_error("invalid graph_id_index descriptor", filepath)
         graph_id_index_width = index_data["width"]
         if graph_id_index_width not in (4, 8) or type(graph_id_index_width) is not int:
-            raise ValueError(f"cache: invalid graph_id_index.width={graph_id_index_width!r} ({filepath})")
+            error = _invalid(
+                "graph_id_index.width", graph_id_index_width, "4|8", filepath
+            )
+            raise error
         # The +1 sentinel needs eight bytes exactly when N reaches 2^32.
         expected_width = 4 if metadata.graph_count < _UINT32_LIMIT else 8
         if graph_id_index_width != expected_width:
-            raise ValueError(f"cache: graph_id_index.width {graph_id_index_width}!={expected_width} ({filepath})")
+            error = _mismatch(
+                "graph_id_index.width", graph_id_index_width, expected_width, filepath
+            )
+            raise error
         if index_data["encoding"] != _INDEX_ENCODING:
-            raise ValueError(f"cache: invalid graph_id_index.encoding={index_data['encoding']!r} ({filepath})")
+            error = _invalid(
+                "graph_id_index.encoding",
+                index_data["encoding"],
+                _INDEX_ENCODING,
+                filepath,
+            )
+            raise error
         graph_id_index_digest = _parse_sha256(
             index_data["sha256"],
             field_name="graph_id_index.sha256",
@@ -350,24 +468,32 @@ def _manifest_from_bytes(
 
     record_encoding = manifest_data["record_encoding"]
     if record_encoding != expected_record_encoding:
-        raise ValueError(f"cache: invalid record_encoding={record_encoding!r} ({filepath})")
+        error = _invalid(
+            "record_encoding", record_encoding, expected_record_encoding, filepath
+        )
+        raise error
     expected_record_size = 4 * metadata.dual_vertex_count + (graph_id_index_width or 0)
     record_size = manifest_data["record_size"]
     if type(record_size) is not int or record_size != expected_record_size:
-        raise ValueError(f"cache: record_size {record_size!r}!={expected_record_size} ({filepath})")
+        raise _mismatch("record_size", record_size, expected_record_size, filepath)
 
     chunk_descriptors = manifest_data["chunks"]
     if type(chunk_descriptors) is not list:
-        raise ValueError(f"cache: invalid chunks type {type(chunk_descriptors).__name__} ({filepath})")
+        detail = f"invalid chunks type {type(chunk_descriptors).__name__}"
+        raise _cache_error(detail, filepath)
     expected_chunk_count = (metadata.graph_count + chunk_size - 1) // chunk_size
     if len(chunk_descriptors) != expected_chunk_count:
-        raise ValueError(f"cache: chunk count {len(chunk_descriptors)}!={expected_chunk_count} ({filepath})")
+        error = _mismatch(
+            "chunk count", len(chunk_descriptors), expected_chunk_count, filepath
+        )
+        raise error
 
     chunks: list[_CacheChunk] = []
     next_offset = 0
     for chunk_index, descriptor in enumerate(chunk_descriptors):
         if type(descriptor) is not list or len(descriptor) != 2:
-            raise ValueError(f"cache: invalid chunk {chunk_index} descriptor ({filepath})")
+            detail = f"invalid chunk {chunk_index} descriptor"
+            raise _cache_error(detail, filepath)
         size, digest_hex = descriptor
         first_graph_index = chunk_index * chunk_size
         graph_count = min(
@@ -376,7 +502,9 @@ def _manifest_from_bytes(
         )
         expected_raw_size = graph_count * record_size
         minimum_size = expected_raw_size if compression == "none" else 1
-        maximum_size = expected_raw_size if compression == "none" else _MAX_ENCODED_CHUNK_SIZE
+        maximum_size = (
+            expected_raw_size if compression == "none" else _MAX_ENCODED_CHUNK_SIZE
+        )
         _require_int_between(
             size,
             field_name=f"chunk[{chunk_index}].size",
@@ -410,7 +538,7 @@ def _manifest_from_bytes(
         )
         next_offset += index_size
     if next_offset != manifest_offset:
-        raise ValueError(f"cache: payload partition does not end at manifest ({filepath})")
+        raise _mismatch("payload_end", next_offset, manifest_offset, filepath)
     return _CacheManifest(
         metadata=metadata,
         chunk_size=chunk_size,
@@ -436,20 +564,36 @@ def _validate_graph_envelope(
     # QuarticPlaneMap already owns core type, twin, and nonnegative-ID checks.
     graph_id = graph.graph_id
     if graph_id >= _MAX_GRAPH_COUNT:
-        raise ValueError(f"cache: graph {graph_index} graph_id={graph_id} exceeds the uint64 catalogue bound ({filepath})")
+        detail = (
+            f"graph {graph_index} graph_id={graph_id} expected<={_MAX_GRAPH_COUNT - 1}"
+        )
+        raise _cache_error(detail, filepath)
     if graph_count is not None and graph_id >= graph_count:
-        raise ValueError(f"cache: graph {graph_index} graph_id={graph_id} outside 0..{graph_count - 1} ({filepath})")
+        detail = (
+            f"graph {graph_index} graph_id={graph_id} expected=0..{graph_count - 1}"
+        )
+        raise _cache_error(detail, filepath)
     if index_mode == "implicit" and graph_id != graph_index:
-        raise ValueError(f"cache: implicit graph {graph_index} has graph_id={graph_id} ({filepath})")
+        detail = (
+            f"implicit graph {graph_index} graph_id={graph_id} expected={graph_index}"
+        )
+        raise _cache_error(detail, filepath)
     expected_dart_count = 4 * dual_vertex_count
     if len(graph.twin) != expected_dart_count:
-        raise ValueError(f"cache: graph {graph_index} dart count {len(graph.twin)}!={expected_dart_count} ({filepath})")
+        detail = (
+            f"graph {graph_index} dart count {len(graph.twin)}!={expected_dart_count}"
+        )
+        raise _cache_error(detail, filepath)
     maximum_multiplicity, has_loop = graph._dual_edge_envelope()
     if has_loop:
-        raise ValueError(f"cache: graph {graph_index} contains a dual loop ({filepath})")
+        raise _cache_error(f"graph {graph_index} contains a dual loop", filepath)
     allowed_multiplicity = 1 if graph_class == "simple_quartic" else 2
     if maximum_multiplicity > allowed_multiplicity:
-        raise ValueError(f"cache: graph {graph_index} has edge multiplicity {maximum_multiplicity}>{allowed_multiplicity} ({filepath})")
+        detail = (
+            f"graph {graph_index} edge multiplicity "
+            f"{maximum_multiplicity}>{allowed_multiplicity}"
+        )
+        raise _cache_error(detail, filepath)
     return graph_id
 
 
@@ -461,32 +605,10 @@ def _validate_graph_semantics_one(
     is_valid, errors = graph.audit_sqs_topology()
     if is_valid:
         return
-    summary = " ".join(str(errors[0]).splitlines()) if errors else "validation failed"
+    summary = _one_line(errors[0], limit=240)
     if len(errors) > 1:
         summary += f" (+{len(errors) - 1})"
-    raise ValueError(f"cache: invalid graph {graph_index}: {summary}")
-
-
-def _encode_chunk(
-    raw: bytes | bytearray,
-    *,
-    compression: _Compression,
-    compress_level: int,
-) -> bytes:
-    """Encode one fixed-record chunk with deterministic gzip."""
-    if compression == "none":
-        return bytes(raw)
-    buffer = io.BytesIO()
-    # mtime=0 makes equal raw chunks byte-for-byte reproducible.
-    with gzip.GzipFile(
-        filename="",
-        mode="wb",
-        compresslevel=compress_level,
-        fileobj=buffer,
-        mtime=0,
-    ) as stream:
-        stream.write(raw)
-    return buffer.getvalue()
+    raise _cache_error(f"invalid graph {graph_index}: {summary}")
 
 
 def _write_chunk(
@@ -497,41 +619,69 @@ def _write_chunk(
     compress_level: int,
 ) -> tuple[int, str]:
     """Write one chunk and return its size and digest."""
-    payload = _encode_chunk(
-        raw,
-        compression=compression,
-        compress_level=compress_level,
-    )
+    if compression == "none":
+        stream.write(raw)
+        return len(raw), hashlib.sha256(raw).hexdigest()
+    buffer = io.BytesIO()
+    # mtime=0 makes equal raw chunks byte-for-byte reproducible.
+    with gzip.GzipFile(
+        filename="", mode="wb", compresslevel=compress_level, fileobj=buffer, mtime=0
+    ) as gzip_stream:
+        gzip_stream.write(raw)
+    payload = buffer.getvalue()
     stream.write(payload)
     return len(payload), hashlib.sha256(payload).hexdigest()
 
 
 def _open_manifest(filepath: Path) -> _CacheManifest:
-    """Read only the footer and manifest of one v12 catalogue."""
+    """Read only the footer and manifest of one v12 cache."""
     # The footer commits the complete manifest without touching any chunk.
     with filepath.open("rb") as stream:
         file_size = stream.seek(0, io.SEEK_END)
         if file_size < _CACHE_FOOTER_STRUCT.size + 2:
-            raise ValueError(f"cache: truncated v12 container ({filepath})")
+            minimum_size = _CACHE_FOOTER_STRUCT.size + 2
+            detail = (
+                f"truncated v12 container size={file_size} expected>={minimum_size}"
+            )
+            raise _cache_error(detail, filepath)
         footer_offset = file_size - _CACHE_FOOTER_STRUCT.size
         stream.seek(footer_offset)
         raw_footer = stream.read(_CACHE_FOOTER_STRUCT.size)
         if len(raw_footer) != _CACHE_FOOTER_STRUCT.size:
-            raise ValueError(f"cache: truncated footer ({filepath})")
-        magic, version, manifest_size, expected_digest = _CACHE_FOOTER_STRUCT.unpack(raw_footer)
+            detail = (
+                f"truncated footer bytes={len(raw_footer)} "
+                f"expected={_CACHE_FOOTER_STRUCT.size}"
+            )
+            raise _cache_error(detail, filepath)
+        magic, version, manifest_size, expected_digest = _CACHE_FOOTER_STRUCT.unpack(
+            raw_footer
+        )
         if magic != _CACHE_MAGIC:
-            raise ValueError(f"cache: unsupported cache magic ({filepath})")
+            detail = (
+                f"unsupported cache magic actual={_brief(magic)} "
+                f"expected={_brief(_CACHE_MAGIC)}"
+            )
+            raise _cache_error(detail, filepath)
         if version != CACHE_FORMAT_VERSION:
-            raise ValueError(f"cache: format_version {version}!={CACHE_FORMAT_VERSION} ({filepath})")
+            raise _mismatch("format_version", version, CACHE_FORMAT_VERSION, filepath)
         if not 2 <= manifest_size <= min(_MAX_MANIFEST_SIZE, footer_offset):
-            raise ValueError(f"cache: invalid manifest range ({filepath})")
+            maximum_size = min(_MAX_MANIFEST_SIZE, footer_offset)
+            detail = (
+                f"invalid manifest range size={manifest_size} "
+                f"expected=2..{maximum_size}"
+            )
+            raise _cache_error(detail, filepath)
         manifest_offset = footer_offset - manifest_size
         stream.seek(manifest_offset)
         manifest_bytes = stream.read(manifest_size)
         if len(manifest_bytes) != manifest_size:
-            raise ValueError(f"cache: truncated manifest ({filepath})")
+            detail = (
+                f"truncated manifest bytes={len(manifest_bytes)} "
+                f"expected={manifest_size}"
+            )
+            raise _cache_error(detail, filepath)
         if hashlib.sha256(manifest_bytes).digest() != expected_digest:
-            raise ValueError(f"cache: manifest hash mismatch ({filepath})")
+            raise _cache_error("manifest hash mismatch", filepath)
     return _manifest_from_bytes(
         manifest_bytes,
         filepath,
@@ -539,8 +689,8 @@ def _open_manifest(filepath: Path) -> _CacheManifest:
     )
 
 
-class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
-    """Path-backed lazy sequence in physical storage order."""
+class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
+    """Path-backed lazy cache sequence in physical storage order."""
 
     __slots__ = (
         "_filepath",
@@ -559,12 +709,14 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
         """Initialize from factory-validated layout and cache capacity."""
         self._filepath = filepath
         self._manifest = manifest
-        self._cached_chunks: OrderedDict[int, tuple[QuarticPlaneMap, ...]] = OrderedDict()
+        self._cached_chunks: OrderedDict[int, tuple[QuarticPlaneMap, ...]] = (
+            OrderedDict()
+        )
         self._cached_chunk_limit = cached_chunks
 
     @property
     def metadata(self) -> CacheMetadata:
-        """Return validated public catalogue metadata."""
+        """Return validated public cache metadata."""
         return self._manifest.metadata
 
     def __len__(self) -> int:
@@ -577,7 +729,8 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
             stream.seek(offset)
             payload = stream.read(size)
         if len(payload) != size:
-            raise ValueError(f"cache: truncated range at {offset}+{size} ({self._filepath})")
+            detail = f"truncated range at {offset}+{size} actual={len(payload)}"
+            raise _cache_error(detail, self._filepath)
         return payload
 
     def _decode_chunk(
@@ -588,7 +741,7 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
         """Hash, bounded-decode, construct, and envelope-check one chunk."""
         chunk = self._manifest.chunks[chunk_index]
         if hashlib.sha256(payload).digest() != chunk.digest:
-            raise ValueError(f"cache: chunk {chunk_index} hash mismatch ({self._filepath})")
+            raise _cache_error(f"chunk {chunk_index} hash mismatch", self._filepath)
         expected_size = chunk.graph_count * self._manifest.record_size
         if self._manifest.compression == "gzip":
             try:
@@ -596,9 +749,13 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
                     # One extra byte detects decompression bombs and overlong records.
                     raw = stream.read(expected_size + 1)
             except (OSError, EOFError, zlib.error) as exc:
-                raise ValueError(f"cache: invalid chunk {chunk_index} payload ({self._filepath})") from exc
+                error = _cache_error(
+                    f"invalid chunk {chunk_index} payload", self._filepath
+                )
+                raise error from exc
             if len(raw) != expected_size:
-                raise ValueError(f"cache: chunk {chunk_index} raw size {len(raw)}!={expected_size} ({self._filepath})")
+                detail = f"chunk {chunk_index} raw size {len(raw)}!={expected_size}"
+                raise _cache_error(detail, self._filepath)
         else:
             # Manifest partitioning plus an exact range read already proves this size.
             raw = payload
@@ -630,7 +787,8 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
             )
             if seen_ids is not None:
                 if graph_id in seen_ids:
-                    raise ValueError(f"cache: duplicate graph_id={graph_id} in chunk ({self._filepath})")
+                    detail = f"duplicate graph_id={graph_id} in chunk {chunk_index}"
+                    raise _cache_error(detail, self._filepath)
                 seen_ids.add(graph_id)
             graphs.append(graph)
         return tuple(graphs)
@@ -680,12 +838,24 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
     ) -> QuarticPlaneMap | list[QuarticPlaneMap]:
         """Return one physical record or materialized slice."""
         if isinstance(index, slice):
-            return [self[position] for position in range(*index.indices(len(self)))]
+            result: list[QuarticPlaneMap] = []
+            loaded_chunk_index = -1
+            loaded_graphs: tuple[QuarticPlaneMap, ...] = ()
+            for position in range(*index.indices(len(self))):
+                chunk_index = position // self._manifest.chunk_size
+                if chunk_index != loaded_chunk_index:
+                    loaded_graphs = self._load_chunk(chunk_index)
+                    loaded_chunk_index = chunk_index
+                chunk = self._manifest.chunks[chunk_index]
+                result.append(loaded_graphs[position - chunk.first_graph_index])
+            return result
         if type(index) is not int:
-            raise TypeError(f"catalog index must be int or slice, got {type(index).__name__}")
+            actual_type = _one_line(type(index).__name__, limit=120)
+            detail = f"cache index must be int or slice, got {actual_type}"
+            raise TypeError(detail)
         position = index + len(self) if index < 0 else index
         if not 0 <= position < len(self):
-            raise IndexError("QuarticPlaneMapCatalog index out of range")
+            raise IndexError("QuarticPlaneMapCache index out of range")
         return self._get_stored(position)
 
     def __iter__(self) -> Iterator[QuarticPlaneMap]:
@@ -697,7 +867,11 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
                     stream.seek(chunk.offset)
                     payload = stream.read(chunk.size)
                     if len(payload) != chunk.size:
-                        raise ValueError(f"cache: truncated chunk {chunk_index} ({self._filepath})")
+                        detail = (
+                            f"truncated chunk {chunk_index} bytes={len(payload)} "
+                            f"expected={chunk.size}"
+                        )
+                        raise _cache_error(detail, self._filepath)
                     graphs = self._decode_chunk(chunk_index, payload)
                     self._cache_chunk(chunk_index, graphs)
                 else:
@@ -712,13 +886,19 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
                 stream.seek(chunk.offset)
                 payload = stream.read(chunk.size)
                 if len(payload) != chunk.size:
-                    raise ValueError(f"cache: truncated chunk {chunk_index} ({self._filepath})")
+                    detail = (
+                        f"truncated chunk {chunk_index} bytes={len(payload)} "
+                        f"expected={chunk.size}"
+                    )
+                    raise _cache_error(detail, self._filepath)
                 yield from self._decode_chunk(chunk_index, payload)
 
     def get_by_graph_id(self, graph_id: int) -> QuarticPlaneMap:
         """Resolve one dense source Graph ID to its physical record."""
         if type(graph_id) is not int:
-            raise TypeError(f"graph_id must be int, got {type(graph_id).__name__}")
+            actual_type = _one_line(type(graph_id).__name__, limit=120)
+            detail = f"graph_id must be int, got {actual_type}"
+            raise TypeError(detail)
         if not 0 <= graph_id < len(self):
             raise KeyError(graph_id)
         descriptor = self._manifest.graph_id_index
@@ -733,62 +913,75 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
                 "little",
             )
             if encoded == 0 or encoded > len(self):
-                raise ValueError(f"cache: invalid stored-index sentinel {encoded} for graph_id={graph_id} ({self._filepath})")
+                detail = (
+                    f"invalid stored-index sentinel {encoded} for graph_id={graph_id}"
+                )
+                raise _cache_error(detail, self._filepath)
             stored_index = encoded - 1
         graph = self._get_stored(stored_index)
         if descriptor is not None and graph.graph_id != graph_id:
-            raise ValueError(f"cache: graph_id_index maps {graph_id} to graph {graph.graph_id} ({self._filepath})")
+            detail = f"graph_id_index maps {graph_id} to graph {graph.graph_id}"
+            raise _cache_error(detail, self._filepath)
         return graph
 
     def _scan_all(self, *, audit_semantics: bool) -> None:
         """Share one fresh integrity scan with optional topology audits."""
         descriptor = self._manifest.graph_id_index
-        mapped_file: mmap.mmap | None = None
-        index_stream: BinaryIO | None = None
-        try:
+        with ExitStack() as resources:
+            index_view: memoryview | None = None
             if descriptor is not None:
-                index_stream = self._filepath.open("rb")
-                index_stream.seek(descriptor.offset)
-                remaining = descriptor.size
-                index_hasher = hashlib.sha256()
-                while remaining:
-                    block = index_stream.read(min(1024 * 1024, remaining))
-                    if not block:
-                        raise ValueError(f"cache: truncated graph_id_index ({self._filepath})")
-                    index_hasher.update(block)
-                    remaining -= len(block)
-                if index_hasher.digest() != descriptor.digest:
-                    raise ValueError(f"cache: graph_id_index hash mismatch ({self._filepath})")
+                index_stream = resources.enter_context(self._filepath.open("rb"))
                 if descriptor.size:
-                    mapped_file = mmap.mmap(
-                        index_stream.fileno(),
-                        0,
-                        access=mmap.ACCESS_READ,
+                    map_offset = (
+                        descriptor.offset
+                        - descriptor.offset % mmap.ALLOCATIONGRANULARITY
                     )
+                    delta = descriptor.offset - map_offset
+                    mapped_index = resources.enter_context(
+                        mmap.mmap(
+                            index_stream.fileno(),
+                            delta + descriptor.size,
+                            access=mmap.ACCESS_READ,
+                            offset=map_offset,
+                        )
+                    )
+                    index_view = memoryview(mapped_index)[
+                        delta : delta + descriptor.size
+                    ]
+                    resources.callback(index_view.release)
+                if (
+                    hashlib.sha256(
+                        index_view if index_view is not None else b""
+                    ).digest()
+                    != descriptor.digest
+                ):
+                    raise _cache_error("graph_id_index hash mismatch", self._filepath)
 
             sequence_hasher = hashlib.sha256()
-            index_struct = struct.Struct("<I" if descriptor.width == 4 else "<Q") if descriptor is not None else None
+            index_struct = (
+                struct.Struct("<I" if descriptor.width == 4 else "<Q")
+                if descriptor is not None
+                else None
+            )
             for stored_index, graph in enumerate(self._iter_fresh()):
                 if audit_semantics:
                     _validate_graph_semantics_one(graph, stored_index)
                 if descriptor is not None:
-                    # A nonempty explicit catalogue necessarily mapped its nonempty index.
+                    # A nonempty explicit cache necessarily mapped its nonempty index.
                     encoded = cast(struct.Struct, index_struct).unpack_from(
-                        cast(mmap.mmap, mapped_file),
-                        descriptor.offset + graph.graph_id * descriptor.width,
+                        cast(memoryview, index_view),
+                        graph.graph_id * descriptor.width,
                     )[0]
                     if encoded != stored_index + 1:
-                        raise ValueError(f"cache: graph_id_index mismatch for graph_id={graph.graph_id} ({self._filepath})")
+                        detail = (
+                            f"graph_id_index mismatch for graph_id={graph.graph_id}"
+                        )
+                        raise _cache_error(detail, self._filepath)
                 # This identifies exact physical records/order, not graph isomorphism.
                 sequence_hasher.update(graph.graph_id.to_bytes(8, "little"))
                 sequence_hasher.update(graph.twin)
             if sequence_hasher.hexdigest() != self.metadata.record_sequence_sha256:
-                raise ValueError(f"cache: record sequence hash mismatch ({self._filepath})")
-        finally:
-            if mapped_file is not None:
-                mapped_file.close()
-            if index_stream is not None:
-                index_stream.close()
+                raise _cache_error("record sequence hash mismatch", self._filepath)
 
     def verify_integrity(self) -> None:
         """Verify every chunk, raw record, inverse index, and sequence digest."""
@@ -799,12 +992,12 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
         self._scan_all(audit_semantics=True)
 
 
-def open_graph_catalog(
+def open_graph_cache(
     filepath: str | Path,
     *,
     cached_chunks: int = 1,
-) -> QuarticPlaneMapCatalog:
-    """Open the v12 raw-record catalogue without reading graph chunks."""
+) -> QuarticPlaneMapCache:
+    """Open the v12 raw-record cache without reading graph chunks."""
     _require_int_between(
         cached_chunks,
         field_name="cached_chunks",
@@ -812,14 +1005,14 @@ def open_graph_catalog(
         maximum=_MAX_GRAPH_COUNT,
     )
     resolved_path = Path(filepath)
-    return QuarticPlaneMapCatalog(
+    return QuarticPlaneMapCache(
         resolved_path,
         _open_manifest(resolved_path),
         cached_chunks=cached_chunks,
     )
 
 
-def write_graph_catalog(
+def write_graph_cache(
     graphs: Iterable[QuarticPlaneMap],
     filepath: str | Path,
     *,
@@ -832,12 +1025,12 @@ def write_graph_catalog(
     storage_order_name: str = "source",
     storage_order_version: int = 1,
     index_mode: CacheIndexMode = "implicit",
-    audit_graphs: bool = True,
+    validation: CacheValidation = "topology",
     durable: bool = False,
 ) -> Path:
-    """Write v12 records atomically; durable syncs the file and POSIX rename."""
+    """Write v12 records atomically with envelope or full topology validation."""
     if compression not in ("gzip", "none") or type(compression) is not str:
-        raise ValueError(f"cache: invalid compression={compression!r}")
+        raise _invalid("compression", compression, "'gzip'|'none'")
     if compression == "gzip":
         _require_int_between(
             compress_level,
@@ -859,11 +1052,11 @@ def write_graph_catalog(
         maximum=_MAX_GRAPH_COUNT,
     )
     if index_mode not in ("implicit", "explicit") or type(index_mode) is not str:
-        raise ValueError(f"cache: invalid index_mode={index_mode!r}")
-    if type(audit_graphs) is not bool:
-        raise ValueError(f"cache: invalid audit_graphs={audit_graphs!r}")
+        raise _invalid("index_mode", index_mode, "'implicit'|'explicit'")
+    if validation not in ("envelope", "topology") or type(validation) is not str:
+        raise _invalid("validation", validation, "'envelope'|'topology'")
     if type(durable) is not bool:
-        raise ValueError(f"cache: invalid durable={durable!r}")
+        raise _invalid("durable", durable, "bool")
     resolved_graph_class = _normalize_graph_class(
         graph_class,
         field_name="graph_class",
@@ -888,14 +1081,20 @@ def write_graph_catalog(
     if expected_count is None and isinstance(graphs, Sized):
         expected_count = len(graphs)
     if index_mode == "explicit" and expected_count is None:
-        raise ValueError("cache: graph_count required for an unsized explicit-index stream")
+        raise _cache_error("graph_count required for unsized explicit-index stream")
 
     # stored_index + 1 reserves zero for duplicate detection in the mmap.
-    width: Literal[4, 8] | None = (4 if expected_count < _UINT32_LIMIT else 8) if index_mode == "explicit" and expected_count is not None else None
+    width: Literal[4, 8] | None = (
+        (4 if expected_count < _UINT32_LIMIT else 8)
+        if index_mode == "explicit" and expected_count is not None
+        else None
+    )
     try:
         graph_iterator = iter(graphs)
     except TypeError as exc:
-        raise ValueError(f"cache: invalid graphs type {type(graphs).__name__}") from exc
+        detail = f"invalid graphs type {type(graphs).__name__}"
+        error = _cache_error(detail)
+        raise error from exc
     close_iterator = getattr(graph_iterator, "close", None)
     resources = ExitStack()
     temporary_path: Path | None = None
@@ -915,10 +1114,14 @@ def write_graph_catalog(
         writable_index: mmap.mmap | None = None
         if width is not None and expected_count is not None:
             # Disk-backed random writes avoid an O(N) in-memory inverse index.
-            index_file = resources.enter_context(tempfile.TemporaryFile(dir=resolved_path.parent))
+            index_file = resources.enter_context(
+                tempfile.TemporaryFile(dir=resolved_path.parent)
+            )
             index_file.truncate(expected_count * width)
             if expected_count:
-                writable_index = resources.enter_context(mmap.mmap(index_file.fileno(), 0, access=mmap.ACCESS_WRITE))
+                writable_index = resources.enter_context(
+                    mmap.mmap(index_file.fileno(), 0, access=mmap.ACCESS_WRITE)
+                )
 
         chunks: list[tuple[int, str]] = []
         raw_chunk = bytearray()
@@ -926,13 +1129,17 @@ def write_graph_catalog(
         stored_count = 0
         resolved_n = dual_vertex_count
         sequence_hasher = hashlib.sha256()
-        index_struct = struct.Struct("<I" if width == 4 else "<Q") if width is not None else None
+        index_struct = (
+            struct.Struct("<I" if width == 4 else "<Q") if width is not None else None
+        )
 
         for graph in graph_iterator:
             if expected_count is not None and stored_count >= expected_count:
-                raise ValueError(f"cache: graph count exceeds expected {expected_count} ({resolved_path})")
+                detail = f"graph count exceeds expected actual>{expected_count}"
+                raise _cache_error(detail, resolved_path)
             if type(graph) is not QuarticPlaneMap:
-                raise ValueError(f"cache: invalid graph {stored_count} type {type(graph).__name__}")
+                detail = f"invalid graph {stored_count} type {type(graph).__name__}"
+                raise _cache_error(detail)
             if resolved_n is None:
                 resolved_n = graph.dual_num_vertices
                 _require_int_between(
@@ -941,8 +1148,13 @@ def write_graph_catalog(
                     minimum=3,
                     maximum=MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT,
                 )
-            if stored_count == 0 and resolved_graph_class == "simple_quartic" and resolved_n < 6:
-                raise ValueError(f"cache: nonempty simple_quartic n={resolved_n}<6 ({resolved_path})")
+            if (
+                stored_count == 0
+                and resolved_graph_class == "simple_quartic"
+                and resolved_n < 6
+            ):
+                detail = f"nonempty simple_quartic n={resolved_n}<6"
+                raise _cache_error(detail, resolved_path)
             graph_id = _validate_graph_envelope(
                 graph,
                 graph_index=stored_count,
@@ -952,12 +1164,16 @@ def write_graph_catalog(
                 index_mode=index_mode,
                 filepath=resolved_path,
             )
-            if audit_graphs:
+            if validation == "topology":
                 _validate_graph_semantics_one(graph, stored_count)
-            if writable_index is not None and index_struct is not None and width is not None:
+            if (
+                writable_index is not None
+                and index_struct is not None
+                and width is not None
+            ):
                 index_offset = graph_id * width
                 if index_struct.unpack_from(writable_index, index_offset)[0]:
-                    raise ValueError(f"cache: duplicate graph_id={graph_id} ({resolved_path})")
+                    raise _cache_error(f"duplicate graph_id={graph_id}", resolved_path)
                 index_struct.pack_into(writable_index, index_offset, stored_count + 1)
                 raw_chunk.extend(graph_id.to_bytes(width, "little"))
             raw_chunk.extend(graph.twin)
@@ -966,16 +1182,30 @@ def write_graph_catalog(
             stored_count += 1
             records_in_chunk += 1
             if records_in_chunk == chunk_size:
-                chunks.append(_write_chunk(destination_stream, raw_chunk, compression=compression, compress_level=compress_level))
+                chunks.append(
+                    _write_chunk(
+                        destination_stream,
+                        raw_chunk,
+                        compression=compression,
+                        compress_level=compress_level,
+                    )
+                )
                 raw_chunk.clear()
                 records_in_chunk = 0
 
         if expected_count is not None and stored_count != expected_count:
-            raise ValueError(f"cache: graph count mismatch: {stored_count}!={expected_count} ({resolved_path})")
+            raise _mismatch("graph count", stored_count, expected_count, resolved_path)
         if resolved_n is None:
-            raise ValueError("cache: dual_vertex_count required for an empty graph stream")
+            raise _cache_error("dual_vertex_count required for empty graph stream")
         if raw_chunk:
-            chunks.append(_write_chunk(destination_stream, raw_chunk, compression=compression, compress_level=compress_level))
+            chunks.append(
+                _write_chunk(
+                    destination_stream,
+                    raw_chunk,
+                    compression=compression,
+                    compress_level=compress_level,
+                )
+            )
 
         if writable_index is not None:
             writable_index.flush()
@@ -1003,7 +1233,11 @@ def write_graph_catalog(
             storage_order_version=storage_order_version,
         )
         record_size = 4 * resolved_n + (width or 0)
-        record_encoding = _IMPLICIT_RECORD_ENCODING if width is None else f"graph-id-u{8 * width}-le+twin-u8"
+        record_encoding = (
+            _IMPLICIT_RECORD_ENCODING
+            if width is None
+            else f"graph-id-u{8 * width}-le+twin-u8"
+        )
         manifest_bytes = json.dumps(
             {
                 "metadata": {
@@ -1027,7 +1261,10 @@ def write_graph_catalog(
             sort_keys=True,
         ).encode("utf-8")
         if len(manifest_bytes) > _MAX_MANIFEST_SIZE:
-            raise ValueError(f"cache: manifest too large: {len(manifest_bytes)} bytes ({resolved_path})")
+            detail = (
+                f"manifest size={len(manifest_bytes)} expected<={_MAX_MANIFEST_SIZE}"
+            )
+            raise _cache_error(detail, resolved_path)
         destination_stream.write(manifest_bytes)
         destination_stream.write(
             _CACHE_FOOTER_STRUCT.pack(
@@ -1050,21 +1287,36 @@ def write_graph_catalog(
         temporary_path.replace(resolved_path)
         if durable and os.name == "posix":
             # POSIX directory fsync persists the rename itself after a crash.
-            directory_fd = os.open(resolved_path.parent, os.O_RDONLY)
             try:
-                os.fsync(directory_fd)
+                directory_fd = os.open(resolved_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                except BaseException as error:
+                    _note_cleanup_failure(
+                        error,
+                        "failed to close directory fd",
+                        lambda: os.close(directory_fd),
+                    )
+                    raise
+                os.close(directory_fd)
             except BaseException as error:
-                error.add_note("cache: replacement completed before directory sync failed")
-                _note_cleanup_failure(error, "failed to close directory fd", lambda: os.close(directory_fd))
+                error.add_note("cache: replace committed; durable finalization failed")
                 raise
-            os.close(directory_fd)
     except BaseException as error:
-        _note_cleanup_failure(error, "failed to close temporary resources", resources.close)
+        _note_cleanup_failure(
+            error, "failed to close temporary resources", resources.close
+        )
         if temporary_path is not None:
             path_to_remove = temporary_path
-            _note_cleanup_failure(error, "failed to remove temporary file", lambda: path_to_remove.unlink(missing_ok=True))
+            _note_cleanup_failure(
+                error,
+                "failed to remove temporary file",
+                lambda: path_to_remove.unlink(missing_ok=True),
+            )
         if callable(close_iterator):
-            _note_cleanup_failure(error, "iterator close failed during error cleanup", close_iterator)
+            _note_cleanup_failure(
+                error, "iterator close failed during error cleanup", close_iterator
+            )
         raise
 
     return resolved_path
