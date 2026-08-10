@@ -9,13 +9,14 @@ import logging
 import pickle
 import struct
 import tempfile
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, overload
 
 from .plane_graph import QuarticPlaneMap
-from .plantri import QuadrangulationDualClass
+from .plantri_interface import QuadrangulationDualClass
 
 logger = logging.getLogger(__name__)
 
@@ -392,7 +393,7 @@ def _validate_graph_envelope(
     if len(graph.twin) != 4 * n:
         raise ValueError(f"cache: graph {graph_index} dart count {len(graph.twin)}!={4 * n} ({filepath})")
 
-    num_support_edges, double_edge_count, _ = graph.dual_topology_profile()
+    num_support_edges, double_edge_count = graph._dual_edge_cardinality_profile()
     if not n <= num_support_edges <= 2 * n:
         raise ValueError(f"cache: graph {graph_index} support-edge cardinality mismatch ({filepath})")
     if (
@@ -531,18 +532,27 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
     __slots__ = (
         "_filepath",
         "_manifest",
-        "_cached_chunk",
+        "_cached_chunks",
+        "_cached_chunk_limit",
     )
 
     def __init__(
         self,
         filepath: Path,
         manifest: _CacheManifest,
+        *,
+        cached_chunks: int = 1,
     ) -> None:
         """Initialize the lazy catalog without reading graph payloads."""
+        _require_int_at_least(
+            cached_chunks,
+            field_name="cached_chunks",
+            minimum=1,
+        )
         self._filepath = filepath
         self._manifest = manifest
-        self._cached_chunk: tuple[int, tuple[QuarticPlaneMap, ...]] | None = None
+        self._cached_chunks: OrderedDict[int, tuple[QuarticPlaneMap, ...]] = OrderedDict()
+        self._cached_chunk_limit = cached_chunks
 
     @property
     def metadata(self) -> CacheMetadata:
@@ -567,15 +577,27 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
         chunk_index: int,
     ) -> tuple[QuarticPlaneMap, ...]:
         """Return one decoded graph chunk, loading and caching it on demand."""
-        cached = self._cached_chunk
-        if cached is not None and cached[0] == chunk_index:
-            return cached[1]
+        graphs = self._cached_chunks.get(chunk_index)
+        if graphs is not None:
+            self._cached_chunks.move_to_end(chunk_index)
+            return graphs
 
         chunk = self._manifest.chunks[chunk_index]
         payload = self._read_range(chunk.offset, chunk.size)
         graphs = self._decode_chunk(chunk_index, payload)
-        self._cached_chunk = (chunk_index, graphs)
+        self._cache_chunk(chunk_index, graphs)
         return graphs
+
+    def _cache_chunk(
+        self,
+        chunk_index: int,
+        graphs: tuple[QuarticPlaneMap, ...],
+    ) -> None:
+        """Insert one decoded chunk and evict the least-recently used chunk."""
+        self._cached_chunks[chunk_index] = graphs
+        self._cached_chunks.move_to_end(chunk_index)
+        if len(self._cached_chunks) > self._cached_chunk_limit:
+            self._cached_chunks.popitem(last=False)
 
     def _decode_chunk(
         self,
@@ -652,19 +674,19 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
         return self._get_stored(position)
 
     def __iter__(self) -> Iterator[QuarticPlaneMap]:
-        """Yield graphs in physical storage order with a one-chunk cache."""
+        """Yield graphs in physical storage order through the bounded chunk cache."""
         with self._filepath.open("rb") as stream:
             for chunk_index, chunk in enumerate(self._manifest.chunks):
-                cached = self._cached_chunk
-                if cached is not None and cached[0] == chunk_index:
-                    graphs = cached[1]
-                else:
+                graphs = self._cached_chunks.get(chunk_index)
+                if graphs is None:
                     stream.seek(chunk.offset)
                     payload = stream.read(chunk.size)
                     if len(payload) != chunk.size:
                         raise ValueError(f"cache: truncated chunk {chunk_index} ({self._filepath})")
                     graphs = self._decode_chunk(chunk_index, payload)
-                    self._cached_chunk = (chunk_index, graphs)
+                    self._cache_chunk(chunk_index, graphs)
+                else:
+                    self._cached_chunks.move_to_end(chunk_index)
                 yield from graphs
 
     def get_by_graph_id(self, graph_id: int) -> QuarticPlaneMap:
@@ -674,16 +696,19 @@ class QuarticPlaneMapCatalog(Sequence[QuarticPlaneMap]):
         if not 0 <= graph_id < len(self):
             raise KeyError(graph_id)
 
-        descriptor = self._manifest.graph_id_index
-        stored_index = int.from_bytes(
-            self._read_range(
-                descriptor.offset + graph_id * descriptor.width,
-                descriptor.width,
-            ),
-            byteorder="little",
-        )
-        if stored_index >= len(self):
-            raise ValueError(f"cache: invalid stored index {stored_index} for graph_id={graph_id} ({self._filepath})")
+        if self.metadata.storage_order_name == "source":
+            stored_index = graph_id
+        else:
+            descriptor = self._manifest.graph_id_index
+            stored_index = int.from_bytes(
+                self._read_range(
+                    descriptor.offset + graph_id * descriptor.width,
+                    descriptor.width,
+                ),
+                byteorder="little",
+            )
+            if stored_index >= len(self):
+                raise ValueError(f"cache: invalid stored index {stored_index} for graph_id={graph_id} ({self._filepath})")
         graph = self._get_stored(stored_index)
         if graph.graph_id != graph_id:
             raise ValueError(f"cache: graph_id_index maps {graph_id} to graph {graph.graph_id} ({self._filepath})")
@@ -717,14 +742,24 @@ def load_graphs_from_cache(
     filepath: str | Path,
     *,
     trusted: bool = False,
+    cached_chunks: int = 1,
 ) -> QuarticPlaneMapCatalog:
-    """Open a lazy physical-order catalog; chunks are checked on access."""
+    """Open a lazy catalog with a bounded decoded-chunk LRU cache."""
     _require_bool(trusted, field_name="trusted")
+    _require_int_at_least(
+        cached_chunks,
+        field_name="cached_chunks",
+        minimum=1,
+    )
     resolved_path = Path(filepath)
     if not trusted:
         raise ValueError("cache: trusted=True required")
 
-    return QuarticPlaneMapCatalog(resolved_path, _open_manifest(resolved_path))
+    return QuarticPlaneMapCatalog(
+        resolved_path,
+        _open_manifest(resolved_path),
+        cached_chunks=cached_chunks,
+    )
 
 
 def save_graphs_to_cache(

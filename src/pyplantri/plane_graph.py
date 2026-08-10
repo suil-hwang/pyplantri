@@ -173,6 +173,17 @@ class QuarticPlaneMap:
         object.__setattr__(self, "_topology_cache", None)
         self.__post_init__()
 
+    def _compute_dual_edge_multiplicities(self) -> dict[SupportEdge, int]:
+        """Count normalized support-edge multiplicities without caching."""
+        multiplicities: dict[SupportEdge, int] = {}
+        for dart, twin_dart in enumerate(self.twin):
+            if dart > twin_dart:
+                continue
+            endpoints = dart // 4, twin_dart // 4
+            edge = min(endpoints), max(endpoints)
+            multiplicities[edge] = multiplicities.get(edge, 0) + 1
+        return multiplicities
+
     def _compute_derived_topology(self) -> _DerivedTopology:
         """Compute immutable dual and primal topology views without caching."""
         twin = self.twin
@@ -202,15 +213,7 @@ class QuarticPlaneMap:
             dual_face_dart_orbits.append(tuple(face_dart_orbit))
 
         # Count each alpha-paired edge once after normalizing its endpoint order.
-        dual_edge_multiplicity: dict[SupportEdge, int] = {}
-        for dart, twin_dart in enumerate(twin):
-            if dart > twin_dart:
-                continue
-            endpoints = dart // 4, twin_dart // 4
-            support_edge = min(endpoints), max(endpoints)
-            dual_edge_multiplicity[support_edge] = (
-                dual_edge_multiplicity.get(support_edge, 0) + 1
-            )
+        dual_edge_multiplicity = self._compute_dual_edge_multiplicities()
 
         # Dual face orbits become primal vertices; dual vertices become primal faces.
         return _DerivedTopology(
@@ -282,15 +285,44 @@ class QuarticPlaneMap:
             if multiplicity == 2
         )
 
+    def _dual_edge_cardinality_profile(self) -> tuple[int, int]:
+        """Return support- and double-edge counts without retaining topology."""
+        topology = self._topology_cache
+        multiplicities = (
+            topology.dual_edge_multiplicity
+            if topology is not None
+            else self._compute_dual_edge_multiplicities()
+        )
+        return (
+            len(multiplicities),
+            sum(multiplicity == 2 for multiplicity in multiplicities.values()),
+        )
+
     def dual_topology_profile(self) -> tuple[int, int, tuple[int, ...]]:
         """Return support-edge count, double-edge count, and descending face sizes."""
-        topology = self._topology_cache or self._compute_derived_topology()
-        multiplicities = topology.dual_edge_multiplicity.values()
-        return (
-            len(topology.dual_edge_multiplicity),
-            sum(multiplicity == 2 for multiplicity in multiplicities),
-            tuple(sorted(map(len, topology.dual_faces), reverse=True)),
-        )
+        topology = self._topology_cache
+        if topology is not None:
+            face_sizes = tuple(sorted(map(len, topology.dual_faces), reverse=True))
+        else:
+            visited = bytearray(len(self.twin))
+            sizes: list[int] = []
+            for start_dart in range(len(self.twin)):
+                if visited[start_dart]:
+                    continue
+                dart = start_dart
+                size = 0
+                while not visited[dart]:
+                    visited[dart] = 1
+                    twin_dart = self.twin[dart]
+                    dart = 4 * (twin_dart // 4) + (twin_dart % 4 - 1) % 4
+                    size += 1
+                if dart != start_dart:
+                    raise ValueError("right-face traversal merged distinct orbits")
+                sizes.append(size)
+            face_sizes = tuple(sorted(sizes, reverse=True))
+
+        support_edge_count, double_edge_count = self._dual_edge_cardinality_profile()
+        return support_edge_count, double_edge_count, face_sizes
 
     @property
     def primal_num_vertices(self) -> int:

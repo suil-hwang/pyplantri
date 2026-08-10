@@ -2,7 +2,7 @@
 
 A Python wrapper for [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) to enumerate **Simple Quadrangulations on a Sphere (SQS)**.
 
-Given the dual vertex count `n`, it enumerates all **non-isomorphic duals of simple quadrangulations of the sphere** as compact quartic plane maps. Their primal and dual topology is derived exactly from the stored dart involution.
+Given a supported dual vertex count `n`, it enumerates one representative of each **plane-map isomorphism class of duals of simple quadrangulations of the sphere** as compact quartic plane maps. Global reflection is identified. Their primal and dual topology is derived exactly from the stored dart involution.
 
 ## What is plantri?
 
@@ -25,18 +25,29 @@ This package wraps plantri's **Simple Quadrangulation** enumeration functionalit
 
 ### Q (Primal) - Simple Quadrangulation
 
-- **Plane graph** where every face is a quadrilateral
+- **Plane graph** where every face boundary is a 4-cycle
 - Simple graph (no loops, no multi-edges)
 - Vertex count: `n + 2`
 
 ### Q\* (Dual) - 4-regular Plane Multigraph
 
-| Property    | Description                                          |
-| ----------- | ---------------------------------------------------- |
-| Plane graph | Embedded on a sphere with fixed cyclic edge ordering |
-| Multigraph  | Double edges allowed                                 |
-| Loop-free   | No loops because `-c2` makes Q bridge-free           |
-| 4-regular   | Every vertex has exactly degree 4                    |
+| Property         | Description                                                       |
+| ---------------- | ----------------------------------------------------------------- |
+| Plane map        | Embedded on a sphere with fixed cyclic edge ordering              |
+| Multigraph       | Parallel edges are permitted; simple members are included         |
+| Loop-free        | A simple quadrangulation is 2-connected and therefore bridge-free |
+| 4-regular        | Every vertex has exactly degree 4                                 |
+| 4-edge-connected | Every non-trivial edge cut contains at least four edge copies     |
+
+### Enumeration Families
+
+| Enum member          | Primal plantri flags | Exact dual family                                                                     |
+| -------------------- | -------------------- | ------------------------------------------------------------------------------------- |
+| `QUARTIC_MULTIGRAPH` | `-q -c2 -m2`         | Loop-free, 4-regular, 4-edge-connected plane multigraphs; parallel edges may occur    |
+| `SIMPLE_QUARTIC`     | `-q -c2`             | Simple, 4-regular, 4-edge-connected plane graphs; primal minimum degree is at least 3 |
+
+The second family is a topological subset of the first, but the two plantri
+streams use independent source-order `graph_id` namespaces.
 
 ### Vertex Count Relationship (Euler's Formula)
 
@@ -49,7 +60,7 @@ For plane graphs: `V - E + F = 2`
 
 **Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
 
-**Input Constraint:** The bundled count and materialization paths support `3 <= n <= 62`. The simple-quartic subclass is empty for `n < 6`.
+**Input Constraint:** The bundled count and materialization paths support `3 <= n <= 62`. The `SIMPLE_QUARTIC` family is empty for `n < 6`. The full literature `QUARTIC_MULTIGRAPH` family also contains the square's two-vertex dual, which lies outside this wrapper's supported range.
 
 `QuarticPlaneMap` numbers the four clockwise darts at vertex `v` as
 `4*v, ..., 4*v+3` and stores only the opposite-dart involution `twin` plus the
@@ -67,7 +78,10 @@ headerless one-byte `planar_code` to a unique temporary binary file. Python
 drains complete records while the child runs and removes the file on normal,
 failed, and early-closed paths. This avoids platform text-mode translation
 without changing the bundled C source. The simple primal rotation system is
-dualized exactly while preserving the exterior-view-CW convention.
+dualized exactly while preserving the exterior-view-CW convention. Because a
+primal quadrangulation with `N` vertices has `2N-4` edges, the production path
+decodes fixed `5N-7` byte records; the public generic decoder remains available
+for other headerless one-byte `planar_code` streams.
 
 Without `-o`, as in the predefined quadrangulation modes, plantri identifies
 an embedded graph with its mirror image. With `-o`, orientation-preserving
@@ -90,7 +104,11 @@ pip install -e .
 
 CMake automatically builds plantri during installation.
 
-## Number of Non-isomorphic Plane Graphs by n
+`Plantri()` resolves only the bundled executable belonging to the active
+package installation. To use another build, pass its path explicitly as
+`Plantri(executable=...)`; no executable is selected implicitly from `PATH`.
+
+## Number of `QUARTIC_MULTIGRAPH` Plane Maps by n
 
 | n (Q\* vertices) | Q vertices | Non-isomorphic count |
 | ---------------- | ---------- | -------------------- |

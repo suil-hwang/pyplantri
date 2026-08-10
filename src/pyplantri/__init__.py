@@ -16,7 +16,7 @@ from .enumeration import (
     enumerate_simple_quadrangulation_duals,
 )
 from .plane_graph import QuarticPlaneMap
-from .plantri import (
+from .plantri_interface import (
     MAX_DUAL_VERTEX_COUNT,
     MIN_DUAL_VERTEX_COUNT,
     PlanarCodeError,

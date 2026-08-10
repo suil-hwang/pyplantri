@@ -12,7 +12,7 @@ from itertools import chain, islice
 from pathlib import Path
 
 from .plane_graph import QuarticPlaneMap
-from .plantri import QuadrangulationDualClass, QuadrangulationEnumerator
+from .plantri_interface import QuadrangulationDualClass, QuadrangulationEnumerator
 from .types import Embedding
 
 
@@ -49,7 +49,7 @@ def _build_quartic_plane_map_task(
         validate=validate,
     )
     if dual_class is QuadrangulationDualClass.SIMPLE_QUARTIC:
-        support_edge_count, _, _ = plane_map.dual_topology_profile()
+        support_edge_count, _ = plane_map._dual_edge_cardinality_profile()
         if support_edge_count != 2 * plane_map.dual_num_vertices:
             parallel_edges = sorted(
                 (edge, multiplicity)
@@ -88,11 +88,11 @@ def enumerate_simple_quadrangulation_duals(
         or start_method not in multiprocessing.get_all_start_methods()
     ):
         raise ValueError(f"unsupported start_method: {start_method!r}")
-    resolved_dual_class = QuadrangulationEnumerator._normalize_dual_class(dual_class)
+    resolved_dual_class = QuadrangulationDualClass(dual_class)
     QuadrangulationEnumerator._validate_supported_dual_vertex_count(dual_vertex_count)
 
     enumeration_started_at = time.perf_counter()
-    if max_count == 0 or dual_vertex_count < QuadrangulationEnumerator._min_nonempty_dual_vertex_count(resolved_dual_class):
+    if max_count == 0 or dual_vertex_count < QuadrangulationEnumerator._MIN_NONEMPTY_DUAL_VERTEX_COUNT_BY_CLASS[resolved_dual_class]:
         return PlantriEnumerationResult(
             graphs=(),
             time_to_first_embedding_s=0.0,
@@ -100,7 +100,7 @@ def enumerate_simple_quadrangulation_duals(
         )
 
     primal_embedding_iter = iter(
-        QuadrangulationEnumerator().iter_embeddings(
+        QuadrangulationEnumerator().iter_primal_embeddings(
             dual_vertex_count,
             dual_class=resolved_dual_class,
         )
@@ -179,7 +179,11 @@ def enumerate_simple_quadrangulation_duals(
     elapsed_s = time.perf_counter() - enumeration_started_at
     if verbose:
         execution_mode = "parallel" if mp_context is not None else "sequential"
-        print(f"[Plantri] {resolved_dual_class.value} n={dual_vertex_count}: {len(plane_maps)} maps ({execution_mode} map construction)")
+        print(
+            f"[Plantri] {resolved_dual_class.value} "
+            f"dual_vertices={dual_vertex_count}, plantri_n={dual_vertex_count + 2}: "
+            f"{len(plane_maps)} maps ({execution_mode} map construction)"
+        )
     return PlantriEnumerationResult(
         graphs=plane_maps,
         time_to_first_embedding_s=time_to_first_embedding_s,
