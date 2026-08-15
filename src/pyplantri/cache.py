@@ -564,24 +564,24 @@ def _validate_graph_envelope(
     # QuarticPlaneMap already owns core type, twin, and nonnegative-ID checks.
     graph_id = graph.graph_id
     if graph_id >= _MAX_GRAPH_COUNT:
-        detail = (f"graph {graph_index} graph_id={graph_id} expected<={_MAX_GRAPH_COUNT - 1}")
+        detail = f"graph {graph_index} graph_id={graph_id} expected<={_MAX_GRAPH_COUNT - 1}"
         raise _cache_error(detail, filepath)
     if graph_count is not None and graph_id >= graph_count:
-        detail = (f"graph {graph_index} graph_id={graph_id} expected=0..{graph_count - 1}")
+        detail = f"graph {graph_index} graph_id={graph_id} expected=0..{graph_count - 1}"
         raise _cache_error(detail, filepath)
     if index_mode == "implicit" and graph_id != graph_index:
-        detail = (f"implicit graph {graph_index} graph_id={graph_id} expected={graph_index}")
+        detail = f"implicit graph {graph_index} graph_id={graph_id} expected={graph_index}"
         raise _cache_error(detail, filepath)
     expected_dart_count = 4 * dual_vertex_count
     if len(graph.twin) != expected_dart_count:
-        detail = (f"graph {graph_index} dart count {len(graph.twin)}!={expected_dart_count}")
+        detail = f"graph {graph_index} dart count {len(graph.twin)}!={expected_dart_count}"
         raise _cache_error(detail, filepath)
     maximum_multiplicity, has_loop = graph._dual_edge_envelope()
     if has_loop:
         raise _cache_error(f"graph {graph_index} contains a dual loop", filepath)
     allowed_multiplicity = 1 if graph_class == "simple_quartic" else 2
     if maximum_multiplicity > allowed_multiplicity:
-        detail = (f"graph {graph_index} edge multiplicity {maximum_multiplicity}>{allowed_multiplicity}")
+        detail = f"graph {graph_index} edge multiplicity {maximum_multiplicity}>{allowed_multiplicity}"
         raise _cache_error(detail, filepath)
     return graph_id
 
@@ -629,29 +629,29 @@ def _open_manifest(filepath: Path) -> _CacheManifest:
         file_size = stream.seek(0, io.SEEK_END)
         if file_size < _CACHE_FOOTER_STRUCT.size + 2:
             minimum_size = _CACHE_FOOTER_STRUCT.size + 2
-            detail = (f"truncated v12 container size={file_size} expected>={minimum_size}")
+            detail = f"truncated v12 container size={file_size} expected>={minimum_size}"
             raise _cache_error(detail, filepath)
         footer_offset = file_size - _CACHE_FOOTER_STRUCT.size
         stream.seek(footer_offset)
         raw_footer = stream.read(_CACHE_FOOTER_STRUCT.size)
         if len(raw_footer) != _CACHE_FOOTER_STRUCT.size:
-            detail = (f"truncated footer bytes={len(raw_footer)} expected={_CACHE_FOOTER_STRUCT.size}")
+            detail = f"truncated footer bytes={len(raw_footer)} expected={_CACHE_FOOTER_STRUCT.size}"
             raise _cache_error(detail, filepath)
         magic, version, manifest_size, expected_digest = _CACHE_FOOTER_STRUCT.unpack(raw_footer)
         if magic != _CACHE_MAGIC:
-            detail = (f"unsupported cache magic actual={_brief(magic)} expected={_brief(_CACHE_MAGIC)}")
+            detail = f"unsupported cache magic actual={_brief(magic)} expected={_brief(_CACHE_MAGIC)}"
             raise _cache_error(detail, filepath)
         if version != CACHE_FORMAT_VERSION:
             raise _mismatch("format_version", version, CACHE_FORMAT_VERSION, filepath)
         if not 2 <= manifest_size <= min(_MAX_MANIFEST_SIZE, footer_offset):
             maximum_size = min(_MAX_MANIFEST_SIZE, footer_offset)
-            detail = (f"invalid manifest range size={manifest_size} expected=2..{maximum_size}")
+            detail = f"invalid manifest range size={manifest_size} expected=2..{maximum_size}"
             raise _cache_error(detail, filepath)
         manifest_offset = footer_offset - manifest_size
         stream.seek(manifest_offset)
         manifest_bytes = stream.read(manifest_size)
         if len(manifest_bytes) != manifest_size:
-            detail = (f"truncated manifest bytes={len(manifest_bytes)} expected={manifest_size}")
+            detail = f"truncated manifest bytes={len(manifest_bytes)} expected={manifest_size}"
             raise _cache_error(detail, filepath)
         if hashlib.sha256(manifest_bytes).digest() != expected_digest:
             raise _cache_error("manifest hash mismatch", filepath)
@@ -829,17 +829,27 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
             raise IndexError("QuarticPlaneMapCache index out of range")
         return self._get_stored(position)
 
+    def _read_chunk_payload(
+        self,
+        stream: BinaryIO,
+        chunk_index: int,
+        chunk: _CacheChunk,
+    ) -> bytes:
+        """Read one chunk's exact payload from an already-open stream."""
+        stream.seek(chunk.offset)
+        payload = stream.read(chunk.size)
+        if len(payload) != chunk.size:
+            detail = f"truncated chunk {chunk_index} bytes={len(payload)} expected={chunk.size}"
+            raise _cache_error(detail, self._filepath)
+        return payload
+
     def __iter__(self) -> Iterator[QuarticPlaneMap]:
         """Yield physical-order records through the bounded LRU."""
         with self._filepath.open("rb") as stream:
             for chunk_index, chunk in enumerate(self._manifest.chunks):
                 graphs = self._cached_chunks.get(chunk_index)
                 if graphs is None:
-                    stream.seek(chunk.offset)
-                    payload = stream.read(chunk.size)
-                    if len(payload) != chunk.size:
-                        detail = (f"truncated chunk {chunk_index} bytes={len(payload)} expected={chunk.size}")
-                        raise _cache_error(detail, self._filepath)
+                    payload = self._read_chunk_payload(stream, chunk_index, chunk)
                     graphs = self._decode_chunk(chunk_index, payload)
                     self._cache_chunk(chunk_index, graphs)
                 else:
@@ -851,11 +861,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
         # Whole-file evidence must not trust data retained by an earlier access.
         with self._filepath.open("rb") as stream:
             for chunk_index, chunk in enumerate(self._manifest.chunks):
-                stream.seek(chunk.offset)
-                payload = stream.read(chunk.size)
-                if len(payload) != chunk.size:
-                    detail = (f"truncated chunk {chunk_index} bytes={len(payload)} expected={chunk.size}")
-                    raise _cache_error(detail, self._filepath)
+                payload = self._read_chunk_payload(stream, chunk_index, chunk)
                 yield from self._decode_chunk(chunk_index, payload)
 
     def get_by_graph_id(self, graph_id: int) -> QuarticPlaneMap:
@@ -878,7 +884,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                 "little",
             )
             if encoded == 0 or encoded > len(self):
-                detail = (f"invalid stored-index sentinel {encoded} for graph_id={graph_id}")
+                detail = f"invalid stored-index sentinel {encoded} for graph_id={graph_id}"
                 raise _cache_error(detail, self._filepath)
             stored_index = encoded - 1
         graph = self._get_stored(stored_index)
@@ -936,7 +942,7 @@ class QuarticPlaneMapCache(Sequence[QuarticPlaneMap]):
                         graph.graph_id * descriptor.width,
                     )[0]
                     if encoded != stored_index + 1:
-                        detail = (f"graph_id_index mismatch for graph_id={graph.graph_id}")
+                        detail = f"graph_id_index mismatch for graph_id={graph.graph_id}"
                         raise _cache_error(detail, self._filepath)
                 # This identifies exact physical records/order, not graph isomorphism.
                 sequence_hasher.update(graph.graph_id.to_bytes(8, "little"))
@@ -1062,21 +1068,28 @@ def write_graph_cache(
     try:
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
         # A same-directory temporary file keeps the final replace atomic.
-        destination_stream = resources.enter_context(
-            tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=resolved_path.parent,
-                suffix=".tmp",
-                delete=False,
-            )
+        # The wrapper proxies every binary file method but does not subclass BinaryIO.
+        destination_stream = cast(
+            BinaryIO,
+            resources.enter_context(
+                tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=resolved_path.parent,
+                    suffix=".tmp",
+                    delete=False,
+                )
+            ),
         )
         temporary_path = Path(destination_stream.name)
         index_file: BinaryIO | None = None
         writable_index: mmap.mmap | None = None
         if width is not None and expected_count is not None:
             # Disk-backed random writes avoid an O(N) in-memory inverse index.
-            index_file = resources.enter_context(
-                tempfile.TemporaryFile(dir=resolved_path.parent)
+            index_file = cast(
+                BinaryIO,
+                resources.enter_context(
+                    tempfile.TemporaryFile(dir=resolved_path.parent)
+                ),
             )
             index_file.truncate(expected_count * width)
             if expected_count:
@@ -1222,7 +1235,7 @@ def write_graph_cache(
             sort_keys=True,
         ).encode("utf-8")
         if len(manifest_bytes) > _MAX_MANIFEST_SIZE:
-            detail = (f"manifest size={len(manifest_bytes)} expected<={_MAX_MANIFEST_SIZE}")
+            detail = f"manifest size={len(manifest_bytes)} expected<={_MAX_MANIFEST_SIZE}"
             raise _cache_error(detail, resolved_path)
         destination_stream.write(manifest_bytes)
         destination_stream.write(

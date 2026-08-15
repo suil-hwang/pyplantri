@@ -66,10 +66,10 @@ def _build_simple_quartic_task(item: tuple[int, Embedding]) -> QuarticPlaneMap:
 
 def _available_cpu_count() -> int:
     """Return the process-visible CPU count, respecting POSIX affinity."""
-    get_affinity = getattr(os, "sched_getaffinity", None)
-    if callable(get_affinity):
+    # Probed by attribute: sched_getaffinity is absent on both Windows and macOS.
+    if hasattr(os, "sched_getaffinity"):
         try:
-            return max(1, len(get_affinity(0)))
+            return max(1, len(os.sched_getaffinity(0)))
         except OSError:
             pass
     return os.cpu_count() or 1

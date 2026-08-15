@@ -9,7 +9,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +21,7 @@ from .plane_graph import MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT
 from .types import Embedding
 
 
+# Public request and capability surface.
 PlantriOutput = Literal[
     "planar_code",
     "ascii",
@@ -29,6 +30,13 @@ PlantriOutput = Literal[
     "edge_code",
     "none",
 ]
+# Public bundled SQS bounds; n=N-2 for a quadrangulation with N primal vertices.
+MIN_DUAL_VERTEX_COUNT = 3
+BUNDLED_PLANTRI_MAX_VERTEX_COUNT = 64
+BUNDLED_MAX_DUAL_VERTEX_COUNT = BUNDLED_PLANTRI_MAX_VERTEX_COUNT - 2
+
+
+# Command-line switch tables.
 _OUTPUT_SWITCH_BY_FORMAT: dict[PlantriOutput, str | None] = {
     "planar_code": None,
     "ascii": "-a",
@@ -39,24 +47,237 @@ _OUTPUT_SWITCH_BY_FORMAT: dict[PlantriOutput, str | None] = {
 }
 _TEXT_OUTPUT_FORMATS = frozenset(("ascii", "graph6", "sparse6"))
 _OUTPUT_SWITCH_CHARS = frozenset("agsETu")
-# Translate separators to 255 and labels 1..255 to 0..254 in one C-level pass.
-_ZERO_BASE_TRANSLATION = bytes((255, *range(255)))
-_TRANSLATED_ROW_SEPARATOR = b"\xff"
+_C_INT_MAX = 2_147_483_647
+
+
+# Process and stream polling budgets.
 _IO_CHUNK_SIZE = 1 << 16
 _FILE_POLL_INTERVAL_S = 0.01
 _PROCESS_TERMINATE_TIMEOUT_S = 5.0
 _VERSION_PROBE_TIMEOUT_S = 5.0
-_C_INT_MAX = 2_147_483_647
 
+
+# planar_code record encoding.
+# Translate separators to 255 and labels 1..255 to 0..254 in one C-level pass.
+_ZERO_BASE_TRANSLATION = bytes((255, *range(255)))
+_TRANSLATED_ROW_SEPARATOR = b"\xff"
 # One-byte planar_code supports 1..255 labels; bundled input is smaller.
 _ONE_BYTE_PLANAR_CODE_MAX_N = 255
-BUNDLED_PLANTRI_MAX_VERTEX_COUNT = 64
-
-# Public bundled SQS bounds; n=N-2 for a quadrangulation with N primal vertices.
-MIN_DUAL_VERTEX_COUNT = 3
-BUNDLED_MAX_DUAL_VERTEX_COUNT = BUNDLED_PLANTRI_MAX_VERTEX_COUNT - 2
 
 
+class PlantriError(Exception):
+    """Base class for running plantri and decoding its output."""
+
+
+class PlantriExecutableNotFoundError(PlantriError, FileNotFoundError):
+    """Plantri executable could not be found."""
+
+
+class PlanarCodeError(PlantriError, ValueError):
+    """Malformed or unsupported planar_code input."""
+
+
+class PlantriTimeoutError(PlantriError, TimeoutError):
+    """Plantri exceeded a caller-supplied wall-clock deadline."""
+
+
+@dataclass(frozen=True, slots=True)
+class PlantriProvenance:
+    """Identity of one binary and quadrangulation graph-ID namespace."""
+
+    version: str
+    executable_sha256: str
+    declared_max_vertex_count: int
+    primal_vertex_count: int
+    switches: tuple[str, ...]
+    split: tuple[int, int] | None
+    mirror_images_identified: bool = True
+
+
+class QuadrangulationDualClass(str, Enum):
+    """Plane-dual families selected by supported simple-quadrangulation modes.
+
+    ``QUARTIC_MULTIGRAPH`` uses primal flags ``-q -c2 -m2`` and denotes
+    loop-free, 4-regular, 4-edge-connected plane multigraphs. Parallel edges
+    are permitted, and simple members are included.
+
+    ``SIMPLE_QUARTIC`` uses primal flags ``-q -c2`` and restricts the primal
+    quadrangulation to minimum degree at least 3; its duals are simple,
+    4-regular, 4-edge-connected plane graphs.
+    """
+
+    QUARTIC_MULTIGRAPH = "quartic_multigraph"
+    SIMPLE_QUARTIC = "simple_quartic"
+
+
+# planar_code decoding, usable without resolving the plantri binary.
+def _validate_expected_vertex_count(expected_vertex_count: int | None) -> None:
+    """Validate an optional one-byte planar_code vertex count."""
+    if expected_vertex_count is not None and (
+        type(expected_vertex_count) is not int
+        or not 1 <= expected_vertex_count <= _ONE_BYTE_PLANAR_CODE_MAX_N
+    ):
+        expected = f"None or int in [1,{_ONE_BYTE_PLANAR_CODE_MAX_N}]"
+        message = f"expected_vertex_count={expected_vertex_count!r}; expected {expected}"
+        raise ValueError(message)
+
+
+def _validate_expected_edge_count(expected_edge_count: int | None) -> None:
+    """Validate an optional fixed planar_code edge count."""
+    if expected_edge_count is not None and (
+        type(expected_edge_count) is not int or expected_edge_count < 0
+    ):
+        message = f"expected_edge_count={expected_edge_count!r}; expected None or int >= 0"
+        raise ValueError(message)
+
+
+def _validate_planar_code_expectations(
+    expected_vertex_count: int | None,
+    expected_edge_count: int | None,
+) -> None:
+    """Validate the paired planar_code record-size expectations."""
+    _validate_expected_vertex_count(expected_vertex_count)
+    _validate_expected_edge_count(expected_edge_count)
+    # The fixed-size fast path derives its record stride from both counts together.
+    if expected_edge_count is not None and expected_vertex_count is None:
+        raise ValueError("expected_edge_count requires expected_vertex_count")
+
+
+def _iter_reader_chunks(read_chunk: Callable[[], bytes]) -> Iterator[bytes]:
+    """Yield blocks from one reader until it reports end of stream."""
+    while chunk := read_chunk():
+        yield chunk
+
+
+def iter_planar_code(
+    stream: BinaryIO,
+    *,
+    expected_vertex_count: int | None = None,
+    expected_edge_count: int | None = None,
+    chunk_size: int = 65_536,
+) -> Iterator[Embedding]:
+    """Decode headerless one-byte planar_code, with an optional fixed-size fast path."""
+    _validate_planar_code_expectations(expected_vertex_count, expected_edge_count)
+    if type(chunk_size) is not int or chunk_size <= 0:
+        raise ValueError(f"chunk_size must be a positive int, got {chunk_size!r}")
+
+    def read_chunk() -> bytes:
+        """Read one bounded block from the caller's stream."""
+        return stream.read(chunk_size)
+
+    yield from _decode_planar_code_records(
+        _iter_reader_chunks(read_chunk),
+        expected_vertex_count=expected_vertex_count,
+        expected_edge_count=expected_edge_count,
+    )
+
+
+def _decode_planar_code_records(
+    chunks: Iterable[bytes],
+    *,
+    expected_vertex_count: int | None,
+    expected_edge_count: int | None,
+) -> Iterator[Embedding]:
+    """Dispatch to the generic or fixed-layout headerless decoder."""
+    if expected_vertex_count is not None and expected_edge_count is not None:
+        yield from _decode_fixed_planar_code_chunks(
+            chunks,
+            vertex_count=expected_vertex_count,
+            edge_count=expected_edge_count,
+        )
+        return
+    yield from _decode_planar_code_chunks(
+        chunks,
+        expected_vertex_count=expected_vertex_count,
+    )
+
+
+def _decode_planar_code_chunks(
+    chunks: Iterable[bytes],
+    *,
+    expected_vertex_count: int | None,
+) -> Iterator[Embedding]:
+    """Decode complete records across arbitrary binary chunk boundaries."""
+
+    record_index = 0
+    vertex_count: int | None = None
+    adjacency_rows: list[tuple[int, ...]] = []
+    neighbors: list[int] = []
+
+    for chunk in chunks:
+        for value in chunk:
+            if vertex_count is None:
+                if value == 0:
+                    message = f"record {record_index}: extended planar_code is unsupported"
+                    raise PlanarCodeError(message)
+                if expected_vertex_count is not None and value != expected_vertex_count:
+                    message = f"record {record_index}: vertex count {value} != expected {expected_vertex_count}"
+                    raise PlanarCodeError(message)
+                vertex_count = value
+            elif value:
+                if value > vertex_count:
+                    vertex = len(adjacency_rows)
+                    message = f"record {record_index}, vertex {vertex}: neighbor {value} outside [1, {vertex_count}]"
+                    raise PlanarCodeError(message)
+                neighbors.append(value - 1)
+            else:
+                adjacency_rows.append(tuple(neighbors))
+                neighbors.clear()
+                if len(adjacency_rows) == vertex_count:
+                    yield tuple(adjacency_rows)
+                    record_index += 1
+                    vertex_count = None
+                    adjacency_rows.clear()
+
+    if vertex_count is not None:
+        vertex = len(adjacency_rows)
+        raise PlanarCodeError(f"record {record_index}: truncated at vertex {vertex}")
+
+
+def _decode_fixed_planar_code_chunks(
+    chunks: Iterable[bytes],
+    *,
+    vertex_count: int,
+    edge_count: int,
+) -> Iterator[Embedding]:
+    """Decode fixed-size headerless records after the graph class fixes |V| and |E|."""
+    record_size = 1 + vertex_count + 2 * edge_count
+    carry = b""
+    record_index = 0
+
+    for chunk in chunks:
+        data = carry + chunk
+        complete_size = len(data) - len(data) % record_size
+        for start in range(0, complete_size, record_size):
+            record = data[start : start + record_size]
+            if record[0] != vertex_count:
+                actual = record[0]
+                message = f"record {record_index}: vertex count {actual} != expected {vertex_count}"
+                raise PlanarCodeError(message)
+
+            body = record[1:]
+            rows = body.translate(_ZERO_BASE_TRANSLATION).split(
+                _TRANSLATED_ROW_SEPARATOR
+            )
+            if len(rows) != vertex_count + 1 or rows[-1]:
+                message = f"record {record_index}: invalid adjacency separators"
+                raise PlanarCodeError(message)
+            rows.pop()
+            if body and max(body) > vertex_count:
+                for vertex, row in enumerate(body.split(b"\0")):
+                    if row and (neighbor := max(row)) > vertex_count:
+                        message = f"record {record_index}, vertex {vertex}: neighbor {neighbor} outside [1, {vertex_count}]"
+                        raise PlanarCodeError(message)
+            yield tuple(map(tuple, rows))
+            record_index += 1
+        carry = data[complete_size:]
+
+    if carry:
+        message = f"record {record_index}: truncated fixed-size record ({len(carry)}/{record_size} bytes)"
+        raise PlanarCodeError(message)
+
+
+# Invocation helpers shared by the two plantri-backed classes.
 def _summarize_process_text(text: str | bytes, *, limit: int = 400) -> str:
     """Decode and collapse process output into a bounded single-line excerpt."""
     if isinstance(text, bytes):
@@ -124,242 +345,42 @@ def _validate_n_vertices(n_vertices: int) -> None:
 
 def _validate_timeout(timeout: float | None) -> None:
     """Require a finite positive timeout when one is supplied."""
-    if timeout is not None and (
-        type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
-    ):
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
         message = f"plantri: timeout must be None or finite positive; got {timeout!r}"
         raise ValueError(message)
 
 
-def _wait_for_stream_progress(deadline: float | None, timeout: float | None) -> None:
-    """Sleep for one polling interval without crossing a wall-clock deadline."""
-    if deadline is None:
-        time.sleep(_FILE_POLL_INTERVAL_S)
-        return
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise PlantriTimeoutError(f"plantri: timed out after {timeout}s")
-    time.sleep(min(_FILE_POLL_INTERVAL_S, remaining))
-
-
-def _check_stream_deadline(deadline: float | None, timeout: float | None) -> None:
-    """Raise when an active streaming process reaches its deadline."""
-    if deadline is not None and time.monotonic() >= deadline:
-        raise PlantriTimeoutError(f"plantri: timed out after {timeout}s")
-
-
-class PlantriError(Exception):
-    """Plantri execution failure."""
-
-
-class PlantriExecutableNotFoundError(PlantriError, FileNotFoundError):
-    """Plantri executable could not be found."""
-
-
-class PlanarCodeError(ValueError):
-    """Malformed or unsupported planar_code input."""
-
-
-class PlantriTimeoutError(PlantriError, TimeoutError):
-    """Plantri exceeded a caller-supplied wall-clock deadline."""
-
-
 @dataclass(frozen=True, slots=True)
-class PlantriProvenance:
-    """Identity of one binary and quadrangulation graph-ID namespace."""
+class _StreamDeadline:
+    """One streaming wall-clock budget, or an unbounded one when no timeout is set."""
 
-    version: str
-    executable_sha256: str
-    declared_max_vertex_count: int
-    primal_vertex_count: int
-    switches: tuple[str, ...]
-    split: tuple[int, int] | None
-    mirror_images_identified: bool = True
+    deadline: float | None
+    timeout: float | None
 
+    @classmethod
+    def from_timeout(cls, timeout: float | None) -> _StreamDeadline:
+        """Start one budget from an already validated optional timeout."""
+        return cls(None if timeout is None else time.monotonic() + timeout, timeout)
 
-class QuadrangulationDualClass(str, Enum):
-    """Plane-dual families selected by supported simple-quadrangulation modes.
+    def _expired(self) -> PlantriTimeoutError:
+        """Build the shared expiry error naming the caller's original budget."""
+        return PlantriTimeoutError(f"plantri: timed out after {self.timeout}s")
 
-    ``QUARTIC_MULTIGRAPH`` uses primal flags ``-q -c2 -m2`` and denotes
-    loop-free, 4-regular, 4-edge-connected plane multigraphs. Parallel edges
-    are permitted, and simple members are included.
+    def check(self) -> None:
+        """Raise when an active streaming process has reached the deadline."""
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise self._expired()
 
-    ``SIMPLE_QUARTIC`` uses primal flags ``-q -c2`` and restricts the primal
-    quadrangulation to minimum degree at least 3; its duals are simple,
-    4-regular, 4-edge-connected plane graphs.
-    """
-
-    QUARTIC_MULTIGRAPH = "quartic_multigraph"
-    SIMPLE_QUARTIC = "simple_quartic"
-
-
-def _validate_expected_vertex_count(expected_vertex_count: int | None) -> None:
-    """Validate an optional one-byte planar_code vertex count."""
-    if expected_vertex_count is not None and (
-        type(expected_vertex_count) is not int
-        or not 1 <= expected_vertex_count <= _ONE_BYTE_PLANAR_CODE_MAX_N
-    ):
-        expected = f"None or int in [1,{_ONE_BYTE_PLANAR_CODE_MAX_N}]"
-        message = (
-            f"expected_vertex_count={expected_vertex_count!r}; expected {expected}"
-        )
-        raise ValueError(message)
-
-
-def _validate_expected_edge_count(expected_edge_count: int | None) -> None:
-    """Validate an optional fixed planar_code edge count."""
-    if expected_edge_count is not None and (
-        type(expected_edge_count) is not int or expected_edge_count < 0
-    ):
-        message = (
-            f"expected_edge_count={expected_edge_count!r}; expected None or int >= 0"
-        )
-        raise ValueError(message)
-
-
-def iter_planar_code(
-    stream: BinaryIO,
-    *,
-    expected_vertex_count: int | None = None,
-    expected_edge_count: int | None = None,
-    chunk_size: int = 65_536,
-) -> Iterator[Embedding]:
-    """Decode headerless one-byte planar_code, with an optional fixed-size fast path."""
-    _validate_expected_vertex_count(expected_vertex_count)
-    _validate_expected_edge_count(expected_edge_count)
-    if expected_edge_count is not None and expected_vertex_count is None:
-        raise ValueError("expected_edge_count requires expected_vertex_count")
-    if type(chunk_size) is not int or chunk_size <= 0:
-        raise ValueError(f"chunk_size must be a positive int, got {chunk_size!r}")
-
-    yield from _decode_planar_code_records(
-        iter(lambda: stream.read(chunk_size), b""),
-        expected_vertex_count=expected_vertex_count,
-        expected_edge_count=expected_edge_count,
-    )
-
-
-def _decode_planar_code_records(
-    chunks: Iterable[bytes],
-    *,
-    expected_vertex_count: int | None,
-    expected_edge_count: int | None,
-) -> Iterator[Embedding]:
-    """Dispatch to the generic or fixed-layout headerless decoder."""
-    if expected_vertex_count is not None and expected_edge_count is not None:
-        yield from _decode_fixed_planar_code_chunks(
-            chunks,
-            vertex_count=expected_vertex_count,
-            edge_count=expected_edge_count,
-        )
-        return
-    yield from _decode_planar_code_chunks(
-        chunks,
-        expected_vertex_count=expected_vertex_count,
-    )
-
-
-def _decode_planar_code_chunks(
-    chunks: Iterable[bytes],
-    *,
-    expected_vertex_count: int | None,
-) -> Iterator[Embedding]:
-    """Decode complete records across arbitrary binary chunk boundaries."""
-
-    record_index = 0
-    vertex_count: int | None = None
-    adjacency_rows: list[tuple[int, ...]] = []
-    neighbors: list[int] = []
-
-    for chunk in chunks:
-        for value in chunk:
-            if vertex_count is None:
-                if value == 0:
-                    message = (
-                        f"record {record_index}: extended planar_code is unsupported"
-                    )
-                    raise PlanarCodeError(message)
-                if expected_vertex_count is not None and value != expected_vertex_count:
-                    message = (
-                        f"record {record_index}: vertex count {value} "
-                        f"!= expected {expected_vertex_count}"
-                    )
-                    raise PlanarCodeError(message)
-                vertex_count = value
-            elif value:
-                if value > vertex_count:
-                    vertex = len(adjacency_rows)
-                    message = (
-                        f"record {record_index}, vertex {vertex}: neighbor {value} "
-                        f"outside [1, {vertex_count}]"
-                    )
-                    raise PlanarCodeError(message)
-                neighbors.append(value - 1)
-            else:
-                adjacency_rows.append(tuple(neighbors))
-                neighbors.clear()
-                if len(adjacency_rows) == vertex_count:
-                    yield tuple(adjacency_rows)
-                    record_index += 1
-                    vertex_count = None
-                    adjacency_rows.clear()
-
-    if vertex_count is not None:
-        vertex = len(adjacency_rows)
-        raise PlanarCodeError(f"record {record_index}: truncated at vertex {vertex}")
-
-
-def _decode_fixed_planar_code_chunks(
-    chunks: Iterable[bytes],
-    *,
-    vertex_count: int,
-    edge_count: int,
-) -> Iterator[Embedding]:
-    """Decode fixed-size headerless records after the graph class fixes |V| and |E|."""
-    record_size = 1 + vertex_count + 2 * edge_count
-    carry = b""
-    record_index = 0
-
-    for chunk in chunks:
-        data = carry + chunk
-        complete_size = len(data) - len(data) % record_size
-        for start in range(0, complete_size, record_size):
-            record = data[start : start + record_size]
-            if record[0] != vertex_count:
-                actual = record[0]
-                message = (
-                    f"record {record_index}: vertex count {actual} "
-                    f"!= expected {vertex_count}"
-                )
-                raise PlanarCodeError(message)
-
-            body = record[1:]
-            rows = body.translate(_ZERO_BASE_TRANSLATION).split(
-                _TRANSLATED_ROW_SEPARATOR
-            )
-            if len(rows) != vertex_count + 1 or rows[-1]:
-                message = f"record {record_index}: invalid adjacency separators"
-                raise PlanarCodeError(message)
-            rows.pop()
-            if body and max(body) > vertex_count:
-                for vertex, row in enumerate(body.split(b"\0")):
-                    if row and (neighbor := max(row)) > vertex_count:
-                        message = (
-                            f"record {record_index}, vertex {vertex}: "
-                            f"neighbor {neighbor} "
-                            f"outside [1, {vertex_count}]"
-                        )
-                        raise PlanarCodeError(message)
-            yield tuple(map(tuple, rows))
-            record_index += 1
-        carry = data[complete_size:]
-
-    if carry:
-        message = (
-            f"record {record_index}: truncated fixed-size record "
-            f"({len(carry)}/{record_size} bytes)"
-        )
-        raise PlanarCodeError(message)
+    def wait(self) -> None:
+        """Sleep for one polling interval without crossing the deadline."""
+        if self.deadline is None:
+            time.sleep(_FILE_POLL_INTERVAL_S)
+            return
+        # One clock reading: re-checking would let the sleep length go negative.
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise self._expired()
+        time.sleep(min(_FILE_POLL_INTERVAL_S, remaining))
 
 
 class Plantri:
@@ -376,10 +397,7 @@ class Plantri:
         if max_vertex_count is not None and (
             type(max_vertex_count) is not int or max_vertex_count <= 0
         ):
-            message = (
-                "plantri: max_vertex_count must be positive int; "
-                f"got {max_vertex_count!r}"
-            )
+            message = f"plantri: max_vertex_count must be positive int; got {max_vertex_count!r}"
             raise ValueError(message)
         if expected_version is not None and (
             type(expected_version) is not str
@@ -585,9 +603,7 @@ class Plantri:
         _validate_n_vertices(n_vertices)
         max_vertex_count = getattr(self, "max_vertex_count", None)
         if max_vertex_count is not None and n_vertices > max_vertex_count:
-            message = (
-                f"plantri: n_vertices {n_vertices}>{max_vertex_count} declared maximum"
-            )
+            message = f"plantri: n_vertices {n_vertices}>{max_vertex_count} declared maximum"
             raise ValueError(message)
         normalized_switches = _normalize_switches(switches)
         _validate_split(split)
@@ -698,9 +714,7 @@ class Plantri:
                     _summarize_process_text(stderr_file.read(), limit=4000)
                     or "no output"
                 )
-                message = (
-                    f"plantri: execution failed (exit {return_code}); {stderr_excerpt}"
-                )
+                message = f"plantri: execution failed (exit {return_code}); {stderr_excerpt}"
                 raise PlantriError(message) from None
             return
 
@@ -722,11 +736,8 @@ class Plantri:
         timeout: float | None = None,
     ) -> Iterator[Embedding]:
         """Stream headerless records; timeout bounds the active writer process."""
-        _validate_expected_vertex_count(expected_vertex_count)
-        _validate_expected_edge_count(expected_edge_count)
+        _validate_planar_code_expectations(expected_vertex_count, expected_edge_count)
         _validate_timeout(timeout)
-        if expected_edge_count is not None and expected_vertex_count is None:
-            raise ValueError("expected_edge_count requires expected_vertex_count")
         with (
             tempfile.TemporaryDirectory(prefix="pyplantri-") as temp_dir,
             tempfile.TemporaryFile() as stderr_file,
@@ -745,7 +756,7 @@ class Plantri:
                 stdout=subprocess.DEVNULL,
                 stderr=cast(BinaryIO, stderr_file),
             )
-            deadline = None if timeout is None else time.monotonic() + timeout
+            deadline = _StreamDeadline.from_timeout(timeout)
 
             stream_exhausted = False
             writer_exited = False
@@ -753,7 +764,7 @@ class Plantri:
                 while True:
                     writer_exited = process.poll() is not None
                     if not writer_exited:
-                        _check_stream_deadline(deadline, timeout)
+                        deadline.check()
                     try:
                         output_file = output_path.open("rb")
                         break
@@ -764,18 +775,14 @@ class Plantri:
                     except PermissionError as e:
                         if writer_exited:
                             detail = _summarize_process_text(str(e))
-                            message = (
-                                f"plantri: failed to open planar_code output: {detail}"
-                            )
+                            message = f"plantri: failed to open planar_code output: {detail}"
                             raise PlantriError(message) from e
                     except OSError as e:
                         detail = _summarize_process_text(str(e))
-                        message = (
-                            f"plantri: failed to open planar_code output: {detail}"
-                        )
+                        message = f"plantri: failed to open planar_code output: {detail}"
                         raise PlantriError(message) from e
                     if not writer_exited:
-                        _wait_for_stream_progress(deadline, timeout)
+                        deadline.wait()
 
                 with output_file:
 
@@ -783,20 +790,20 @@ class Plantri:
                         """Read available bytes or wait while the writer is active."""
                         while True:
                             if process.poll() is None:
-                                _check_stream_deadline(deadline, timeout)
+                                deadline.check()
                             if chunk := self._read_planar_code_chunk(output_file):
                                 return chunk
                             if process.poll() is not None:
                                 return self._read_planar_code_chunk(output_file)
-                            _wait_for_stream_progress(deadline, timeout)
+                            deadline.wait()
 
                     for embedding in _decode_planar_code_records(
-                        iter(read_chunk, b""),
+                        _iter_reader_chunks(read_chunk),
                         expected_vertex_count=expected_vertex_count,
                         expected_edge_count=expected_edge_count,
                     ):
                         if process.poll() is None:
-                            _check_stream_deadline(deadline, timeout)
+                            deadline.check()
                         yield embedding
                     stream_exhausted = True
             finally:
@@ -816,10 +823,7 @@ class Plantri:
     ) -> Iterator[bytes]:
         """Stream non-empty text records without altering payload whitespace."""
         if output_format not in _TEXT_OUTPUT_FORMATS:
-            message = (
-                "plantri: line output requires ascii/graph6/sparse6; "
-                f"got {output_format!r}"
-            )
+            message = f"plantri: line output requires ascii/graph6/sparse6; got {output_format!r}"
             raise ValueError(message)
         cmd = self._build_command(
             n_vertices,
@@ -889,20 +893,19 @@ class QuadrangulationEnumerator:
         self._plantri = plantri
         self._owns_plantri = plantri is None
         self._closed = False
-        self._max_vertex_count = (
+        declared_max_vertex_count = (
             BUNDLED_PLANTRI_MAX_VERTEX_COUNT
             if plantri is None
             else plantri.max_vertex_count
         )
-        if self._max_vertex_count is None:
+        if declared_max_vertex_count is None:
             raise ValueError("plantri: custom binary requires max_vertex_count")
-        if self._max_vertex_count < MIN_DUAL_VERTEX_COUNT + 2:
-            maximum = self._max_vertex_count
-            message = (
-                f"plantri: max_vertex_count {maximum} cannot generate a supported "
-                "quadrangulation"
-            )
+        if declared_max_vertex_count < MIN_DUAL_VERTEX_COUNT + 2:
+            maximum = declared_max_vertex_count
+            message = f"plantri: max_vertex_count {maximum} cannot generate a supported quadrangulation"
             raise ValueError(message)
+        # Stored only once narrowed, so every reader sees the checked capacity as int.
+        self._max_vertex_count: int = declared_max_vertex_count
 
     @property
     def max_dual_vertex_count(self) -> int:
@@ -919,10 +922,14 @@ class QuadrangulationEnumerator:
                 finally:
                     self._plantri = None
 
-    def __enter__(self) -> QuadrangulationEnumerator:
-        """Return this enumerator while its internal resource is owned."""
+    def _require_open(self) -> None:
+        """Reject operations after this enumerator is closed."""
         if self._closed:
             raise RuntimeError("plantri: enumerator closed")
+
+    def __enter__(self) -> QuadrangulationEnumerator:
+        """Return this enumerator while its internal resource is owned."""
+        self._require_open()
         return self
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
@@ -931,16 +938,14 @@ class QuadrangulationEnumerator:
 
     def _get_plantri(self) -> Plantri:
         """Return the shared lazily initialized Plantri wrapper."""
-        if self._closed:
-            raise RuntimeError("plantri: enumerator closed")
+        self._require_open()
         if self._plantri is None:
             self._plantri = Plantri()
         return self._plantri
 
     def _validate_supported_dual_vertex_count(self, dual_vertex_count: int) -> None:
         """Reject dual sizes outside this enumerator's effective capability."""
-        if self._closed:
-            raise RuntimeError("plantri: enumerator closed")
+        self._require_open()
         if type(dual_vertex_count) is not int:
             message = f"dual_vertex_count must be int; got {dual_vertex_count!r}"
             raise ValueError(message)
@@ -952,10 +957,7 @@ class QuadrangulationEnumerator:
             maximum = self.max_dual_vertex_count
             declared = self._max_vertex_count
             twin_bound = MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT
-            message = (
-                f"dual_vertex_count unsupported: {dual_vertex_count} > {maximum} "
-                f"(declared={declared}; twin bound={twin_bound})"
-            )
+            message = f"dual_vertex_count unsupported: {dual_vertex_count} > {maximum} (declared={declared}; twin bound={twin_bound})"
             raise ValueError(message)
 
     @staticmethod
