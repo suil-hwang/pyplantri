@@ -21,7 +21,7 @@ from .plane_graph import (
     MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT,
     QuarticPlaneMap,
 )
-from .plantri_interface import QuadrangulationDualClass
+from .types import QuadrangulationDualClass
 
 CACHE_FORMAT_VERSION = 12
 CACHE_DEFAULT_CHUNK_SIZE = 512
@@ -45,16 +45,13 @@ CacheValidation = Literal["envelope", "topology"]
 _CacheGraphClassInput = CacheGraphClass | QuadrangulationDualClass
 _Compression = Literal["gzip", "none"]
 _SUPPORTED_GRAPH_CLASSES = frozenset({"quartic_multigraph", "simple_quartic"})
+_SHA256_DIGITS = frozenset("0123456789abcdef")
 
 
-def _one_line(value: object, *, limit: int) -> str:
-    """Bound one diagnostic fragment without trusting its string conversion."""
-    try:
-        text = str(value)
-    except BaseException:
-        text = type(value).__name__
-    text = " ".join(text.split()) or type(value).__name__
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+def _one_line(text: str, *, limit: int) -> str:
+    """Bound one diagnostic fragment to a single line."""
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 3] + "..."
 
 
 def _brief(value: object) -> str:
@@ -63,12 +60,12 @@ def _brief(value: object) -> str:
         representation = repr(value)
     except BaseException:
         representation = type(value).__name__
-    return _one_line(representation, limit=120)
+    return _one_line(representation, limit=120) or type(value).__name__
 
 
 def _location(filepath: Path | None) -> str:
     """Format an optional path suffix for compact errors."""
-    return f" ({_one_line(filepath, limit=160)})" if filepath is not None else ""
+    return f" ({_one_line(str(filepath), limit=160)})" if filepath is not None else ""
 
 
 def _cache_error(detail: str, filepath: Path | None = None) -> ValueError:
@@ -164,14 +161,8 @@ def _parse_sha256(
     filepath: Path | None = None,
 ) -> bytes:
     """Parse one canonical lowercase SHA-256 digest."""
-    if type(value) is str and len(value) == 64:
-        try:
-            digest = bytes.fromhex(value)
-        except ValueError:
-            pass
-        else:
-            if digest.hex() == value:
-                return digest
+    if type(value) is str and len(value) == 64 and _SHA256_DIGITS.issuperset(value):
+        return bytes.fromhex(value)
     raise _invalid(field_name, value, "lowercase sha256", filepath)
 
 

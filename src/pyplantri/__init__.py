@@ -13,11 +13,6 @@ from .cache import (
     validate_cache_metadata,
     write_graph_cache,
 )
-from .enumeration import (
-    PlantriEnumerationResult,
-    enumerate_simple_quadrangulation_duals,
-    iter_simple_quadrangulation_duals,
-)
 from .plane_graph import MAX_BYTE_ENCODED_DUAL_VERTEX_COUNT, QuarticPlaneMap
 from .plantri_interface import (
     BUNDLED_MAX_DUAL_VERTEX_COUNT,
@@ -25,14 +20,17 @@ from .plantri_interface import (
     MIN_DUAL_VERTEX_COUNT,
     PlanarCodeError,
     Plantri,
+    PlantriEnumerationResult,
     PlantriProvenance,
     PlantriTimeoutError,
-    QuadrangulationDualClass,
     PlantriExecutableNotFoundError,
     PlantriError,
     QuadrangulationEnumerator,
+    enumerate_simple_quadrangulation_duals,
     iter_planar_code,
+    iter_simple_quadrangulation_duals,
 )
+from .types import QuadrangulationDualClass
 
 try:
     __version__ = _metadata.version("pyplantri")
