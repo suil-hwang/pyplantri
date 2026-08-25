@@ -2,7 +2,7 @@
 
 A Python wrapper for [plantri](https://users.cecs.anu.edu.au/~bdm/plantri/) to enumerate **Simple Quadrangulations on a Sphere (SQS)**.
 
-Given a supported dual vertex count `n`, it enumerates one representative of each **plane-map isomorphism class of duals of simple quadrangulations of the sphere** as compact quartic plane maps. Global reflection is identified. Their primal and dual topology is derived exactly from the stored dart involution.
+Given a supported dual vertex count `n`, it enumerates one representative of each **plane-map isomorphism class of duals of simple quadrangulations of the sphere** as compact candidate plane graphs `G*`. Global reflection is identified. The candidate primal `G` and dual `G*` topology are derived exactly from the stored dart involution; realized SQS graphs `Q` and `Q*` belong to the downstream assignment and geometry pipeline.
 
 ## What is plantri?
 
@@ -14,22 +14,34 @@ Given a supported dual vertex count `n`, it enumerates one representative of eac
 - **Speed**: Generates over 2,000,000 graphs per second
 - **License**: Apache License 2.0
 
-This package wraps plantri's **Simple Quadrangulation** enumeration functionality for use in Python.
+This package builds a dedicated plantri FILTER executable, `plantri_sqs`, for
+**Simple Quadrangulation** enumeration. The FILTER converts each generated map
+in C and streams one fixed record directly to Python:
+
+```text
+twin[4n] + descending primal degree profile[n+2]
+```
+
+The record order is the namespace-local `graph_id`. Python never decodes
+`planar_code`, reconstructs primal face orbits, or uses a worker pool.
+The bundled FILTER owns topology validation for enumerated records. Direct
+`QuarticPlaneMap(twin)` construction validates only the twin involution, and
+cache hashes verify stored bytes and order rather than generator provenance.
 
 ### Related Papers
 
 - G. Brinkmann, S. Greenberg, C. Greenhill, B. D. McKay, R. Thomas and P. Wollan, **"Generation of simple quadrangulations of the sphere"**, Discrete Mathematics, 305 (2005) 33-54. [PDF](https://users.cecs.anu.edu.au/~bdm/papers/plantri-full.pdf)
 - G. Brinkmann and B. D. McKay, **"Fast generation of planar graphs"**, MATCH Commun. Math. Comput. Chem., 58 (2007) 323-357.
 
-## SQS and Dual Graph
+## Candidate Primal and Dual Plane Graphs
 
-### Q (Primal) - Simple Quadrangulation
+### G (Primal) - Simple Quadrangulation
 
 - **Plane graph** where every face boundary is a 4-cycle
 - Simple graph (no loops, no multi-edges)
 - Vertex count: `n + 2`
 
-### Q\* (Dual) - 4-regular Plane Multigraph
+### G\* (Dual) - 4-regular Plane Multigraph
 
 | Property         | Description                                                       |
 | ---------------- | ----------------------------------------------------------------- |
@@ -39,15 +51,36 @@ This package wraps plantri's **Simple Quadrangulation** enumeration functionalit
 | 4-regular        | Every vertex has exactly degree 4                                 |
 | 4-edge-connected | Every non-trivial edge cut contains at least four edge copies     |
 
-### Enumeration Families
+### Primal Minimum-Degree Policies
 
-| Enum member          | Primal plantri flags | Exact dual family                                                                     |
-| -------------------- | -------------------- | ------------------------------------------------------------------------------------- |
-| `QUARTIC_MULTIGRAPH` | `-q -c2 -m2`         | Loop-free, 4-regular, 4-edge-connected plane multigraphs; parallel edges may occur    |
-| `SIMPLE_QUARTIC`     | `-q -c2`             | Simple, 4-regular, 4-edge-connected plane graphs; primal minimum degree is at least 3 |
+`PrimalMinimumDegree` selects the minimum-degree policy for plantri's primal
+quadrangulation `G` through the `primal_minimum_degree` keyword. It is an
+enumeration policy, not a claim that every emitted graph attains the lower
+bound exactly. Callers must pass an enum member; bare numeric or string values
+are rejected.
 
-The second family is a topological subset of the first, but the two plantri
+| Enum member  | Value | Primal plantri flags | Exact dual family                                                                     |
+| ------------ | ----- | -------------------- | ------------------------------------------------------------------------------------- |
+| `AT_LEAST_2` | `2`   | `-q -c2 -m2`         | Loop-free, 4-regular, 4-edge-connected plane multigraphs; parallel edges may occur    |
+| `AT_LEAST_3` | `3`   | `-q -c2`             | Simple, 4-regular, 4-edge-connected plane graphs; primal minimum degree is at least 3 |
+
+`AT_LEAST_3` uses plantri's default minimum degree 3; `-m3` is omitted. Its
+stream is a topological subset of the `AT_LEAST_2` stream, but the two source
 streams use independent source-order `graph_id` namespaces.
+
+`QuarticPlaneMap` owns the compact candidate dual `G*`. Its `primal` property
+returns an immutable `SimpleQuadrangulation` view of candidate `G`, whose
+`dual` property points back to the paired candidate dual. Neither type denotes
+the realized `Q` or `Q*` produced by the downstream geometry pipeline.
+
+```python
+dual = next(iter_simple_quadrangulation_duals(n))
+primal = dual.primal
+
+assert primal.dual is dual
+dual.embedding
+primal.embedding
+```
 
 ### Vertex Count Relationship (Euler's Formula)
 
@@ -55,12 +88,18 @@ For plane graphs: `V - E + F = 2`
 
 | Graph          | Description                            | Vertices |
 | -------------- | -------------------------------------- | -------- |
-| **Q\*** (Dual) | 4-regular plane multigraph (loop-free) | n        |
-| **Q** (Primal) | Simple Quadrangulation                 | n + 2    |
+| **G\*** (Dual) | 4-regular plane multigraph (loop-free) | n        |
+| **G** (Primal) | Simple Quadrangulation                 | n + 2    |
 
-**Input Rule:** The input `n` to `QuadrangulationEnumerator` is the **number of vertices in Q\* (Dual)**. Internally, `n + 2` (the primal vertex count) is passed to plantri.
+**Input Rule:** The input `n` to `iter_simple_quadrangulation_duals()` and
+`enumerate_simple_quadrangulation_duals()` is the **number of vertices in G\*
+(Dual)**. Internally, `n + 2` (the candidate-primal vertex count) is passed to
+`plantri_sqs`.
 
-**Input Constraint:** The bundled count and materialization paths support `3 <= n <= 62`. The `SIMPLE_QUARTIC` family is empty for `n < 6`. The full literature `QUARTIC_MULTIGRAPH` family also contains the square's two-vertex dual, which lies outside this wrapper's supported range.
+**Input Constraint:** The bundled count and materialization paths support
+`3 <= n <= 62`. The `AT_LEAST_3` stream is empty for `n < 6`. The full
+literature family selected by `AT_LEAST_2` also contains the square's
+two-vertex dual, which lies outside this wrapper's supported range.
 
 ## Installation
 
@@ -71,15 +110,33 @@ cd pyplantri
 pip install -e .
 ```
 
-CMake automatically builds plantri during installation.
+CMake automatically builds `plantri_sqs` during installation. The bundled
+`plantri.c` remains unmodified; `plantri_sqs.c` injects the FILTER through
+plantri's supported plugin hook.
 
-`Plantri()` resolves only the bundled executable belonging to the active
-package installation. To use another build, pass its path explicitly as
-`Plantri(executable=...)`; no executable is selected implicitly from `PATH`.
+Enumeration resolves only the bundled `pyplantri/bin/plantri_sqs(.exe)`
+resource. It never selects a stock or stale `plantri` executable from `PATH`.
+The pre-0.7 generic `Plantri`, `QuadrangulationEnumerator`, `planar_code`, text
+output, split, and multiprocessing APIs were removed; the package now exposes
+only the two SQS enumeration entry points and their typed result/errors.
+The current API uses `MIN_SUPPORTED_DUAL_VERTEX_COUNT`,
+`time_to_first_record_s`, `PrimalMinimumDegree`, and the
+`primal_minimum_degree` keyword. `PrimalMinimumDegree` replaces
+`QuadrangulationClass` without a compatibility alias, and its values are the
+integers `2` and `3`. Code or pickles referring to the removed enum or its
+former string values require an explicit migration.
 
-## Number of `QUARTIC_MULTIGRAPH` Plane Maps by n
+The topology API is role-scoped without compatibility aliases:
 
-| n (Q\* vertices) | Q vertices | Non-isomorphic count |
+- `QuarticPlaneMap`: `num_vertices`, `embedding`, `faces`, `num_faces`,
+  `edge_multiplicity`, `support_edges`, `face_size_sequence`,
+  `vertex_to_primal_face`, and `primal`.
+- `SimpleQuadrangulation`: `num_vertices`, `embedding`, `faces`,
+  `vertex_to_dual_face`, and `dual`.
+
+## Number of `AT_LEAST_2` Dual Plane Maps by n
+
+| n (G\* vertices) | G vertices | Non-isomorphic count |
 | ---------------- | ---------- | -------------------- |
 | 3                | 5          | 1                    |
 | 4                | 6          | 2                    |
@@ -102,8 +159,7 @@ package installation. To use another build, pass its path explicitly as
 
 ## License
 
-- **pyplantri wrapper**: [MIT License](LICENSE)
-- **plantri**: [Apache License 2.0](src/plantri/LICENSE-2.0.txt)
+[Apache License 2.0](src/LICENSE-2.0.txt)
   - Authors: Gunnar Brinkmann, Brendan McKay
 
 ## References
