@@ -28,6 +28,12 @@ FaceCycle = tuple[int, ...]
 # Derived vertex-indexed exterior-view CW neighbor cycles (0-based).
 Embedding = tuple[tuple[int, ...], ...]
 
+MIN_SUPPORTED_DUAL_VERTEX_COUNT = 3
+_PLANTRI_MAXN = 64
+BUNDLED_MAX_DUAL_VERTEX_COUNT = _PLANTRI_MAXN - 2
+
+_CLEANUP_TIMEOUT_S = 5.0
+
 
 class PrimalMinimumDegree(Enum):
     """Minimum-degree policy for plantri's primal quadrangulation ``G``.
@@ -38,6 +44,14 @@ class PrimalMinimumDegree(Enum):
 
     AT_LEAST_2 = 2
     AT_LEAST_3 = 3
+
+    @property
+    def _plantri_switches(self) -> tuple[str, ...]:
+        return ("-q", "-c2", "-m2") if self is self.AT_LEAST_2 else ("-q", "-c2")
+
+    @property
+    def _minimum_nonempty_dual_vertex_count(self) -> int:
+        return MIN_SUPPORTED_DUAL_VERTEX_COUNT if self is self.AT_LEAST_2 else 6
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -53,28 +67,26 @@ class SimpleQuadrangulation:
         if type(dual) is not QuarticPlaneMap:
             raise TypeError("dual must be QuarticPlaneMap")
         twin = dual.twin
-        face_dart_orbits: list[tuple[int, ...]] = []
-        dual_face_index_by_dart = [-1] * len(twin)
+        right_face = [-1] * len(twin)
+        face_orbits: list[list[int]] = []
+        # Label dual right-face orbits with their primal-vertex indices.
         for start_dart in range(len(twin)):
-            if dual_face_index_by_dart[start_dart] != -1:
+            if right_face[start_dart] >= 0:
                 continue
-            face_index = len(face_dart_orbits)
+            face_index = len(face_orbits)
             face_darts: list[int] = []
             dart = start_dart
-            while dual_face_index_by_dart[dart] == -1:
+            while right_face[dart] < 0:
+                right_face[dart] = face_index
                 face_darts.append(dart)
-                dual_face_index_by_dart[dart] = face_index
                 dart = dual.right_face_next(dart)
-            face_dart_orbits.append(tuple(face_darts))
-        embedding: Embedding = tuple(
-            tuple(dual_face_index_by_dart[twin[dart]] for dart in face_darts)
-            for face_darts in face_dart_orbits
+            face_orbits.append(face_darts)
+        embedding = tuple(
+            tuple(right_face[twin[dart]] for dart in face_darts)
+            for face_darts in face_orbits
         )
         faces = tuple(
-            tuple(
-                dual_face_index_by_dart[twin[dart]]
-                for dart in range(base, base + 4)
-            )
+            tuple(right_face[twin[dart]] for dart in range(base, base + 4))
             for base in range(0, len(twin), 4)
         )
         object.__setattr__(self, "_dual", dual)
@@ -209,8 +221,7 @@ class QuarticPlaneMap:
     def double_edges(self) -> frozenset[SupportEdge]:
         """Return dual support edges of multiplicity two."""
         return frozenset(
-            edge
-            for edge, multiplicity in self.edge_multiplicity.items()
+            edge for edge, multiplicity in self.edge_multiplicity.items()
             if multiplicity == 2
         )
 
@@ -260,51 +271,9 @@ class QuarticPlaneMap:
         """Return the target vertex of a valid dart."""
         return self.vertex(self.twin[dart])
 
-MIN_SUPPORTED_DUAL_VERTEX_COUNT = 3
-_BUNDLED_PLANTRI_MAX_PRIMAL_VERTEX_COUNT = 64
-BUNDLED_MAX_DUAL_VERTEX_COUNT = _BUNDLED_PLANTRI_MAX_PRIMAL_VERTEX_COUNT - 2
-
-_IO_CHUNK_SIZE = 1 << 16
-_PROCESS_TERMINATE_TIMEOUT_S = 5.0
-_PIPE_QUEUE_CAPACITY = 2
-
-@dataclass(frozen=True, slots=True)
-class _QuadrangulationSpec:
-    primal_switches: tuple[str, ...]
-    primal_minimum_degree: int
-    minimum_nonempty_dual_vertex_count: int
-
-
-_PRIMAL_MINIMUM_DEGREE_SPECS: dict[
-    PrimalMinimumDegree, _QuadrangulationSpec
-] = {
-    PrimalMinimumDegree.AT_LEAST_2: _QuadrangulationSpec(
-        primal_switches=("-q", "-c2", "-m2"),
-        primal_minimum_degree=2,
-        minimum_nonempty_dual_vertex_count=MIN_SUPPORTED_DUAL_VERTEX_COUNT,
-    ),
-    PrimalMinimumDegree.AT_LEAST_3: _QuadrangulationSpec(
-        primal_switches=("-q", "-c2"),
-        primal_minimum_degree=3,
-        minimum_nonempty_dual_vertex_count=6,
-    ),
-}
-
 
 class PlantriError(Exception):
-    """Base class for invoking plantri_sqs and decoding its fixed records."""
-
-
-class PlantriExecutableNotFoundError(PlantriError, FileNotFoundError):
-    """The bundled plantri_sqs executable could not be resolved."""
-
-
-class PlantriTimeoutError(PlantriError, TimeoutError):
-    """plantri_sqs exceeded a caller-supplied wall-clock deadline."""
-
-
-class _ExecutionError(PlantriError):
-    """A nonzero child exit, preferred over downstream stream corruption."""
+    """Failure while invoking plantri_sqs or decoding its fixed records."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,87 +294,68 @@ class PlantriEnumerationResult:
         return self.time_to_first_record_s + self.remaining_s
 
 
-@dataclass(slots=True)
-class _EnumerationProgress:
-    started_at: float
-    time_to_first_record_s: float = 0.0
-
-
-@dataclass(frozen=True, slots=True)
-class _StreamDeadline:
-    deadline: float | None
-    timeout: float | None
-
-    @classmethod
-    def from_timeout(cls, timeout: float | None) -> _StreamDeadline:
-        return cls(None if timeout is None else time.monotonic() + timeout, timeout)
-
-    def wait_timeout(self) -> float | None:
-        """Return the remaining queue wait or raise the shared timeout error."""
-        if self.deadline is None:
-            return None
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise self.expired()
-        return remaining
-
-    def expired(self) -> PlantriTimeoutError:
-        return PlantriTimeoutError(f"plantri_sqs: timed out after {self.timeout}s")
-
-
-@dataclass(frozen=True, slots=True)
-class _ReadFailure:
-    error: BaseException
-
-
 class _PipeReader:
-    """Bounded background reader so Windows pipe reads remain interruptible."""
+    """Read plantri stdout in a background thread under one shared deadline."""
 
-    def __init__(self, stream: BinaryIO) -> None:
+    def __init__(self, stream: BinaryIO, timeout: float | None) -> None:
+        """Initialize the reader and its shared deadline."""
         self._stream = stream
-        self._queue: queue.Queue[bytes | _ReadFailure | None] = queue.Queue(
-            _PIPE_QUEUE_CAPACITY
-        )
+        self._timeout = timeout
+        self._deadline = None if timeout is None else time.monotonic() + timeout
+        self._queue: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=2)
         self._cancelled = threading.Event()
         self._eof_received = False
-        self._thread = threading.Thread(
-            target=self._read,
-            name="pyplantri-stdout",
-            daemon=True,
-        )
+        self._thread = threading.Thread(target=self._read, name="pyplantri-stdout", daemon=True)
 
     def start(self) -> None:
+        """Start the stdout reader thread."""
         self._thread.start()
 
     def cancel(self) -> None:
+        """Request producer cancellation."""
         self._cancelled.set()
 
     def join(self) -> None:
-        self._thread.join(_PROCESS_TERMINATE_TIMEOUT_S)
+        """Wait for bounded reader cleanup."""
+        self._thread.join(_CLEANUP_TIMEOUT_S)
         if self._thread.is_alive():
             raise PlantriError("plantri_sqs: stdout reader did not stop")
 
-    def chunks(self, deadline: _StreamDeadline) -> Iterator[bytes]:
+    def remaining_timeout(self) -> float | None:
+        """Return the remaining shared wait or raise the timeout error."""
+        if self._deadline is None:
+            return None
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise self.timeout_error()
+        return remaining
+
+    def timeout_error(self) -> PlantriError:
+        """Build the shared timeout error."""
+        return PlantriError(f"plantri_sqs: timed out after {self._timeout}s")
+
+    def chunks(self) -> Iterator[bytes]:
+        """Yield stdout chunks until EOF or failure."""
         while True:
             try:
-                item = self._queue.get(timeout=deadline.wait_timeout())
+                item = self._queue.get(timeout=self.remaining_timeout())
             except queue.Empty:
-                raise deadline.expired() from None
+                raise self.timeout_error() from None
             if item is None:
                 self._eof_received = True
                 return
-            if isinstance(item, _ReadFailure):
-                detail = _summarize_process_text(str(item.error))
-                raise PlantriError(
-                    f"plantri_sqs: failed to read binary stdout: {detail}"
-                ) from item.error
+            if isinstance(item, BaseException):
+                detail = _summarize_process_text(str(item))
+                raise PlantriError(f"plantri_sqs: failed to read binary stdout: {detail}") from item
             yield item
 
     @property
     def exhausted(self) -> bool:
+        """Return whether the consumer received EOF."""
         return self._eof_received
 
-    def _publish(self, item: bytes | _ReadFailure | None) -> None:
+    def _publish(self, item: bytes | BaseException | None) -> None:
+        """Publish one item unless cancellation is requested."""
         while not self._cancelled.is_set():
             try:
                 self._queue.put(item, timeout=0.05)
@@ -414,14 +364,13 @@ class _PipeReader:
                 pass
 
     def _read(self) -> None:
-        read = getattr(self._stream, "read1", self._stream.read)
+        """Publish stdout chunks followed by one terminal item."""
         try:
-            while chunk := read(_IO_CHUNK_SIZE):
+            read = getattr(self._stream, "read1", self._stream.read)
+            while not self._cancelled.is_set() and (chunk := read(64 * 1024)):
                 self._publish(chunk)
-                if self._cancelled.is_set():
-                    return
         except BaseException as error:
-            self._publish(_ReadFailure(error))
+            self._publish(error)
         else:
             self._publish(None)
 
@@ -449,7 +398,7 @@ def _validate_request(
     primal_minimum_degree: PrimalMinimumDegree,
     max_count: int | None,
     timeout: float | None,
-) -> _QuadrangulationSpec:
+) -> None:
     if type(dual_vertex_count) is not int:
         raise ValueError(f"dual_vertex_count must be int; got {dual_vertex_count!r}")
     if not (
@@ -472,7 +421,6 @@ def _validate_request(
             "primal_minimum_degree: expected PrimalMinimumDegree, "
             f"got {primal_minimum_degree!r}"
         )
-    return _PRIMAL_MINIMUM_DEGREE_SPECS[primal_minimum_degree]
 
 
 @contextmanager
@@ -483,12 +431,12 @@ def _resolved_executable() -> Generator[Path, None, None]:
         try:
             candidate = stack.enter_context(as_file(resource))
         except FileNotFoundError as error:
-            raise PlantriExecutableNotFoundError(
+            raise PlantriError(
                 f"plantri_sqs: bundled executable {exe_name} was not found"
             ) from error
         executable = candidate.resolve()
         if not executable.is_file():
-            raise PlantriExecutableNotFoundError(
+            raise PlantriError(
                 f"plantri_sqs: executable not found {executable}"
             )
         if os.name == "posix" and not os.access(executable, os.X_OK):
@@ -499,13 +447,13 @@ def _resolved_executable() -> Generator[Path, None, None]:
 def _start_process(
     executable: Path,
     dual_vertex_count: int,
-    spec: _QuadrangulationSpec,
+    primal_minimum_degree: PrimalMinimumDegree,
     stderr_file: BinaryIO,
 ) -> subprocess.Popen[bytes]:
     primal_vertex_count = dual_vertex_count + 2
     command = [
         str(executable),
-        *spec.primal_switches,
+        *primal_minimum_degree._plantri_switches,
         str(primal_vertex_count),
     ]
     try:
@@ -515,7 +463,7 @@ def _start_process(
             stderr=stderr_file,
         )
     except FileNotFoundError as error:
-        raise PlantriExecutableNotFoundError(
+        raise PlantriError(
             f"plantri_sqs: executable not found {executable}"
         ) from error
     except OSError as error:
@@ -528,11 +476,11 @@ def _start_process(
 def _process_error(
     process: subprocess.Popen[bytes],
     stderr_file: BinaryIO,
-) -> _ExecutionError:
+) -> PlantriError:
     stderr_file.flush()
     stderr_file.seek(0)
     detail = _summarize_process_text(stderr_file.read()) or "no output"
-    return _ExecutionError(
+    return PlantriError(
         f"plantri_sqs: execution failed (exit {process.returncode}); {detail}"
     )
 
@@ -540,16 +488,12 @@ def _process_error(
 def _finalize_process(
     process: subprocess.Popen[bytes],
     reader: _PipeReader,
-    stderr_file: BinaryIO,
-    deadline: _StreamDeadline,
     *,
-    stream_exhausted: bool,
     intentional_stop: bool,
-) -> None:
-    """Check natural completion or stop an intentionally shortened stream."""
+) -> bool:
+    """Stop the reader and return whether plantri_sqs exited unsuccessfully."""
     reader.cancel()
     initial_return_code = process.poll()
-    natural_exit = stream_exhausted or reader.exhausted
 
     def stop() -> None:
         if process.poll() is not None:
@@ -560,28 +504,25 @@ def _finalize_process(
             if process.poll() is None:
                 raise
         try:
-            process.wait(timeout=_PROCESS_TERMINATE_TIMEOUT_S)
+            process.wait(timeout=_CLEANUP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
 
     try:
-        if natural_exit:
+        if reader.exhausted:
             try:
-                return_code = process.wait(timeout=deadline.wait_timeout())
-            except (PlantriTimeoutError, subprocess.TimeoutExpired):
+                return_code = process.wait(timeout=reader.remaining_timeout())
+            except (PlantriError, subprocess.TimeoutExpired):
                 stop()
-                raise deadline.expired() from None
-            if return_code != 0:
-                raise _process_error(process, stderr_file)
-        else:
-            stop()
-            if (
-                not intentional_stop
-                and initial_return_code is not None
-                and initial_return_code != 0
-            ):
-                raise _process_error(process, stderr_file)
+                raise reader.timeout_error() from None
+            return return_code != 0
+        stop()
+        return (
+            not intentional_stop
+            and initial_return_code is not None
+            and initial_return_code != 0
+        )
     finally:
         try:
             reader.join()
@@ -616,7 +557,7 @@ def _iter_fixed_records(
 def _decode_map(
     record: bytes,
     dual_vertex_count: int,
-    spec: _QuadrangulationSpec,
+    primal_minimum_degree: PrimalMinimumDegree,
     graph_id: int,
 ) -> QuarticPlaneMap:
     dual_dart_count = 4 * dual_vertex_count
@@ -624,11 +565,11 @@ def _decode_map(
     primal_degree_profile = record[dual_dart_count:]
     if (
         not primal_degree_profile
-        or primal_degree_profile[-1] < spec.primal_minimum_degree
+        or primal_degree_profile[-1] < primal_minimum_degree.value
     ):
         raise PlantriError(
             f"plantri_sqs: record {graph_id} primal minimum degree below "
-            f"{spec.primal_minimum_degree}"
+            f"{primal_minimum_degree.value}"
         )
     try:
         graph = QuarticPlaneMap(twin=twin, graph_id=graph_id)
@@ -659,43 +600,35 @@ def _decode_map(
 
 def _iter_maps(
     dual_vertex_count: int,
-    spec: _QuadrangulationSpec,
+    primal_minimum_degree: PrimalMinimumDegree,
     max_count: int | None,
     timeout: float | None,
-    progress: _EnumerationProgress | None = None,
 ) -> Generator[QuarticPlaneMap, None, None]:
     with _resolved_executable() as executable, tempfile.TemporaryFile() as stderr_file:
         process = _start_process(
             executable,
             dual_vertex_count,
-            spec,
+            primal_minimum_degree,
             cast(BinaryIO, stderr_file),
         )
         stdout = cast(BinaryIO, process.stdout)
-        reader = _PipeReader(stdout)
+        reader = _PipeReader(stdout, timeout)
         reader.start()
-        deadline = _StreamDeadline.from_timeout(timeout)
-        stream_exhausted = False
         intentional_stop = False
         primary_error: BaseException | None = None
         try:
-            records = _iter_fixed_records(reader.chunks(deadline), dual_vertex_count)
+            records = _iter_fixed_records(reader.chunks(), dual_vertex_count)
             for graph_id, record in enumerate(records):
                 graph = _decode_map(
                     record,
                     dual_vertex_count,
-                    spec,
+                    primal_minimum_degree,
                     graph_id,
                 )
-                if progress is not None and graph_id == 0:
-                    progress.time_to_first_record_s = (
-                        time.perf_counter() - progress.started_at
-                    )
                 yield graph
                 if max_count is not None and graph_id + 1 >= max_count:
                     intentional_stop = True
                     return
-            stream_exhausted = True
         except GeneratorExit:
             intentional_stop = True
             raise
@@ -704,23 +637,26 @@ def _iter_maps(
             raise
         finally:
             try:
-                _finalize_process(
+                process_failed = _finalize_process(
                     process,
                     reader,
-                    cast(BinaryIO, stderr_file),
-                    deadline,
-                    stream_exhausted=stream_exhausted,
                     intentional_stop=intentional_stop,
+                )
+                process_error = (
+                    _process_error(process, cast(BinaryIO, stderr_file))
+                    if process_failed
+                    else None
                 )
             except BaseException as cleanup_error:
                 if primary_error is None:
                     raise
-                if isinstance(cleanup_error, _ExecutionError):
-                    raise cleanup_error from primary_error
                 detail = _summarize_process_text(str(cleanup_error), limit=240)
                 primary_error.add_note(
                     f"pyplantri: process cleanup failed: {detail}"
                 )
+            else:
+                if process_error is not None:
+                    raise process_error from primary_error
 
 
 def _empty_stream() -> Generator[QuarticPlaneMap, None, None]:
@@ -735,18 +671,16 @@ def iter_simple_quadrangulation_duals(
     timeout: float | None = None,
 ) -> Generator[QuarticPlaneMap, None, None]:
     """Yield source-ordered candidate duals ``G*`` from the FILTER executable."""
-    spec = _validate_request(
-        dual_vertex_count, primal_minimum_degree, max_count, timeout
-    )
+    _validate_request(dual_vertex_count, primal_minimum_degree, max_count, timeout)
     if (
         max_count == 0
         or dual_vertex_count
-        < spec.minimum_nonempty_dual_vertex_count
+        < primal_minimum_degree._minimum_nonempty_dual_vertex_count
     ):
         return _empty_stream()
     return _iter_maps(
         dual_vertex_count,
-        spec,
+        primal_minimum_degree,
         max_count,
         timeout,
     )
@@ -760,30 +694,31 @@ def enumerate_simple_quadrangulation_duals(
     timeout: float | None = None,
 ) -> PlantriEnumerationResult:
     """Materialize a bounded source-order prefix and preserve timing fields."""
-    spec = _validate_request(
-        dual_vertex_count, primal_minimum_degree, max_count, timeout
-    )
+    _validate_request(dual_vertex_count, primal_minimum_degree, max_count, timeout)
     started_at = time.perf_counter()
-    progress = _EnumerationProgress(started_at)
+    time_to_first_record_s = 0.0
     if (
         max_count == 0
         or dual_vertex_count
-        < spec.minimum_nonempty_dual_vertex_count
+        < primal_minimum_degree._minimum_nonempty_dual_vertex_count
     ):
         graphs: tuple[QuarticPlaneMap, ...] = ()
     else:
-        graphs = tuple(
-            _iter_maps(
-                dual_vertex_count,
-                spec,
-                max_count,
-                timeout,
-                progress,
-            )
+        stream = _iter_maps(
+            dual_vertex_count,
+            primal_minimum_degree,
+            max_count,
+            timeout,
         )
+        first_graph = next(stream, None)
+        if first_graph is None:
+            graphs = ()
+        else:
+            time_to_first_record_s = time.perf_counter() - started_at
+            graphs = (first_graph, *stream)
     elapsed_s = time.perf_counter() - started_at
     return PlantriEnumerationResult(
         graphs=graphs,
-        time_to_first_record_s=progress.time_to_first_record_s,
-        remaining_s=elapsed_s - progress.time_to_first_record_s,
+        time_to_first_record_s=time_to_first_record_s,
+        remaining_s=elapsed_s - time_to_first_record_s,
     )

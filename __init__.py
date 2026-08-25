@@ -5,9 +5,7 @@ from .plantri import (
     BUNDLED_MAX_DUAL_VERTEX_COUNT,
     MIN_SUPPORTED_DUAL_VERTEX_COUNT,
     PlantriEnumerationResult,
-    PlantriExecutableNotFoundError,
     PlantriError,
-    PlantriTimeoutError,
     PrimalMinimumDegree,
     SimpleQuadrangulation,
     QuarticPlaneMap,
@@ -23,9 +21,7 @@ except _metadata.PackageNotFoundError:
 __all__ = [
     # FILTER-backed SQS enumeration
     "PrimalMinimumDegree",
-    "PlantriExecutableNotFoundError",
     "PlantriError",
-    "PlantriTimeoutError",
     "BUNDLED_MAX_DUAL_VERTEX_COUNT",
     "MIN_SUPPORTED_DUAL_VERTEX_COUNT",
     # Candidate primal/dual plane-graph model

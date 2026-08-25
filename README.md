@@ -118,7 +118,7 @@ Enumeration resolves only the bundled `pyplantri/bin/plantri_sqs(.exe)`
 resource. It never selects a stock or stale `plantri` executable from `PATH`.
 The pre-0.7 generic `Plantri`, `QuadrangulationEnumerator`, `planar_code`, text
 output, split, and multiprocessing APIs were removed; the package now exposes
-only the two SQS enumeration entry points and their typed result/errors.
+only the two SQS enumeration entry points, their result, and `PlantriError`.
 The current API uses `MIN_SUPPORTED_DUAL_VERTEX_COUNT`,
 `time_to_first_record_s`, `PrimalMinimumDegree`, and the
 `primal_minimum_degree` keyword. `PrimalMinimumDegree` replaces
