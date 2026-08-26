@@ -1,7 +1,6 @@
 # plantri.py
 from __future__ import annotations
 
-import math
 import os
 import queue
 import stat
@@ -14,6 +13,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from importlib.resources import as_file, files
+from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, cast
@@ -420,8 +420,11 @@ def _validate_enumeration_request(
         raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count}; expected [{minimum},{maximum}]")
     if type(max_count) is not int or max_count < 0:
         raise ValueError(f"max_count: expected int >= 0, got {max_count!r}")
-    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
-        raise ValueError(f"plantri_sqs: timeout must be None or finite positive; got {timeout!r}")
+    if timeout is not None and (
+        type(timeout) not in (int, float)
+        or not 0 < timeout <= threading.TIMEOUT_MAX
+    ):
+        raise ValueError(f"plantri_sqs: timeout must be None or 0 < timeout <= {threading.TIMEOUT_MAX}")
     if not isinstance(primal_minimum_degree, PrimalMinimumDegree):
         raise TypeError(f"primal_minimum_degree: expected PrimalMinimumDegree, got {primal_minimum_degree!r}")
 
@@ -449,23 +452,16 @@ def _start_process(
     primal_minimum_degree: PrimalMinimumDegree,
     stderr_file: BinaryIO,
 ) -> subprocess.Popen[bytes]:
-    primal_vertex_count = dual_vertex_count + 2
     command = [
         str(executable),
         *primal_minimum_degree._plantri_switches,
-        str(primal_vertex_count),
+        str(dual_vertex_count + 2),
     ]
     try:
-        return subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=stderr_file,
-        )
-    except FileNotFoundError as error:
-        raise PlantriError(f"plantri_sqs: executable not found {executable}") from error
+        return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr_file)
     except OSError as error:
-        detail = _error_detail(str(error))
-        raise PlantriError(f"plantri_sqs: executable is not runnable {executable}: {detail}") from error
+        detail = _error_detail(str(error)) or type(error).__name__
+        raise PlantriError(f"plantri_sqs: failed to start executable {executable}: {detail}") from error
 
 
 def _build_execution_error(
@@ -527,22 +523,26 @@ def _finalize_filter_run(
 def _iter_filter_records(
     chunks: Iterator[bytes],
     dual_vertex_count: int,
-) -> Iterator[tuple[bytes, bytes]]:
-    dual_dart_count = 4 * dual_vertex_count
-    primal_vertex_count = dual_vertex_count + 2
-    record_size = dual_dart_count + primal_vertex_count
+) -> Iterator[tuple[bytes, tuple[int, ...]]]:
+    twin_size = 4 * dual_vertex_count
+    record_size = twin_size + dual_vertex_count + 2
     carry = b""
-    record_index = 0
+    record_count = 0
     for chunk in chunks:
         data = carry + chunk
-        complete_size = len(data) - len(data) % record_size
+        complete_count = len(data) // record_size
+        complete_size = complete_count * record_size
         for start in range(0, complete_size, record_size):
-            split = start + dual_dart_count
-            yield data[start:split], data[split : start + record_size]
-            record_index += 1
+            split = start + twin_size
+            yield (
+                data[start:split],
+                tuple(data[split : start + record_size]),
+            )
+        record_count += complete_count
         carry = data[complete_size:]
     if carry:
-        raise PlantriError(f"plantri_sqs: truncated fixed record {record_index} ({len(carry)}/{record_size} bytes)")
+        raise PlantriError(f"plantri_sqs: truncated fixed record {record_count} ({len(carry)}/{record_size} bytes)")
+
 
 @contextmanager
 def _filter_session(
@@ -612,15 +612,13 @@ def enumerate_simple_quadrangulation_duals(
     if max_count and dual_vertex_count >= primal_minimum_degree._minimum_nonempty_dual_vertex_count:
         with _filter_session(dual_vertex_count, primal_minimum_degree, timeout) as reader:
             records = _iter_filter_records(reader.chunks(), dual_vertex_count)
-            for graph_id, (twin, profile) in enumerate(records):
-                dual = QuarticPlaneMap._from_filter(twin, graph_id, tuple(profile))
+            for graph_id, (twin, face_size_sequence) in enumerate(islice(records, max_count)):
+                dual = QuarticPlaneMap._from_filter(twin, graph_id, face_size_sequence)
 
-                if not duals:
+                if graph_id == 0:
                     time_to_first_record_s = time.perf_counter() - enumeration_started_at
 
                 duals.append(dual)
-                if len(duals) >= max_count:
-                    break
 
     graphs = tuple(duals)
     total_elapsed_s = time.perf_counter() - enumeration_started_at
