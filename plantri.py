@@ -14,7 +14,6 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from importlib.resources import as_file, files
-from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, cast
@@ -30,7 +29,8 @@ Embedding = tuple[tuple[int, ...], ...]
 
 MIN_SUPPORTED_DUAL_VERTEX_COUNT = 3
 _PLANTRI_MAXN = 64
-BUNDLED_MAX_DUAL_VERTEX_COUNT = _PLANTRI_MAXN - 2
+# The bundled primal generator must stay below MAXN; duals have two fewer vertices.
+BUNDLED_MAX_DUAL_VERTEX_COUNT = (_PLANTRI_MAXN - 1) - 2
 
 _CLEANUP_TIMEOUT_S = 5.0
 
@@ -151,6 +151,23 @@ class QuarticPlaneMap:
                 raise ValueError(f"self-twin dart: {dart}")
             if self.twin[opposite] != dart:
                 raise ValueError(f"twin is not involutive: {dart}->{opposite}")
+
+    @classmethod
+    def _from_filter(
+        cls,
+        twin: bytes,
+        graph_id: int,
+        face_size_sequence: tuple[int, ...],
+    ) -> QuarticPlaneMap:
+        """Construct from one trusted record emitted by the bundled C FILTER."""
+        dual = object.__new__(cls)
+        object.__setattr__(dual, "twin", twin)
+        object.__setattr__(dual, "graph_id", graph_id)
+        object.__setattr__(dual, "_faces", None)
+        object.__setattr__(dual, "_edge_multiplicity", None)
+        object.__setattr__(dual, "_face_size_sequence", face_size_sequence)
+        object.__setattr__(dual, "_primal", None)
+        return dual
 
     def __reduce__(self) -> tuple[type[QuarticPlaneMap], tuple[bytes, int]]:
         """Serialize only the persistent twin and namespace-local Graph ID."""
@@ -278,13 +295,7 @@ class PlantriError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class PlantriEnumerationResult:
-    """Immutable map batch with zero time-to-first-record for an empty stream.
-
-    The first-record interval includes resource resolution, process startup,
-    FILTER conversion, pipe transfer, and Python decoding.
-    ``remaining_s`` measures from the first decoded record through cleanup; for
-    an empty batch, it equals ``total_s``.
-    """
+    """Immutable map batch with zero time-to-first-record for an empty stream."""
 
     graphs: tuple[QuarticPlaneMap, ...]
     time_to_first_record_s: float
@@ -498,8 +509,6 @@ def _finalize_filter_run(
     reader.cancel()
     try:
         if not reader.eof_received:
-            # None means this caller requested termination; an observed natural
-            # nonzero exit remains a failure even when the prefix limit was met.
             observed_return_code = _stop_process(process)
             return observed_return_code not in (None, 0)
         try:
@@ -515,10 +524,10 @@ def _finalize_filter_run(
                 process.stdout.close()
 
 
-def _iter_fixed_records(
+def _iter_filter_records(
     chunks: Iterator[bytes],
     dual_vertex_count: int,
-) -> Iterator[bytes]:
+) -> Iterator[tuple[bytes, bytes]]:
     dual_dart_count = 4 * dual_vertex_count
     primal_vertex_count = dual_vertex_count + 2
     record_size = dual_dart_count + primal_vertex_count
@@ -528,41 +537,12 @@ def _iter_fixed_records(
         data = carry + chunk
         complete_size = len(data) - len(data) % record_size
         for start in range(0, complete_size, record_size):
-            yield data[start : start + record_size]
+            split = start + dual_dart_count
+            yield data[start:split], data[split : start + record_size]
             record_index += 1
         carry = data[complete_size:]
     if carry:
         raise PlantriError(f"plantri_sqs: truncated fixed record {record_index} ({len(carry)}/{record_size} bytes)")
-
-
-def _decode_filter_record(
-    record: bytes,
-    dual_vertex_count: int,
-    primal_minimum_degree: PrimalMinimumDegree,
-    graph_id: int,
-) -> QuarticPlaneMap:
-    dual_dart_count = 4 * dual_vertex_count
-    twin = record[:dual_dart_count]
-    primal_degree_profile = record[dual_dart_count:]
-    try:
-        dual = QuarticPlaneMap(twin=twin, graph_id=graph_id)
-        primal_vertex_count = dual.num_vertices + 2
-        if len(primal_degree_profile) != primal_vertex_count:
-            raise ValueError(f"primal degree profile length {len(primal_degree_profile)}!={primal_vertex_count}")
-        if any(left < right for left, right in pairwise(primal_degree_profile)):
-            raise ValueError("primal degree profile is not descending")
-        if primal_degree_profile[-1] < primal_minimum_degree.value:
-            raise PlantriError(f"plantri_sqs: record {graph_id} primal minimum degree below {primal_minimum_degree.value}")
-        if primal_degree_profile[0] >= primal_vertex_count:
-            raise ValueError("primal degree profile exceeds the simple-primal maximum")
-        degree_sum = sum(primal_degree_profile)
-        if degree_sum != len(twin):
-            raise ValueError(f"primal degree profile sum {degree_sum}!={len(twin)}")
-        object.__setattr__(dual, "_face_size_sequence", tuple(primal_degree_profile))
-        return dual
-    except (TypeError, ValueError) as error:
-        raise PlantriError(f"plantri_sqs: malformed record {graph_id}: {error}") from error
-
 
 @contextmanager
 def _filter_session(
@@ -623,12 +603,7 @@ def enumerate_simple_quadrangulation_duals(
     primal_minimum_degree: PrimalMinimumDegree = PrimalMinimumDegree.AT_LEAST_2,
     timeout: float | None = None,
 ) -> PlantriEnumerationResult:
-    """Materialize candidate duals; each graph exposes its primal via ``.primal``.
-
-    ``timeout`` starts with stdout-reader construction and bounds stream and
-    child-exit waits, not resource resolution, process startup, or Python
-    decoding already in progress.
-    """
+    """Materialize candidate duals; each graph exposes its primal via ``.primal``."""
     _validate_enumeration_request(dual_vertex_count, primal_minimum_degree, max_count, timeout)
     enumeration_started_at = time.perf_counter()
     time_to_first_record_s = 0.0
@@ -636,8 +611,9 @@ def enumerate_simple_quadrangulation_duals(
 
     if max_count and dual_vertex_count >= primal_minimum_degree._minimum_nonempty_dual_vertex_count:
         with _filter_session(dual_vertex_count, primal_minimum_degree, timeout) as reader:
-            for graph_id, fixed_record in enumerate(_iter_fixed_records(reader.chunks(), dual_vertex_count)):
-                dual = _decode_filter_record(fixed_record, dual_vertex_count, primal_minimum_degree, graph_id)
+            records = _iter_filter_records(reader.chunks(), dual_vertex_count)
+            for graph_id, (twin, profile) in enumerate(records):
+                dual = QuarticPlaneMap._from_filter(twin, graph_id, tuple(profile))
 
                 if not duals:
                     time_to_first_record_s = time.perf_counter() - enumeration_started_at

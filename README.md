@@ -23,8 +23,8 @@ twin[4n] + descending primal degree profile[n+2]
 ```
 
 The record order is the namespace-local `graph_id`. Python never decodes `planar_code`, reconstructs primal face orbits, or uses a worker pool.
-The FILTER trusts bundled plantri's topology-generation contract and owns its byte-stable conversion.
-Python validates the serialized twin/profile envelope; cache hashes verify stored bytes and order rather than generator provenance.
+The FILTER trusts bundled plantri's topology-generation contract and certifies its byte-stable record conversion.
+Python only frames trusted FILTER records; cache hashes verify stored bytes and order rather than generator provenance.
 
 ### Related Papers
 
@@ -87,7 +87,7 @@ For plane graphs: `V - E + F = 2`
 
 **Input Rule:** The input `n` to `enumerate_simple_quadrangulation_duals()` is the **number of vertices in G\* (Dual)**. Internally, `n + 2` (the candidate-primal vertex count) is passed to `plantri_sqs`.
 
-**Input Constraint:** The bundled count and materialization paths support `3 <= n <= 62`. The `AT_LEAST_3` stream is empty for `n < 6`.
+**Input Constraint:** The bundled count and materialization paths support `3 <= n <= 61`. The `AT_LEAST_3` stream is empty for `n < 6`.
 The full literature family selected by `AT_LEAST_2` also contains the square's two-vertex dual, which lies outside this wrapper's supported range.
 
 ## Installation
