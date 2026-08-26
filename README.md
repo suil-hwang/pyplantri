@@ -24,8 +24,8 @@ twin[4n] + descending primal degree profile[n+2]
 
 The record order is the namespace-local `graph_id`. Python never decodes
 `planar_code`, reconstructs primal face orbits, or uses a worker pool.
-The bundled FILTER owns topology validation for enumerated records. Direct
-`QuarticPlaneMap(twin)` construction validates only the twin involution, and
+The FILTER trusts bundled plantri's topology-generation contract and owns its
+byte-stable conversion. Python validates the serialized twin/profile envelope;
 cache hashes verify stored bytes and order rather than generator provenance.
 
 ### Related Papers
@@ -74,7 +74,7 @@ returns an immutable `SimpleQuadrangulation` view of candidate `G`, whose
 the realized `Q` or `Q*` produced by the downstream geometry pipeline.
 
 ```python
-dual = next(iter_simple_quadrangulation_duals(n))
+dual = enumerate_simple_quadrangulation_duals(n, max_count=1).graphs[0]
 primal = dual.primal
 
 assert primal.dual is dual
@@ -91,10 +91,9 @@ For plane graphs: `V - E + F = 2`
 | **G\*** (Dual) | 4-regular plane multigraph (loop-free) | n        |
 | **G** (Primal) | Simple Quadrangulation                 | n + 2    |
 
-**Input Rule:** The input `n` to `iter_simple_quadrangulation_duals()` and
-`enumerate_simple_quadrangulation_duals()` is the **number of vertices in G\*
-(Dual)**. Internally, `n + 2` (the candidate-primal vertex count) is passed to
-`plantri_sqs`.
+**Input Rule:** The input `n` to `enumerate_simple_quadrangulation_duals()` is
+the **number of vertices in G\* (Dual)**. Internally, `n + 2` (the
+candidate-primal vertex count) is passed to `plantri_sqs`.
 
 **Input Constraint:** The bundled count and materialization paths support
 `3 <= n <= 62`. The `AT_LEAST_3` stream is empty for `n < 6`. The full
@@ -109,30 +108,6 @@ cd pyplantri
 
 pip install -e .
 ```
-
-CMake automatically builds `plantri_sqs` during installation. The bundled
-`plantri.c` remains unmodified; `plantri_sqs.c` injects the FILTER through
-plantri's supported plugin hook.
-
-Enumeration resolves only the bundled `pyplantri/bin/plantri_sqs(.exe)`
-resource. It never selects a stock or stale `plantri` executable from `PATH`.
-The pre-0.7 generic `Plantri`, `QuadrangulationEnumerator`, `planar_code`, text
-output, split, and multiprocessing APIs were removed; the package now exposes
-only the two SQS enumeration entry points, their result, and `PlantriError`.
-The current API uses `MIN_SUPPORTED_DUAL_VERTEX_COUNT`,
-`time_to_first_record_s`, `PrimalMinimumDegree`, and the
-`primal_minimum_degree` keyword. `PrimalMinimumDegree` replaces
-`QuadrangulationClass` without a compatibility alias, and its values are the
-integers `2` and `3`. Code or pickles referring to the removed enum or its
-former string values require an explicit migration.
-
-The topology API is role-scoped without compatibility aliases:
-
-- `QuarticPlaneMap`: `num_vertices`, `embedding`, `faces`, `num_faces`,
-  `edge_multiplicity`, `support_edges`, `face_size_sequence`,
-  `vertex_to_primal_face`, and `primal`.
-- `SimpleQuadrangulation`: `num_vertices`, `embedding`, `faces`,
-  `vertex_to_dual_face`, and `dual`.
 
 ## Number of `AT_LEAST_2` Dual Plane Maps by n
 

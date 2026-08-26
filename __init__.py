@@ -10,7 +10,6 @@ from .plantri import (
     SimpleQuadrangulation,
     QuarticPlaneMap,
     enumerate_simple_quadrangulation_duals,
-    iter_simple_quadrangulation_duals,
 )
 
 try:
@@ -28,7 +27,6 @@ __all__ = [
     "SimpleQuadrangulation",
     "QuarticPlaneMap",
     # Enumeration
-    "iter_simple_quadrangulation_duals",
     "enumerate_simple_quadrangulation_duals",
     "PlantriEnumerationResult",
 ]
