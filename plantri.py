@@ -34,6 +34,12 @@ BUNDLED_MAX_DUAL_VERTEX_COUNT = (_PLANTRI_MAXN - 1) - 2
 
 _CLEANUP_TIMEOUT_S = 5.0
 
+# Identity darts and their big-endian integer, indexed by dart count.
+_TWIN_IDENTITY = tuple(
+    (darts, int.from_bytes(darts, "big"))
+    for darts in (bytes(range(count)) for count in range(257))
+)
+
 
 class PrimalMinimumDegree(Enum):
     """Minimum-degree policy for plantri's primal quadrangulation ``G``.
@@ -144,6 +150,14 @@ class QuarticPlaneMap:
             raise ValueError("dart count must be a positive multiple of 4")
         if dart_count > 256:
             raise ValueError("byte-valued twin supports at most 256 darts")
+        # translate composes twin with itself, 0xff marking out-of-range; a zero XOR byte is a self-twin.
+        twin = self.twin
+        identity, identity_int = _TWIN_IDENTITY[dart_count]
+        composed = twin.translate(twin.ljust(256, b"\xff"))
+        self_twins = (int.from_bytes(twin, "big") ^ identity_int).to_bytes(dart_count, "big")
+        if composed == identity and b"\x00" not in self_twins:
+            return
+        # Rejected in bulk: rescan per dart, which is what names the offender.
         for dart, opposite in enumerate(self.twin):
             if opposite >= dart_count:
                 raise ValueError(f"twin out of range: {dart}->{opposite}")
@@ -151,6 +165,7 @@ class QuarticPlaneMap:
                 raise ValueError(f"self-twin dart: {dart}")
             if self.twin[opposite] != dart:
                 raise ValueError(f"twin is not involutive: {dart}->{opposite}")
+        raise RuntimeError("twin rejected by the bulk envelope test but accepted per dart")
 
     @classmethod
     def _from_filter(
