@@ -137,35 +137,69 @@ class QuarticPlaneMap:
     _primal: SimpleQuadrangulation | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Validate compact record fields and the twin encoding."""
-        if type(self.twin) is not bytes:
-            raise TypeError("twin must be bytes")
-        if type(self.graph_id) is not int:
-            raise TypeError("graph_id must be int")
+        """Validate persistent fields and common-family topology membership."""
+        twin = self.twin
+        if type(twin) is not bytes or type(self.graph_id) is not int:
+            raise TypeError("twin must be bytes and graph_id must be int")
         if self.graph_id < 0:
             raise ValueError(f"graph_id must be non-negative, got {self.graph_id}")
 
-        dart_count = len(self.twin)
-        if dart_count == 0 or dart_count % 4:
-            raise ValueError("dart count must be a positive multiple of 4")
-        if dart_count > 256:
-            raise ValueError("byte-valued twin supports at most 256 darts")
+        dart_count = len(twin)
+        if not 0 < dart_count <= 256 or dart_count % 4:
+            raise ValueError("twin must contain 4..256 darts in blocks of 4")
+        vertex_count = dart_count // 4
         # translate composes twin with itself, 0xff marking out-of-range; a zero XOR byte is a self-twin.
-        twin = self.twin
         identity, identity_int = _TWIN_IDENTITY[dart_count]
-        composed = twin.translate(twin.ljust(256, b"\xff"))
         self_twins = (int.from_bytes(twin, "big") ^ identity_int).to_bytes(dart_count, "big")
-        if composed == identity and b"\x00" not in self_twins:
-            return
-        # Rejected in bulk: rescan per dart, which is what names the offender.
-        for dart, opposite in enumerate(self.twin):
-            if opposite >= dart_count:
-                raise ValueError(f"twin out of range: {dart}->{opposite}")
-            if opposite == dart:
-                raise ValueError(f"self-twin dart: {dart}")
-            if self.twin[opposite] != dart:
-                raise ValueError(f"twin is not involutive: {dart}->{opposite}")
-        raise RuntimeError("twin rejected by the bulk envelope test but accepted per dart")
+        if twin.translate(twin.ljust(256, b"\xff")) != identity or b"\x00" in self_twins:
+            raise ValueError("twin must be a fixed-point-free involution")
+
+        reached = {0}
+        pending = [0]
+        while pending:
+            vertex = pending.pop()
+            for opposite in twin[4 * vertex : 4 * vertex + 4]:
+                neighbor = opposite // 4
+                if neighbor not in reached:
+                    reached.add(neighbor)
+                    pending.append(neighbor)
+
+        # Dual right-face orbits are the vertices of the paired primal map.
+        face_by_dart = [-1] * dart_count
+        face_sizes: list[int] = []
+        for start_dart in range(dart_count):
+            if face_by_dart[start_dart] >= 0:
+                continue
+            face_index = len(face_sizes)
+            face_sizes.append(0)
+            dart = start_dart
+            while face_by_dart[dart] < 0:
+                face_by_dart[dart] = face_index
+                face_sizes[face_index] += 1
+                opposite = twin[dart]
+                dart = 4 * (opposite // 4) + (opposite % 4 - 1) % 4
+
+        primal_edges = [
+            tuple(sorted((face_by_dart[dart], face_by_dart[opposite])))
+            for dart, opposite in enumerate(twin)
+            if dart < opposite
+        ]
+        valid_primal = (
+            all(u != v for u, v in primal_edges)
+            and len(primal_edges) == len(set(primal_edges))
+            and all(
+                len({face_by_dart[twin[dart]] for dart in range(base, base + 4)}) == 4
+                for base in range(0, dart_count, 4)
+            )
+        )
+        if not (
+            vertex_count >= MIN_SUPPORTED_DUAL_VERTEX_COUNT
+            and len(reached) == vertex_count
+            and len(face_sizes) == vertex_count + 2
+            and min(face_sizes) >= 2
+            and valid_primal
+        ):
+            raise ValueError("twin does not encode a supported spherical dual of a simple quadrangulation")
 
     @classmethod
     def _from_filter(

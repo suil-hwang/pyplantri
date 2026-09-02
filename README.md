@@ -23,8 +23,8 @@ twin[4n] + descending primal degree profile[n+2]
 ```
 
 The record order is the namespace-local `graph_id`. Python never decodes `planar_code`, reconstructs primal face orbits, or uses a worker pool.
-The FILTER trusts bundled plantri's topology-generation contract and certifies its byte-stable record conversion.
-Python only frames trusted FILTER records; cache hashes verify stored bytes and order rather than generator provenance.
+The FILTER audits plantri's generated primal and its emitted dual record before using a private trusted construction path.
+Public raw construction and cache restoration independently validate the common topology family from `twin`; hashes verify stored bytes and order, not generator provenance or enumeration completeness.
 
 ### Related Papers
 
@@ -66,6 +66,7 @@ Its stream is a topological subset of the `AT_LEAST_2` stream, but the two sourc
 `QuarticPlaneMap` owns the compact candidate dual `G*`.
 Its `primal` property returns an immutable `SimpleQuadrangulation` view of candidate `G`, whose `dual` property points back to the paired candidate dual.
 Neither type denotes the realized `Q` or `Q*` produced by the downstream geometry pipeline.
+Direct `QuarticPlaneMap(twin, graph_id)` construction validates a connected spherical map paired with a simple quadrangulation whose faces are 4-cycles and whose minimum degree is at least two. Derived support rotations remain a downstream SQS concern rather than part of this topology API.
 
 ```python
 dual = enumerate_simple_quadrangulation_duals(n, max_count=1).graphs[0]
