@@ -8,7 +8,7 @@ from .plantri import (
     PlantriError,
     PrimalMinimumDegree,
     SimpleQuadrangulation,
-    QuarticPlaneMap,
+    DualPlaneGraph,
     enumerate_simple_quadrangulation_duals,
 )
 
@@ -25,7 +25,7 @@ __all__ = [
     "MIN_DUAL_VERTEX_COUNT",
     # Candidate primal/dual plane-graph model
     "SimpleQuadrangulation",
-    "QuarticPlaneMap",
+    "DualPlaneGraph",
     # Enumeration
     "enumerate_simple_quadrangulation_duals",
     "PlantriEnumerationResult",

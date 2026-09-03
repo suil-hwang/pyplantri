@@ -63,18 +63,21 @@ Callers must pass an enum member; bare numeric or string values are rejected.
 `AT_LEAST_3` uses plantri's default minimum degree 3; `-m3` is omitted.
 Its stream is a topological subset of the `AT_LEAST_2` stream, but the two source streams use independent source-order `graph_id` namespaces.
 
-`QuarticPlaneMap` owns the compact candidate dual `G*`.
-Its `primal` property returns an immutable `SimpleQuadrangulation` view of candidate `G`, whose `dual` property points back to the paired candidate dual.
+`DualPlaneGraph` owns the compact candidate dual `G*`: `embedding`, `faces`, `right_faces`, `support_edges`, `edge_multiplicity`, `double_edges`, and `face_size_sequence`, plus the dart operations `vertex`, `neighbor`, `next_at_vertex`, `prev_at_vertex`, `right_face_next`, and `right_face`.
+`SimpleQuadrangulation(dual)` is candidate `G` read over the same darts with the vertex and face roles exchanged: a dart leaves the dual face on its right, primal rotations are dual right-face orbits, and primal faces are dual vertices. It exposes `embedding`, `faces`, `edges`, `degrees`, `degree_sequence`, `min_degree`, the same six dart operations, and `dual`, which points back to the paired candidate dual. Nothing is copied: `twin` and `graph_id` are shared, and the `right_faces` labels are computed once on the dual.
 Neither type denotes the realized `Q` or `Q*` produced by the downstream geometry pipeline.
-Direct `QuarticPlaneMap(twin, graph_id)` construction validates a connected spherical map paired with a simple quadrangulation whose faces are 4-cycles and whose minimum degree is at least two. Derived support rotations remain a downstream SQS concern rather than part of this topology API.
+Direct `DualPlaneGraph(twin, graph_id)` construction validates a connected spherical map paired with a simple quadrangulation whose faces are 4-cycles and whose minimum degree is at least two. Derived support rotations remain a downstream SQS concern rather than part of this topology API.
 
 ```python
 dual = enumerate_simple_quadrangulation_duals(n, max_count=1).graphs[0]
-primal = dual.primal
+primal = SimpleQuadrangulation(dual)
 
 assert primal.dual is dual
-dual.embedding
-primal.embedding
+assert primal.num_vertices == dual.num_faces == n + 2
+assert primal.degree_sequence == dual.face_size_sequence
+dual.embedding    # vertex-indexed rotations of G*
+primal.embedding  # rotations of G, indexed by dual right face
+primal.faces      # 4-cycles of G, indexed by dual vertex
 ```
 
 ### Vertex Count Relationship (Euler's Formula)
