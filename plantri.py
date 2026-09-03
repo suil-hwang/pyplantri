@@ -18,27 +18,234 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, cast
 
-# Endpoint-sorted undirected support-edge key.
-SupportEdge = tuple[int, int]
+_PLANTRI_MAXN = 64  # plantri.c MAXN
 
-# Vertex-index face-boundary sequence.
-FaceCycle = tuple[int, ...]
+# plantri_sqs.c requires 5 <= maxnv < MAXN primal vertices; |V(G*)| = |V(G)| - 2.
+MIN_DUAL_VERTEX_COUNT = 3
+MAX_DUAL_VERTEX_COUNT = (_PLANTRI_MAXN - 1) - 2
 
-# Derived vertex-indexed exterior-view CW neighbor cycles (0-based).
-Embedding = tuple[tuple[int, ...], ...]
 
-MIN_SUPPORTED_DUAL_VERTEX_COUNT = 3
-_PLANTRI_MAXN = 64
-# The bundled primal generator must stay below MAXN; duals have two fewer vertices.
-BUNDLED_MAX_DUAL_VERTEX_COUNT = (_PLANTRI_MAXN - 1) - 2
+@dataclass(frozen=True, slots=True)
+class QuarticPlaneMap:
+    """Candidate dual plane graph ``G*`` paired with its primal quadrangulation ``G``."""
 
-_CLEANUP_TIMEOUT_S = 5.0
+    twin: bytes
+    graph_id: int = field(default=0, compare=False)
+    _faces: tuple[tuple[int, ...], ...] | None = field(default=None, init=False, repr=False, compare=False)
+    _edge_multiplicity: Mapping[tuple[int, int], int] | None = field(default=None, init=False, repr=False, compare=False)
+    _face_size_sequence: tuple[int, ...] | bytes | None = field(default=None, init=False, repr=False, compare=False)
+    _primal: SimpleQuadrangulation | None = field(default=None, init=False, repr=False, compare=False)
 
-# Identity darts and their big-endian integer, indexed by dart count.
-_TWIN_IDENTITY = tuple(
-    (darts, int.from_bytes(darts, "big"))
-    for darts in (bytes(range(count)) for count in range(257))
-)
+    def __post_init__(self) -> None:
+        """Validate persistent fields and common-family topology membership."""
+        twin = self.twin
+        if type(twin) is not bytes or type(self.graph_id) is not int:
+            raise TypeError("twin must be bytes and graph_id must be int")
+        if self.graph_id < 0:
+            raise ValueError(f"graph_id must be non-negative, got {self.graph_id}")
+
+        dart_count = len(twin)
+        if not 0 < dart_count <= 256 or dart_count % 4:
+            raise ValueError("twin must contain 4..256 darts in blocks of 4")
+        vertex_count = dart_count // 4
+        # translate composes twin with itself, 0xff marking out-of-range; a zero XOR byte is a self-twin.
+        identity = bytes(range(dart_count))
+        self_twins = (int.from_bytes(twin, "big") ^ int.from_bytes(identity, "big")).to_bytes(dart_count, "big")
+        if twin.translate(twin.ljust(256, b"\xff")) != identity or b"\x00" in self_twins:
+            raise ValueError("twin must be a fixed-point-free involution")
+
+        reached = {0}
+        pending = [0]
+        while pending:
+            vertex = pending.pop()
+            for opposite in twin[4 * vertex : 4 * vertex + 4]:
+                neighbor = opposite // 4
+                if neighbor not in reached:
+                    reached.add(neighbor)
+                    pending.append(neighbor)
+
+        # Dual right-face orbits are the vertices of the paired primal map.
+        face_by_dart = [-1] * dart_count
+        face_sizes: list[int] = []
+        for start_dart in range(dart_count):
+            if face_by_dart[start_dart] >= 0:
+                continue
+            face_index = len(face_sizes)
+            face_sizes.append(0)
+            dart = start_dart
+            while face_by_dart[dart] < 0:
+                face_by_dart[dart] = face_index
+                face_sizes[face_index] += 1
+                opposite = twin[dart]
+                dart = 4 * (opposite // 4) + (opposite % 4 - 1) % 4
+
+        primal_edges = [
+            tuple(sorted((face_by_dart[dart], face_by_dart[opposite])))
+            for dart, opposite in enumerate(twin)
+            if dart < opposite
+        ]
+        valid_primal = (
+            all(u != v for u, v in primal_edges)
+            and len(primal_edges) == len(set(primal_edges))
+            and all(
+                len({face_by_dart[twin[dart]] for dart in range(base, base + 4)}) == 4
+                for base in range(0, dart_count, 4)
+            )
+        )
+        if not (
+            vertex_count >= MIN_DUAL_VERTEX_COUNT
+            and len(reached) == vertex_count
+            and len(face_sizes) == vertex_count + 2
+            and min(face_sizes) >= 2
+            and valid_primal
+        ):
+            raise ValueError("twin does not encode a supported spherical dual of a simple quadrangulation")
+
+    @classmethod
+    def _from_filter(
+        cls,
+        twin: bytes,
+        graph_id: int,
+        face_size_profile: bytes,
+        _new=object.__new__,
+        _set=object.__setattr__,
+    ) -> QuarticPlaneMap:
+        """Construct from one trusted record emitted by the bundled C FILTER.
+
+        The nonincreasing face-size profile stays as GC-untracked ``bytes`` until
+        ``face_size_sequence`` is first read; this halves tracked allocations per record.
+        """
+        dual = _new(cls)
+        _set(dual, "twin", twin)
+        _set(dual, "graph_id", graph_id)
+        _set(dual, "_faces", None)
+        _set(dual, "_edge_multiplicity", None)
+        _set(dual, "_face_size_sequence", face_size_profile)
+        _set(dual, "_primal", None)
+        return dual
+
+    def __reduce__(self) -> tuple[type[QuarticPlaneMap], tuple[bytes, int]]:
+        """Serialize only the persistent twin and namespace-local Graph ID."""
+        return type(self), (self.twin, self.graph_id)
+
+    @property
+    def num_vertices(self) -> int:
+        """Return the number of candidate-dual vertices."""
+        return len(self.twin) // 4
+
+    @property
+    def embedding(self) -> tuple[tuple[int, ...], ...]:
+        """Return vertex-indexed exterior-view-CW candidate-dual rotations."""
+        twin = self.twin
+        return tuple(
+            tuple(opposite // 4 for opposite in twin[base : base + 4])
+            for base in range(0, len(twin), 4)
+        )
+
+    @property
+    def faces(self) -> tuple[tuple[int, ...], ...]:
+        """Return candidate-dual right-face vertex cycles."""
+        faces = self._faces
+        if faces is None:
+            visited = bytearray(len(self.twin))
+            face_cycles: list[tuple[int, ...]] = []
+            for start_dart in range(len(self.twin)):
+                if visited[start_dart]:
+                    continue
+                face_cycle: list[int] = []
+                dart = start_dart
+                while not visited[dart]:
+                    visited[dart] = 1
+                    face_cycle.append(self.vertex(dart))
+                    dart = self.right_face_next(dart)
+                face_cycles.append(tuple(face_cycle))
+            faces = tuple(face_cycles)
+            object.__setattr__(self, "_faces", faces)
+        return faces
+
+    @property
+    def num_faces(self) -> int:
+        """Return the number of candidate-dual face orbits."""
+        return len(self.faces)
+
+    @property
+    def edge_multiplicity(self) -> Mapping[tuple[int, int], int]:
+        """Return multiplicities of normalized candidate-dual support edges."""
+        multiplicities = self._edge_multiplicity
+        if multiplicities is None:
+            counts: dict[tuple[int, int], int] = {}
+            for dart, twin_dart in enumerate(self.twin):
+                # The lower dart counts each twin pair once and orders its endpoints.
+                if dart > twin_dart:
+                    continue
+                edge = (dart // 4, twin_dart // 4)
+                counts[edge] = counts.get(edge, 0) + 1
+            multiplicities = MappingProxyType(dict(sorted(counts.items())))
+            object.__setattr__(self, "_edge_multiplicity", multiplicities)
+        return multiplicities
+
+    @property
+    def support_edges(self) -> tuple[tuple[int, int], ...]:
+        """Return normalized candidate-dual support edges in lexicographic order."""
+        return tuple(self.edge_multiplicity)
+
+    @property
+    def double_edges(self) -> frozenset[tuple[int, int]]:
+        """Return dual support edges of multiplicity two."""
+        return frozenset(
+            edge for edge, multiplicity in self.edge_multiplicity.items()
+            if multiplicity == 2
+        )
+
+    @property
+    def face_size_sequence(self) -> tuple[int, ...]:
+        """Return candidate-dual face sizes in nonincreasing order."""
+        sequence = self._face_size_sequence
+        if type(sequence) is not tuple:
+            sequence = (
+                tuple(sorted(map(len, self.faces), reverse=True))
+                if sequence is None
+                else tuple(sequence)
+            )
+            object.__setattr__(self, "_face_size_sequence", sequence)
+        return sequence
+
+    @property
+    def vertex_to_primal_face(self) -> range:
+        """Return the identity map from candidate-dual vertices to primal faces."""
+        return range(self.num_vertices)
+
+    @property
+    def primal(self) -> SimpleQuadrangulation:
+        """Return the candidate-primal rotation view paired with this ``G*``."""
+        primal = self._primal
+        if primal is None:
+            primal = SimpleQuadrangulation(self)
+            object.__setattr__(self, "_primal", primal)
+        return primal
+
+    @staticmethod
+    def vertex(dart: int) -> int:
+        """Return the source vertex of a valid dart."""
+        return dart // 4
+
+    @staticmethod
+    def next_at_vertex(dart: int) -> int:
+        """Return the next valid dart in its exterior-view-CW vertex rotation."""
+        return 4 * (dart // 4) + (dart + 1) % 4
+
+    @staticmethod
+    def prev_at_vertex(dart: int) -> int:
+        """Return the previous valid dart in its exterior-view-CW vertex rotation."""
+        return 4 * (dart // 4) + (dart - 1) % 4
+
+    def right_face_next(self, dart: int) -> int:
+        """Return the next valid dart along the face on a dart's right."""
+        return self.prev_at_vertex(self.twin[dart])
+
+    def neighbor(self, dart: int) -> int:
+        """Return the target vertex of a valid dart."""
+        return self.vertex(self.twin[dart])
 
 
 class PrimalMinimumDegree(Enum):
@@ -57,7 +264,7 @@ class PrimalMinimumDegree(Enum):
 
     @property
     def _minimum_nonempty_dual_vertex_count(self) -> int:
-        return MIN_SUPPORTED_DUAL_VERTEX_COUNT if self is self.AT_LEAST_2 else 6
+        return MIN_DUAL_VERTEX_COUNT if self is self.AT_LEAST_2 else 6
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -65,8 +272,8 @@ class SimpleQuadrangulation:
     """Candidate primal quadrangulation ``G`` paired with ``G*``."""
 
     _dual: QuarticPlaneMap = field(repr=False)
-    _embedding: Embedding = field(repr=False)
-    _faces: tuple[FaceCycle, ...] = field(repr=False)
+    _embedding: tuple[tuple[int, ...], ...] = field(repr=False)
+    _faces: tuple[tuple[int, ...], ...] = field(repr=False)
 
     def __init__(self, dual: QuarticPlaneMap) -> None:
         """Derive the candidate-primal rotation system paired with ``dual``."""
@@ -110,12 +317,12 @@ class SimpleQuadrangulation:
         return len(self._embedding)
 
     @property
-    def embedding(self) -> Embedding:
+    def embedding(self) -> tuple[tuple[int, ...], ...]:
         """Return vertex-indexed exterior-view-CW candidate-primal rotations."""
         return self._embedding
 
     @property
-    def faces(self) -> tuple[FaceCycle, ...]:
+    def faces(self) -> tuple[tuple[int, ...], ...]:
         """Return candidate-primal faces indexed by candidate-dual vertices."""
         return self._faces
 
@@ -123,219 +330,6 @@ class SimpleQuadrangulation:
     def vertex_to_dual_face(self) -> range:
         """Return the identity map from candidate-primal vertices to dual faces."""
         return range(self.num_vertices)
-
-
-@dataclass(frozen=True, slots=True)
-class QuarticPlaneMap:
-    """Candidate dual plane graph ``G*`` paired with its primal quadrangulation ``G``."""
-
-    twin: bytes
-    graph_id: int = field(default=0, compare=False)
-    _faces: tuple[FaceCycle, ...] | None = field(default=None, init=False, repr=False, compare=False)
-    _edge_multiplicity: Mapping[SupportEdge, int] | None = field(default=None, init=False, repr=False, compare=False)
-    _face_size_sequence: tuple[int, ...] | None = field(default=None, init=False, repr=False, compare=False)
-    _primal: SimpleQuadrangulation | None = field(default=None, init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        """Validate persistent fields and common-family topology membership."""
-        twin = self.twin
-        if type(twin) is not bytes or type(self.graph_id) is not int:
-            raise TypeError("twin must be bytes and graph_id must be int")
-        if self.graph_id < 0:
-            raise ValueError(f"graph_id must be non-negative, got {self.graph_id}")
-
-        dart_count = len(twin)
-        if not 0 < dart_count <= 256 or dart_count % 4:
-            raise ValueError("twin must contain 4..256 darts in blocks of 4")
-        vertex_count = dart_count // 4
-        # translate composes twin with itself, 0xff marking out-of-range; a zero XOR byte is a self-twin.
-        identity, identity_int = _TWIN_IDENTITY[dart_count]
-        self_twins = (int.from_bytes(twin, "big") ^ identity_int).to_bytes(dart_count, "big")
-        if twin.translate(twin.ljust(256, b"\xff")) != identity or b"\x00" in self_twins:
-            raise ValueError("twin must be a fixed-point-free involution")
-
-        reached = {0}
-        pending = [0]
-        while pending:
-            vertex = pending.pop()
-            for opposite in twin[4 * vertex : 4 * vertex + 4]:
-                neighbor = opposite // 4
-                if neighbor not in reached:
-                    reached.add(neighbor)
-                    pending.append(neighbor)
-
-        # Dual right-face orbits are the vertices of the paired primal map.
-        face_by_dart = [-1] * dart_count
-        face_sizes: list[int] = []
-        for start_dart in range(dart_count):
-            if face_by_dart[start_dart] >= 0:
-                continue
-            face_index = len(face_sizes)
-            face_sizes.append(0)
-            dart = start_dart
-            while face_by_dart[dart] < 0:
-                face_by_dart[dart] = face_index
-                face_sizes[face_index] += 1
-                opposite = twin[dart]
-                dart = 4 * (opposite // 4) + (opposite % 4 - 1) % 4
-
-        primal_edges = [
-            tuple(sorted((face_by_dart[dart], face_by_dart[opposite])))
-            for dart, opposite in enumerate(twin)
-            if dart < opposite
-        ]
-        valid_primal = (
-            all(u != v for u, v in primal_edges)
-            and len(primal_edges) == len(set(primal_edges))
-            and all(
-                len({face_by_dart[twin[dart]] for dart in range(base, base + 4)}) == 4
-                for base in range(0, dart_count, 4)
-            )
-        )
-        if not (
-            vertex_count >= MIN_SUPPORTED_DUAL_VERTEX_COUNT
-            and len(reached) == vertex_count
-            and len(face_sizes) == vertex_count + 2
-            and min(face_sizes) >= 2
-            and valid_primal
-        ):
-            raise ValueError("twin does not encode a supported spherical dual of a simple quadrangulation")
-
-    @classmethod
-    def _from_filter(
-        cls,
-        twin: bytes,
-        graph_id: int,
-        face_size_sequence: tuple[int, ...],
-    ) -> QuarticPlaneMap:
-        """Construct from one trusted record emitted by the bundled C FILTER."""
-        dual = object.__new__(cls)
-        object.__setattr__(dual, "twin", twin)
-        object.__setattr__(dual, "graph_id", graph_id)
-        object.__setattr__(dual, "_faces", None)
-        object.__setattr__(dual, "_edge_multiplicity", None)
-        object.__setattr__(dual, "_face_size_sequence", face_size_sequence)
-        object.__setattr__(dual, "_primal", None)
-        return dual
-
-    def __reduce__(self) -> tuple[type[QuarticPlaneMap], tuple[bytes, int]]:
-        """Serialize only the persistent twin and namespace-local Graph ID."""
-        return type(self), (self.twin, self.graph_id)
-
-    @property
-    def num_vertices(self) -> int:
-        """Return the number of candidate-dual vertices."""
-        return len(self.twin) // 4
-
-    @property
-    def embedding(self) -> Embedding:
-        """Return vertex-indexed exterior-view-CW candidate-dual rotations."""
-        twin = self.twin
-        return tuple(
-            tuple(opposite // 4 for opposite in twin[base : base + 4])
-            for base in range(0, len(twin), 4)
-        )
-
-    @property
-    def faces(self) -> tuple[FaceCycle, ...]:
-        """Return candidate-dual right-face vertex cycles."""
-        faces = self._faces
-        if faces is None:
-            visited = bytearray(len(self.twin))
-            face_cycles: list[FaceCycle] = []
-            for start_dart in range(len(self.twin)):
-                if visited[start_dart]:
-                    continue
-                face_cycle: list[int] = []
-                dart = start_dart
-                while not visited[dart]:
-                    visited[dart] = 1
-                    face_cycle.append(self.vertex(dart))
-                    dart = self.right_face_next(dart)
-                face_cycles.append(tuple(face_cycle))
-            faces = tuple(face_cycles)
-            object.__setattr__(self, "_faces", faces)
-        return faces
-
-    @property
-    def num_faces(self) -> int:
-        """Return the number of candidate-dual face orbits."""
-        return len(self.faces)
-
-    @property
-    def edge_multiplicity(self) -> Mapping[SupportEdge, int]:
-        """Return multiplicities of normalized candidate-dual support edges."""
-        multiplicities = self._edge_multiplicity
-        if multiplicities is None:
-            counts: dict[SupportEdge, int] = {}
-            for dart, twin_dart in enumerate(self.twin):
-                # The lower dart counts each twin pair once and orders its endpoints.
-                if dart > twin_dart:
-                    continue
-                edge = (dart // 4, twin_dart // 4)
-                counts[edge] = counts.get(edge, 0) + 1
-            multiplicities = MappingProxyType(dict(sorted(counts.items())))
-            object.__setattr__(self, "_edge_multiplicity", multiplicities)
-        return multiplicities
-
-    @property
-    def support_edges(self) -> tuple[SupportEdge, ...]:
-        """Return normalized candidate-dual support edges in lexicographic order."""
-        return tuple(self.edge_multiplicity)
-
-    @property
-    def double_edges(self) -> frozenset[SupportEdge]:
-        """Return dual support edges of multiplicity two."""
-        return frozenset(
-            edge for edge, multiplicity in self.edge_multiplicity.items()
-            if multiplicity == 2
-        )
-
-    @property
-    def face_size_sequence(self) -> tuple[int, ...]:
-        """Return candidate-dual face sizes in nonincreasing order."""
-        sequence = self._face_size_sequence
-        if sequence is None:
-            sequence = tuple(sorted(map(len, self.faces), reverse=True))
-            object.__setattr__(self, "_face_size_sequence", sequence)
-        return sequence
-
-    @property
-    def vertex_to_primal_face(self) -> range:
-        """Return the identity map from candidate-dual vertices to primal faces."""
-        return range(self.num_vertices)
-
-    @property
-    def primal(self) -> SimpleQuadrangulation:
-        """Return the candidate-primal rotation view paired with this ``G*``."""
-        primal = self._primal
-        if primal is None:
-            primal = SimpleQuadrangulation(self)
-            object.__setattr__(self, "_primal", primal)
-        return primal
-
-    @staticmethod
-    def vertex(dart: int) -> int:
-        """Return the source vertex of a valid dart."""
-        return dart // 4
-
-    @staticmethod
-    def next_at_vertex(dart: int) -> int:
-        """Return the next valid dart in its exterior-view-CW vertex rotation."""
-        return 4 * (dart // 4) + (dart + 1) % 4
-
-    @staticmethod
-    def prev_at_vertex(dart: int) -> int:
-        """Return the previous valid dart in its exterior-view-CW vertex rotation."""
-        return 4 * (dart // 4) + (dart - 1) % 4
-
-    def right_face_next(self, dart: int) -> int:
-        """Return the next valid dart along the face on a dart's right."""
-        return self.prev_at_vertex(self.twin[dart])
-
-    def neighbor(self, dart: int) -> int:
-        """Return the target vertex of a valid dart."""
-        return self.vertex(self.twin[dart])
 
 
 class PlantriError(Exception):
@@ -379,7 +373,7 @@ class _PipeReader:
 
     def join(self) -> None:
         """Wait for bounded reader cleanup."""
-        self._thread.join(_CLEANUP_TIMEOUT_S)
+        self._thread.join(5.0)
         if self._thread.is_alive():
             raise PlantriError("plantri_sqs: stdout reader did not stop")
 
@@ -463,8 +457,8 @@ def _validate_enumeration_request(
     if type(dual_vertex_count) is not int:
         raise ValueError(f"dual_vertex_count must be int; got {dual_vertex_count!r}")
 
-    minimum = MIN_SUPPORTED_DUAL_VERTEX_COUNT
-    maximum = BUNDLED_MAX_DUAL_VERTEX_COUNT
+    minimum = MIN_DUAL_VERTEX_COUNT
+    maximum = MAX_DUAL_VERTEX_COUNT
     if not minimum <= dual_vertex_count <= maximum:
         raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count}; expected [{minimum},{maximum}]")
     if type(max_count) is not int or max_count < 0:
@@ -536,11 +530,11 @@ def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
             raise
         return observed_return_code
     try:
-        process.wait(timeout=_CLEANUP_TIMEOUT_S)
+        process.wait(timeout=5.0)
     except subprocess.TimeoutExpired:
         process.kill()
         try:
-            process.wait(timeout=_CLEANUP_TIMEOUT_S)
+            process.wait(timeout=5.0)
         except subprocess.TimeoutExpired as error:
             raise PlantriError("plantri_sqs: process did not exit after kill") from error
     return None
@@ -572,7 +566,7 @@ def _finalize_filter_run(
 def _iter_filter_records(
     chunks: Iterator[bytes],
     dual_vertex_count: int,
-) -> Iterator[tuple[bytes, tuple[int, ...]]]:
+) -> Iterator[tuple[bytes, bytes]]:
     twin_size = 4 * dual_vertex_count
     record_size = twin_size + dual_vertex_count + 2
     carry = b""
@@ -583,10 +577,7 @@ def _iter_filter_records(
         complete_size = complete_count * record_size
         for start in range(0, complete_size, record_size):
             split = start + twin_size
-            yield (
-                data[start:split],
-                tuple(data[split : start + record_size]),
-            )
+            yield data[start:split], data[split : start + record_size]
         record_count += complete_count
         carry = data[complete_size:]
     if carry:
@@ -661,8 +652,8 @@ def enumerate_simple_quadrangulation_duals(
     if max_count and dual_vertex_count >= primal_minimum_degree._minimum_nonempty_dual_vertex_count:
         with _filter_session(dual_vertex_count, primal_minimum_degree, timeout) as reader:
             records = _iter_filter_records(reader.chunks(), dual_vertex_count)
-            for graph_id, (twin, face_size_sequence) in enumerate(islice(records, max_count)):
-                dual = QuarticPlaneMap._from_filter(twin, graph_id, face_size_sequence)
+            for graph_id, (twin, profile) in enumerate(islice(records, max_count)):
+                dual = QuarticPlaneMap._from_filter(twin, graph_id, profile)
 
                 if graph_id == 0:
                     time_to_first_record_s = time.perf_counter() - enumeration_started_at

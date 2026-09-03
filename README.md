@@ -23,7 +23,7 @@ twin[4n] + descending primal degree profile[n+2]
 ```
 
 The record order is the namespace-local `graph_id`. Python never decodes `planar_code`, reconstructs primal face orbits, or uses a worker pool.
-The FILTER audits plantri's generated primal and its emitted dual record before using a private trusted construction path.
+The FILTER enforces its output contract on every record (a connected map fully covered by disjoint 4-faces with `ne = 4nv - 8`, in-range darts, and a complete degree profile) before Python's private trusted construction path; plantri's own rotation-system and simplicity invariants are re-verified only in a `-DSQS_VERIFY` build.
 Public raw construction and cache restoration independently validate the common topology family from `twin`; hashes verify stored bytes and order, not generator provenance or enumeration completeness.
 
 ### Related Papers

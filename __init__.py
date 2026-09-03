@@ -2,8 +2,8 @@
 from importlib import metadata as _metadata
 
 from .plantri import (
-    BUNDLED_MAX_DUAL_VERTEX_COUNT,
-    MIN_SUPPORTED_DUAL_VERTEX_COUNT,
+    MAX_DUAL_VERTEX_COUNT,
+    MIN_DUAL_VERTEX_COUNT,
     PlantriEnumerationResult,
     PlantriError,
     PrimalMinimumDegree,
@@ -21,8 +21,8 @@ __all__ = [
     # FILTER-backed SQS enumeration
     "PrimalMinimumDegree",
     "PlantriError",
-    "BUNDLED_MAX_DUAL_VERTEX_COUNT",
-    "MIN_SUPPORTED_DUAL_VERTEX_COUNT",
+    "MAX_DUAL_VERTEX_COUNT",
+    "MIN_DUAL_VERTEX_COUNT",
     # Candidate primal/dual plane-graph model
     "SimpleQuadrangulation",
     "QuarticPlaneMap",
