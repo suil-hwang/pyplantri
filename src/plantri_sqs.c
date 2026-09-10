@@ -1,11 +1,19 @@
-#ifndef PYPLANTRI_SQS_PLUGIN_PASS
-#define PYPLANTRI_SQS_PLUGIN_PASS
+#ifndef PLUGIN
 /* plantri includes PLUGIN after declaring its private graph state. */
 #define PLUGIN "plantri_sqs.c"
 #include "plantri.c"
 #else
 
 #include <stdlib.h>
+#if CHAR_BIT != 8 || UCHAR_MAX != 255
+#error "plantri_sqs requires 8-bit bytes"
+#endif
+
+/* plantri 5.5 also uses these strings as its command-line allowlist. */
+#undef SWITCHES
+#define SWITCHES "[-q -c# -m#]"
+#undef SECRET_SWITCHES
+#define SECRET_SWITCHES ""
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -16,8 +24,16 @@
 
 #define FILTER sqs_filter
 #define PLUGIN_INIT sqs_plugin_init()
-#define SUMMARY() (dosummary = 0)
-#define SQS_REQUIRE(condition) do { if (!(condition)) exit(1); } while (0)
+#define SUMMARY() do { \
+    SQS_REQUIRE(fflush(stdout) == 0); \
+    dosummary = 0; \
+} while (0)
+#define SQS_REQUIRE(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "plantri_sqs: requirement failed: %s\n", #condition); \
+        exit(EXIT_FAILURE); \
+    } \
+} while (0)
 #ifdef SQS_VERIFY
 #define SQS_CHECK(condition) SQS_REQUIRE(condition)
 #else
@@ -42,26 +58,20 @@ sqs_is_fixed_point_free_involution(const unsigned char *twin, int count)
     int i;
 
     for (i = 0; i < count; ++i)
-        if (twin[i] == i || twin[twin[i]] != i) return 0;
+        if (twin[i] >= count || twin[i] == i || twin[twin[i]] != i) return 0;
     return 1;
 }
 
 static void
 sqs_plugin_init(void)
 {
-    /* Accept only -q -c2, with optional -m2. */
-    SQS_REQUIRE(qswitch && !hswitch && !Qswitch && !oswitch && !dswitch &&
-                !Gswitch && !Vswitch && !aswitch && !gswitch && !sswitch &&
-                !Eswitch && !Tswitch && !uswitch && !vswitch && !xswitch &&
-                !pswitch && !bswitch && !Aswitch && !tswitch && !zeroswitch &&
-                !oneswitch && !Xswitch && maxfacesize == -1 &&
-                polygonsize == -1 && edgebound[0] == -1 &&
-                edgebound[1] == -1 && minconnec == 2 &&
+    /* The decoder admits only q/c/m; validate their values and positional inputs. */
+    SQS_REQUIRE(qswitch && minconnec == 2 &&
                 (minimumdeg == -1 || minimumdeg == 2));
     SQS_REQUIRE(mod == 1 && res == 0 && outfilename == NULL);
 
     /* ne = 4*nv-8 <= 256 keeps every dual dart in one byte. */
-    SQS_REQUIRE(UCHAR_MAX == 255 && maxnv >= 5 && maxnv < MAXN &&
+    SQS_REQUIRE(maxnv >= 5 && maxnv < MAXN &&
                 maxnv <= (UCHAR_MAX + 1) / 4 + 2);
     SQS_REQUIRE(SQS_SET_BINARY_STDOUT());
     uswitch = TRUE;  /* Suppress the stock writer; FILTER owns stdout. */
@@ -70,19 +80,20 @@ sqs_plugin_init(void)
 static int
 sqs_filter(int nbtot, int nbop, int doflip)
 {
-    unsigned char record[5 * MAXN - 8], *twin = record, *degree_profile = record + ne;
+    unsigned char record[5 * MAXN - 8], *twin = record, *degree_profile;
     unsigned char number[MAXN], degree_count[MAXN];
     EDGE *startedge[MAXN], *run, *ef;
     int actual_number, last_number, star_degree, dual_dart, i, j, k;
 
     (void)nbtot; (void)nbop; (void)doflip;
-    SQS_REQUIRE(nv == maxnv && ne == 4 * nv - 8);
+    SQS_REQUIRE(nv >= 5 && nv < MAXN && nv == maxnv && ne == 4 * nv - 8);
+    degree_profile = record + ne;
 
     memset(number, 0, (size_t)nv);
     memset(degree_count, 0, (size_t)nv);
     for (i = 0; i < nv; ++i)
     {
-        SQS_CHECK(degree[i] >= minimumdeg && degree[i] < nv);
+        SQS_REQUIRE(degree[i] >= minimumdeg && degree[i] < nv);
         ++degree_count[degree[i]];
     }
 
@@ -118,11 +129,13 @@ sqs_filter(int nbtot, int nbop, int doflip)
                 {
                     SQS_CHECK(!ISMARKED(ef));
                     MARK(ef);
-                    ef->index = dual_dart;
+                    ef->rf = dual_dart;  /* Output-only scratch space. */
                     if (ISMARKED(ef->invers))
                     {
-                        twin[dual_dart] = (unsigned char)ef->invers->index;
-                        twin[ef->invers->index] = (unsigned char)dual_dart;
+                        int opposite = ef->invers->rf;
+                        SQS_REQUIRE(opposite >= 0 && opposite < dual_dart);
+                        twin[dual_dart] = (unsigned char)opposite;
+                        twin[opposite] = (unsigned char)dual_dart;
                     }
                     ++dual_dart;
                 }
@@ -150,11 +163,11 @@ sqs_filter(int nbtot, int nbop, int doflip)
             degree_profile[k++] = (unsigned char)i;
     SQS_REQUIRE(k == nv);
 
-    SQS_REQUIRE(fwrite(record, 1, (size_t)(ne + nv), outfile) == (size_t)(ne + nv));
+    SQS_REQUIRE(fwrite(record, 1, (size_t)(ne + nv), stdout) == (size_t)(ne + nv));
     return 1;
 }
 
 #undef SQS_CHECK
-#undef SQS_REQUIRE
+/* Keep SQS_REQUIRE defined for SUMMARY's later expansion in plantri's main. */
 #undef SQS_SET_BINARY_STDOUT
 #endif

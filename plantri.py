@@ -13,7 +13,6 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from importlib.resources import as_file, files
-from itertools import islice
 from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO, cast
@@ -329,7 +328,7 @@ class SimpleQuadrangulation:
     @property
     def degrees(self) -> tuple[int, ...]:
         """Return vertex-indexed candidate-primal degrees."""
-        return tuple(map(self._dual.right_faces.count, range(self.num_vertices)))
+        return tuple(map(len, self._dual.faces))
 
     @property
     def degree_sequence(self) -> tuple[int, ...]:
@@ -339,7 +338,7 @@ class SimpleQuadrangulation:
     @property
     def min_degree(self) -> int:
         """Return the minimum candidate-primal degree; 3 or more means ``G*`` is digon-free."""
-        return min(self.degrees)
+        return self.degree_sequence[-1]
 
     def vertex(self, dart: int) -> int:
         """Return the source vertex of a valid dart."""
@@ -372,8 +371,8 @@ class PlantriError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class PlantriEnumerationResult:
-    """Immutable map batch with zero time-to-first-record for an empty stream."""
+class PlantriEnumeration:
+    """Completed immutable map batch; reader resources exist only during its run."""
 
     graphs: tuple[DualPlaneGraph, ...]
     time_to_first_record_s: float
@@ -384,322 +383,289 @@ class PlantriEnumerationResult:
         """Return total enumeration time."""
         return self.time_to_first_record_s + self.remaining_s
 
+    @classmethod
+    def enumerate(
+        cls,
+        dual_vertex_count: int,
+        *,
+        max_count: int,
+        primal_minimum_degree: PrimalMinimumDegree = PrimalMinimumDegree.AT_LEAST_2,
+        timeout: float | None = None,
+    ) -> PlantriEnumeration:
+        """Collect a source-order prefix and return its completed immutable result."""
+        cls._validate_enumeration_request(dual_vertex_count, primal_minimum_degree, max_count, timeout)
+        started_at = time.perf_counter()
+        time_to_first_record_s = 0.0
+        graphs: list[DualPlaneGraph] = []
 
-class _PipeReader:
-    """Read plantri stdout in a background thread under one shared deadline."""
+        if max_count and dual_vertex_count >= primal_minimum_degree._minimum_nonempty_dual_vertex_count:
+            with cls._session(dual_vertex_count, primal_minimum_degree, timeout) as records:
+                for graph_id, (twin, profile) in enumerate(records):
+                    graph = DualPlaneGraph._from_filter(twin, graph_id, profile)
+                    if graph_id == 0:
+                        time_to_first_record_s = time.perf_counter() - started_at
+                    graphs.append(graph)
+                    if len(graphs) == max_count:
+                        break
 
-    def __init__(self, stream: BinaryIO, timeout: float | None) -> None:
-        """Initialize the reader and its shared deadline."""
-        self._stream = stream
-        self._timeout = timeout
-        self._deadline = None if timeout is None else time.monotonic() + timeout
-        self._queue: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=2)
-        self._cancelled = threading.Event()
-        self._eof_received = False
-        self._thread = threading.Thread(target=self._read, name="pyplantri-stdout", daemon=True)
+        completed_graphs = tuple(graphs)
+        total_elapsed_s = time.perf_counter() - started_at
+        return cls(completed_graphs, time_to_first_record_s, total_elapsed_s - time_to_first_record_s)
 
-    def start(self) -> None:
-        """Start the stdout reader thread."""
-        self._thread.start()
-
-    def cancel(self) -> None:
-        """Request producer cancellation."""
-        self._cancelled.set()
-
-    def join(self) -> None:
-        """Wait for bounded reader cleanup."""
-        self._thread.join(5.0)
-        if self._thread.is_alive():
-            raise PlantriError("plantri_sqs: stdout reader did not stop")
-
-    def remaining_timeout(self) -> float | None:
-        """Return the remaining shared wait or raise the timeout error."""
-        if self._deadline is None:
+    @staticmethod
+    def _remaining_timeout(deadline: float | None, timeout: float | None) -> float | None:
+        if deadline is None:
             return None
-        remaining = self._deadline - time.monotonic()
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise self.timeout_error()
+            raise PlantriError(f"plantri_sqs: timed out after {timeout}s")
         return remaining
 
-    def timeout_error(self) -> PlantriError:
-        """Build the shared timeout error."""
-        return PlantriError(f"plantri_sqs: timed out after {self._timeout}s")
-
-    def chunks(self) -> Iterator[bytes]:
-        """Yield stdout chunks until EOF or failure."""
-        while True:
-            try:
-                item = self._queue.get(timeout=self.remaining_timeout())
-            except queue.Empty:
-                raise self.timeout_error() from None
-            if item is None:
-                self._eof_received = True
-                return
-            if isinstance(item, BaseException):
-                detail = _error_detail(str(item))
-                raise PlantriError(f"plantri_sqs: failed to read binary stdout: {detail}") from item
-            yield item
-
-    @property
-    def eof_received(self) -> bool:
-        """Return whether the consumer received the stdout EOF marker."""
-        return self._eof_received
-
-    def _publish(self, item: bytes | BaseException | None) -> None:
+    @staticmethod
+    def _publish(
+        pending: queue.Queue[bytes | BaseException | None],
+        cancelled: threading.Event,
+        item: bytes | BaseException | None,
+    ) -> None:
         """Publish one item unless cancellation is requested."""
-        while not self._cancelled.is_set():
+        while not cancelled.is_set():
             try:
-                self._queue.put(item, timeout=0.05)
+                pending.put(item, timeout=0.05)
                 return
             except queue.Full:
                 pass
 
-    def _read(self) -> None:
+    @classmethod
+    def _read_stdout(
+        cls,
+        stream: BinaryIO,
+        pending: queue.Queue[bytes | BaseException | None],
+        cancelled: threading.Event,
+    ) -> None:
         """Publish stdout chunks followed by one terminal item."""
         try:
-            read = getattr(self._stream, "read1", self._stream.read)
-            while not self._cancelled.is_set() and (chunk := read(64 * 1024)):
-                self._publish(chunk)
+            read = getattr(stream, "read1", stream.read)
+            while not cancelled.is_set() and (chunk := read(64 * 1024)):
+                cls._publish(pending, cancelled, chunk)
         except BaseException as error:
-            self._publish(error)
+            cls._publish(pending, cancelled, error)
         else:
-            self._publish(None)
+            cls._publish(pending, cancelled, None)
 
+    @classmethod
+    def _chunks(
+        cls,
+        pending: queue.Queue[bytes | BaseException | None],
+        eof_received: threading.Event,
+        deadline: float | None,
+        timeout: float | None,
+    ) -> Iterator[bytes]:
+        """Consume queued chunks under the same deadline as process completion."""
+        while True:
+            try:
+                chunk = pending.get(timeout=cls._remaining_timeout(deadline, timeout))
+            except queue.Empty:
+                raise PlantriError(f"plantri_sqs: timed out after {timeout}s") from None
+            if chunk is None:
+                eof_received.set()
+                return
+            if isinstance(chunk, BaseException):
+                detail = cls._error_detail(str(chunk))
+                raise PlantriError(f"plantri_sqs: failed to read binary stdout: {detail}") from chunk
+            yield chunk
 
-def _error_detail(text: str | bytes, *, limit: int = 4000) -> str:
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", errors="replace")
-    normalized = " ".join(text.split())
-    return normalized if len(normalized) <= limit else normalized[: limit - 3] + "..."
+    @staticmethod
+    def _records(chunks: Iterator[bytes], dual_vertex_count: int) -> Iterator[tuple[bytes, bytes]]:
+        """Split arbitrary stdout chunks into complete fixed-size FILTER records."""
+        twin_size = 4 * dual_vertex_count
+        record_size = twin_size + dual_vertex_count + 2
+        carry = b""
+        record_count = 0
+        for chunk in chunks:
+            data = carry + chunk
+            complete_size = len(data) // record_size * record_size
+            for start in range(0, complete_size, record_size):
+                split = start + twin_size
+                yield data[start:split], data[split : start + record_size]
+                record_count += 1
+            carry = data[complete_size:]
+        if carry:
+            raise PlantriError(f"plantri_sqs: truncated fixed record {record_count} ({len(carry)}/{record_size} bytes)")
 
+    @staticmethod
+    def _join_reader(reader: threading.Thread) -> None:
+        reader.join(5.0)
+        if reader.is_alive():
+            raise PlantriError("plantri_sqs: stdout reader did not stop")
 
-def _add_cleanup_note(
-    error: BaseException,
-    cleanup_error: BaseException,
-    *,
-    resource: str = "process",
-) -> None:
-    detail = _error_detail(str(cleanup_error), limit=240)
-    error.add_note(f"pyplantri: {resource} cleanup failed: {detail}")
+    @classmethod
+    def _finish(
+        cls,
+        process: subprocess.Popen[bytes],
+        reader: threading.Thread | None,
+        eof_received: bool,
+        deadline: float | None,
+        timeout: float | None,
+    ) -> bool:
+        """Finish the child, join a started reader, then close stdout in every case."""
+        with ExitStack() as cleanup:
+            cleanup.callback(cast(BinaryIO, process.stdout).close)
+            if reader is not None:
+                cleanup.callback(cls._join_reader, reader)
+            if not eof_received:
+                return cls._stop_process(process) not in (None, 0)
+            try:
+                return process.wait(timeout=cls._remaining_timeout(deadline, timeout)) != 0
+            except (PlantriError, subprocess.TimeoutExpired):
+                cls._stop_process(process)
+                raise PlantriError(f"plantri_sqs: timed out after {timeout}s") from None
 
+    @classmethod
+    @contextmanager
+    def _session(
+        cls,
+        dual_vertex_count: int,
+        primal_minimum_degree: PrimalMinimumDegree,
+        timeout: float | None,
+    ) -> Generator[Iterator[tuple[bytes, bytes]], None, None]:
+        """Own one reader/process lifetime, preserving failures in the consuming code."""
+        cancelled, eof_received = threading.Event(), threading.Event()
+        with cls._resolved_executable() as executable, tempfile.TemporaryFile() as stderr_file:
+            stderr = cast(BinaryIO, stderr_file)
+            process = cls._start_process(executable, dual_vertex_count, primal_minimum_degree, stderr)
+            reader = None
+            deadline = None
+            body_error = None
+            try:
+                deadline = None if timeout is None else time.monotonic() + timeout
+                pending: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=2)
+                worker = threading.Thread(
+                    target=cls._read_stdout,
+                    args=(cast(BinaryIO, process.stdout), pending, cancelled),
+                    name="pyplantri-stdout",
+                    daemon=True,
+                )
+                worker.start()
+                reader = worker
+                yield cls._records(cls._chunks(pending, eof_received, deadline, timeout), dual_vertex_count)
+            except BaseException as error:
+                body_error = error
+                raise
+            finally:
+                cancelled.set()
+                try:
+                    natural_nonzero_exit = cls._finish(process, reader, eof_received.is_set(), deadline, timeout)
+                    execution_error = (
+                        cls._build_execution_error(process, stderr)
+                        if reader is not None and natural_nonzero_exit
+                        else None
+                    )
+                except BaseException as cleanup_error:
+                    if body_error is None:
+                        raise
+                    detail = cls._error_detail(str(cleanup_error), limit=240)
+                    body_error.add_note(f"pyplantri: process cleanup failed: {detail}")
+                else:
+                    if execution_error is not None:
+                        raise execution_error from body_error
 
-def _validate_enumeration_request(
-    dual_vertex_count: int,
-    primal_minimum_degree: PrimalMinimumDegree,
-    max_count: int,
-    timeout: float | None,
-) -> None:
-    if type(dual_vertex_count) is not int:
-        raise ValueError(f"dual_vertex_count must be int; got {dual_vertex_count!r}")
+    @staticmethod
+    def _error_detail(text: str | bytes, *, limit: int = 4000) -> str:
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="replace")
+        normalized = " ".join(text.split())
+        return normalized if len(normalized) <= limit else normalized[: limit - 3] + "..."
 
-    minimum = MIN_DUAL_VERTEX_COUNT
-    maximum = MAX_DUAL_VERTEX_COUNT
-    if not minimum <= dual_vertex_count <= maximum:
-        raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count}; expected [{minimum},{maximum}]")
-    if type(max_count) is not int or max_count < 0:
-        raise ValueError(f"max_count: expected int >= 0, got {max_count!r}")
-    if timeout is not None and (
-        type(timeout) not in (int, float)
-        or not 0 < timeout <= threading.TIMEOUT_MAX
-    ):
-        raise ValueError(f"plantri_sqs: timeout must be None or 0 < timeout <= {threading.TIMEOUT_MAX}")
-    if not isinstance(primal_minimum_degree, PrimalMinimumDegree):
-        raise TypeError(f"primal_minimum_degree: expected PrimalMinimumDegree, got {primal_minimum_degree!r}")
+    @staticmethod
+    def _validate_enumeration_request(
+        dual_vertex_count: int,
+        primal_minimum_degree: PrimalMinimumDegree,
+        max_count: int,
+        timeout: float | None,
+    ) -> None:
+        if type(dual_vertex_count) is not int:
+            raise ValueError(f"dual_vertex_count must be int; got {dual_vertex_count!r}")
 
+        minimum = MIN_DUAL_VERTEX_COUNT
+        maximum = MAX_DUAL_VERTEX_COUNT
+        if not minimum <= dual_vertex_count <= maximum:
+            raise ValueError(f"dual_vertex_count unsupported: {dual_vertex_count}; expected [{minimum},{maximum}]")
+        if type(max_count) is not int or max_count < 0:
+            raise ValueError(f"max_count: expected int >= 0, got {max_count!r}")
+        if timeout is not None and (
+            type(timeout) not in (int, float)
+            or not 0 < timeout <= threading.TIMEOUT_MAX
+        ):
+            raise ValueError(f"plantri_sqs: timeout must be None or 0 < timeout <= {threading.TIMEOUT_MAX}")
+        if not isinstance(primal_minimum_degree, PrimalMinimumDegree):
+            raise TypeError(f"primal_minimum_degree: expected PrimalMinimumDegree, got {primal_minimum_degree!r}")
 
-@contextmanager
-def _resolved_executable() -> Generator[Path, None, None]:
-    exe_name = "plantri_sqs.exe" if os.name == "nt" else "plantri_sqs"
-    resource = files("pyplantri").joinpath("bin", exe_name)
-    with ExitStack() as stack:
+    @staticmethod
+    @contextmanager
+    def _resolved_executable() -> Generator[Path, None, None]:
+        exe_name = "plantri_sqs.exe" if os.name == "nt" else "plantri_sqs"
+        resource = files("pyplantri").joinpath("bin", exe_name)
+        with ExitStack() as stack:
+            try:
+                candidate = stack.enter_context(as_file(resource))
+            except FileNotFoundError as error:
+                raise PlantriError(f"plantri_sqs: bundled executable {exe_name} was not found") from error
+            executable = candidate.resolve()
+            if not executable.is_file():
+                raise PlantriError(f"plantri_sqs: executable not found {executable}")
+            if os.name == "posix" and not os.access(executable, os.X_OK):
+                executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+            yield executable
+
+    @classmethod
+    def _start_process(
+        cls,
+        executable: Path,
+        dual_vertex_count: int,
+        primal_minimum_degree: PrimalMinimumDegree,
+        stderr_file: BinaryIO,
+    ) -> subprocess.Popen[bytes]:
+        command = [
+            str(executable),
+            *primal_minimum_degree._plantri_switches,
+            str(dual_vertex_count + 2),
+        ]
         try:
-            candidate = stack.enter_context(as_file(resource))
-        except FileNotFoundError as error:
-            raise PlantriError(f"plantri_sqs: bundled executable {exe_name} was not found") from error
-        executable = candidate.resolve()
-        if not executable.is_file():
-            raise PlantriError(f"plantri_sqs: executable not found {executable}")
-        if os.name == "posix" and not os.access(executable, os.X_OK):
-            executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-        yield executable
+            return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr_file)
+        except OSError as error:
+            detail = cls._error_detail(str(error)) or type(error).__name__
+            raise PlantriError(f"plantri_sqs: failed to start executable {executable}: {detail}") from error
 
+    @classmethod
+    def _build_execution_error(
+        cls,
+        process: subprocess.Popen[bytes],
+        stderr_file: BinaryIO,
+    ) -> PlantriError:
+        stderr_file.flush()
+        stderr_file.seek(0)
+        detail = cls._error_detail(stderr_file.read()) or "no output"
+        return PlantriError(f"plantri_sqs: execution failed (exit {process.returncode}); {detail}")
 
-def _start_process(
-    executable: Path,
-    dual_vertex_count: int,
-    primal_minimum_degree: PrimalMinimumDegree,
-    stderr_file: BinaryIO,
-) -> subprocess.Popen[bytes]:
-    command = [
-        str(executable),
-        *primal_minimum_degree._plantri_switches,
-        str(dual_vertex_count + 2),
-    ]
-    try:
-        return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr_file)
-    except OSError as error:
-        detail = _error_detail(str(error)) or type(error).__name__
-        raise PlantriError(f"plantri_sqs: failed to start executable {executable}: {detail}") from error
-
-
-def _build_execution_error(
-    process: subprocess.Popen[bytes],
-    stderr_file: BinaryIO,
-) -> PlantriError:
-    stderr_file.flush()
-    stderr_file.seek(0)
-    detail = _error_detail(stderr_file.read()) or "no output"
-    return PlantriError(f"plantri_sqs: execution failed (exit {process.returncode}); {detail}")
-
-
-def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
-    """Stop if running; return a naturally observed exit code, otherwise ``None``."""
-    observed_return_code = process.poll()
-    if observed_return_code is not None:
-        return observed_return_code
-    try:
-        process.terminate()
-    except OSError:
+    @staticmethod
+    def _stop_process(process: subprocess.Popen[bytes]) -> int | None:
+        """Stop if running; return a naturally observed exit code, otherwise ``None``."""
         observed_return_code = process.poll()
-        if observed_return_code is None:
-            raise
-        return observed_return_code
-    try:
-        process.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        if observed_return_code is not None:
+            return observed_return_code
+        try:
+            process.terminate()
+        except OSError:
+            observed_return_code = process.poll()
+            if observed_return_code is None:
+                raise
+            return observed_return_code
         try:
             process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired as error:
-            raise PlantriError("plantri_sqs: process did not exit after kill") from error
-    return None
-
-
-def _finalize_filter_run(
-    process: subprocess.Popen[bytes],
-    reader: _PipeReader,
-) -> bool:
-    """Release one FILTER run and report an observed natural nonzero exit."""
-    reader.cancel()
-    try:
-        if not reader.eof_received:
-            observed_return_code = _stop_process(process)
-            return observed_return_code not in (None, 0)
-        try:
-            return process.wait(timeout=reader.remaining_timeout()) != 0
-        except (PlantriError, subprocess.TimeoutExpired):
-            _stop_process(process)
-            raise reader.timeout_error() from None
-    finally:
-        try:
-            reader.join()
-        finally:
-            if process.stdout is not None:
-                process.stdout.close()
-
-
-def _iter_filter_records(
-    chunks: Iterator[bytes],
-    dual_vertex_count: int,
-) -> Iterator[tuple[bytes, bytes]]:
-    twin_size = 4 * dual_vertex_count
-    record_size = twin_size + dual_vertex_count + 2
-    carry = b""
-    record_count = 0
-    for chunk in chunks:
-        data = carry + chunk
-        complete_count = len(data) // record_size
-        complete_size = complete_count * record_size
-        for start in range(0, complete_size, record_size):
-            split = start + twin_size
-            yield data[start:split], data[split : start + record_size]
-        record_count += complete_count
-        carry = data[complete_size:]
-    if carry:
-        raise PlantriError(f"plantri_sqs: truncated fixed record {record_count} ({len(carry)}/{record_size} bytes)")
-
-
-@contextmanager
-def _filter_session(
-    dual_vertex_count: int,
-    primal_minimum_degree: PrimalMinimumDegree,
-    timeout: float | None,
-) -> Generator[_PipeReader, None, None]:
-    """Own one FILTER process and yield its bounded stdout reader."""
-    with _resolved_executable() as executable, tempfile.TemporaryFile() as stderr_file:
-        stderr = cast(BinaryIO, stderr_file)
-        process = _start_process(
-            executable,
-            dual_vertex_count,
-            primal_minimum_degree,
-            stderr,
-        )
-        stdout = cast(BinaryIO, process.stdout)
-        try:
-            reader = _PipeReader(stdout, timeout)
-            reader.start()
-        except BaseException as setup_error:
+        except subprocess.TimeoutExpired:
+            process.kill()
             try:
-                _stop_process(process)
-            except BaseException as cleanup_error:
-                _add_cleanup_note(setup_error, cleanup_error)
-            try:
-                stdout.close()
-            except BaseException as cleanup_error:
-                _add_cleanup_note(setup_error, cleanup_error, resource="stdout")
-            raise
-        body_error: BaseException | None = None
-        try:
-            yield reader
-        except BaseException as error:
-            body_error = error
-            raise
-        finally:
-            try:
-                natural_nonzero_exit_observed = _finalize_filter_run(process, reader)
-                execution_error = (
-                    _build_execution_error(process, stderr)
-                    if natural_nonzero_exit_observed
-                    else None
-                )
-            except BaseException as finalization_error:
-                if body_error is None:
-                    raise
-                _add_cleanup_note(body_error, finalization_error)
-            else:
-                if execution_error is not None:
-                    raise execution_error from body_error
-
-
-def enumerate_simple_quadrangulation_duals(
-    dual_vertex_count: int,
-    *,
-    max_count: int,
-    primal_minimum_degree: PrimalMinimumDegree = PrimalMinimumDegree.AT_LEAST_2,
-    timeout: float | None = None,
-) -> PlantriEnumerationResult:
-    """Materialize candidate duals from one bundled FILTER run."""
-    _validate_enumeration_request(dual_vertex_count, primal_minimum_degree, max_count, timeout)
-    enumeration_started_at = time.perf_counter()
-    time_to_first_record_s = 0.0
-    duals: list[DualPlaneGraph] = []
-
-    if max_count and dual_vertex_count >= primal_minimum_degree._minimum_nonempty_dual_vertex_count:
-        with _filter_session(dual_vertex_count, primal_minimum_degree, timeout) as reader:
-            records = _iter_filter_records(reader.chunks(), dual_vertex_count)
-            for graph_id, (twin, profile) in enumerate(islice(records, max_count)):
-                dual = DualPlaneGraph._from_filter(twin, graph_id, profile)
-
-                if graph_id == 0:
-                    time_to_first_record_s = time.perf_counter() - enumeration_started_at
-
-                duals.append(dual)
-
-    graphs = tuple(duals)
-    total_elapsed_s = time.perf_counter() - enumeration_started_at
-
-    return PlantriEnumerationResult(
-        graphs=graphs,
-        time_to_first_record_s=time_to_first_record_s,
-        remaining_s=total_elapsed_s - time_to_first_record_s,
-    )
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired as error:
+                raise PlantriError("plantri_sqs: process did not exit after kill") from error
+        return None

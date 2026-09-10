@@ -4,12 +4,11 @@ from importlib import metadata as _metadata
 from .plantri import (
     MAX_DUAL_VERTEX_COUNT,
     MIN_DUAL_VERTEX_COUNT,
-    PlantriEnumerationResult,
+    PlantriEnumeration,
     PlantriError,
     PrimalMinimumDegree,
     SimpleQuadrangulation,
     DualPlaneGraph,
-    enumerate_simple_quadrangulation_duals,
 )
 
 try:
@@ -27,6 +26,5 @@ __all__ = [
     "SimpleQuadrangulation",
     "DualPlaneGraph",
     # Enumeration
-    "enumerate_simple_quadrangulation_duals",
-    "PlantriEnumerationResult",
+    "PlantriEnumeration",
 ]

@@ -24,7 +24,15 @@ twin[4n] + descending primal degree profile[n+2]
 
 The record order is the namespace-local `graph_id`. Python never decodes `planar_code`, reconstructs primal face orbits, or uses a worker pool.
 The FILTER enforces its output contract on every record (a connected map fully covered by disjoint 4-faces with `ne = 4nv - 8`, in-range darts, and a complete degree profile) before Python's private trusted construction path; plantri's own rotation-system and simplicity invariants are re-verified only in a `-DSQS_VERIFY` build.
+The dedicated decoder accepts `-q -c2` with optional `-m2`; partitioning and output filenames are rejected. FILTER output goes to binary stdout, and both writes and the final flush report failures through a nonzero exit status. Build `src/plantri_sqs.c` directly, or compile `src/plantri.c` with `PLUGIN` defined as `"plantri_sqs.c"`.
 Public raw construction and cache restoration independently validate the common topology family from `twin`; hashes verify stored bytes and order, not generator provenance or enumeration completeness.
+
+`PlantriEnumeration.enumerate(n, max_count=...)` returns a frozen `PlantriEnumeration`
+containing `graphs`, `time_to_first_record_s`, `remaining_s`, and the derived
+`total_s`. Its bounded stdout queue, reader thread, and child process are local
+to the run and released before the result is returned. The completed result
+can be pickled; an empty stream has `time_to_first_record_s == 0.0`.
+Validation, executable lookup, reading, and cleanup all belong to `PlantriEnumeration`.
 
 ### Related Papers
 
@@ -69,7 +77,7 @@ Neither type denotes the realized `Q` or `Q*` produced by the downstream geometr
 Direct `DualPlaneGraph(twin, graph_id)` construction validates a connected spherical map paired with a simple quadrangulation whose faces are 4-cycles and whose minimum degree is at least two. Derived support rotations remain a downstream SQS concern rather than part of this topology API.
 
 ```python
-dual = enumerate_simple_quadrangulation_duals(n, max_count=1).graphs[0]
+dual = PlantriEnumeration.enumerate(n, max_count=1).graphs[0]
 primal = SimpleQuadrangulation(dual)
 
 assert primal.dual is dual
@@ -89,7 +97,7 @@ For plane graphs: `V - E + F = 2`
 | **G\*** (Dual) | 4-regular plane multigraph (loop-free) | n        |
 | **G** (Primal) | Simple Quadrangulation                 | n + 2    |
 
-**Input Rule:** The input `n` to `enumerate_simple_quadrangulation_duals()` is the **number of vertices in G\* (Dual)**. Internally, `n + 2` (the candidate-primal vertex count) is passed to `plantri_sqs`.
+**Input Rule:** The input `n` to `PlantriEnumeration.enumerate()` is the **number of vertices in G\* (Dual)**. Internally, `n + 2` (the candidate-primal vertex count) is passed to `plantri_sqs`.
 
 **Input Constraint:** The bundled count and materialization paths support `3 <= n <= 61`. The `AT_LEAST_3` stream is empty for `n < 6`.
 The full literature family selected by `AT_LEAST_2` also contains the square's two-vertex dual, which lies outside this wrapper's supported range.
