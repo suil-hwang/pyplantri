@@ -22,17 +22,10 @@ The FILTER converts each generated map in C and streams one fixed record directl
 twin[4n] + descending primal degree profile[n+2]
 ```
 
-The record order is the namespace-local `graph_id`. Python never decodes `planar_code`, reconstructs primal face orbits, or uses a worker pool.
+The record order is the namespace-local `graph_id`. One Python reader task materializes the requested prefix directly from these records; enumeration does not decode `planar_code` or reconstruct primal face orbits.
 The FILTER enforces its output contract on every record (a connected map fully covered by disjoint 4-faces with `ne = 4nv - 8`, in-range darts, and a complete degree profile) before Python's private trusted construction path; plantri's own rotation-system and simplicity invariants are re-verified only in a `-DSQS_VERIFY` build.
 The dedicated decoder accepts `-q -c2` with optional `-m2`; partitioning and output filenames are rejected. FILTER output goes to binary stdout, and both writes and the final flush report failures through a nonzero exit status. Build `src/plantri_sqs.c` directly, or compile `src/plantri.c` with `PLUGIN` defined as `"plantri_sqs.c"`.
 Public raw construction and cache restoration independently validate the common topology family from `twin`; hashes verify stored bytes and order, not generator provenance or enumeration completeness.
-
-`PlantriEnumeration.enumerate(n, max_count=...)` returns a frozen `PlantriEnumeration`
-containing `graphs`, `time_to_first_record_s`, `remaining_s`, and the derived
-`total_s`. Its bounded stdout queue, reader thread, and child process are local
-to the run and released before the result is returned. The completed result
-can be pickled; an empty stream has `time_to_first_record_s == 0.0`.
-Validation, executable lookup, reading, and cleanup all belong to `PlantriEnumeration`.
 
 ### Related Papers
 
@@ -61,7 +54,7 @@ Validation, executable lookup, reading, and cleanup all belong to `PlantriEnumer
 
 `PrimalMinimumDegree` selects the minimum-degree policy for plantri's primal quadrangulation `G` through the `primal_minimum_degree` keyword.
 It is an enumeration policy, not a claim that every emitted graph attains the lower bound exactly.
-Callers must pass an enum member; bare numeric or string values are rejected.
+Callers supply an enum member.
 
 | Enum member  | Value | Primal plantri flags | Exact dual family                                                                     |
 | ------------ | ----- | -------------------- | ------------------------------------------------------------------------------------- |
