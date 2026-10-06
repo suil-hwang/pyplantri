@@ -386,6 +386,8 @@ class PlantriEnumeration:
     ) -> PlantriEnumeration:
         """Collect a source-order prefix through one reader task."""
         started_at = time.perf_counter()
+        if type(max_count) is not int or max_count < 0:
+            raise ValueError(f"max_count must be an explicit nonnegative int, got {max_count!r}")
         if not max_count or dual_vertex_count < primal_minimum_degree._minimum_nonempty_dual_vertex_count:
             return cls((), 0.0, time.perf_counter() - started_at)
 
@@ -474,10 +476,8 @@ class PlantriEnumeration:
         return False
 
     @staticmethod
-    def _error_detail(text: str | bytes, *, limit: int = 4000) -> str:
-        if isinstance(text, bytes):
-            text = text.decode("utf-8", errors="replace")
-        normalized = " ".join(text.split())
+    def _error_detail(text: bytes, *, limit: int = 4000) -> str:
+        normalized = " ".join(text.decode("utf-8", errors="replace").split())
         return normalized if len(normalized) <= limit else normalized[: limit - 3] + "..."
 
     @staticmethod
