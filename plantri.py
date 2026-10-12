@@ -446,9 +446,8 @@ class PlantriEnumeration:
                 first_record_s = time.perf_counter() - started_at
         return tuple(graphs), first_record_s
 
-    @classmethod
+    @staticmethod
     def _finish(
-        cls,
         process: subprocess.Popen[bytes],
         pool: ThreadPoolExecutor,
         stderr: BinaryIO,
@@ -467,18 +466,16 @@ class PlantriEnumeration:
                     process.kill()
             if return_code not in (None, 0):
                 stderr.seek(0)
-                detail = cls._error_detail(stderr.read(4001)) or "no output"
-                raise PlantriError(f"plantri_sqs: execution failed (exit {return_code}); {detail}")
+                # Collapse whitespace and keep at most 4000 characters of stderr.
+                detail = " ".join(stderr.read(4001).decode("utf-8", errors="replace").split())
+                if len(detail) > 4000:
+                    detail = detail[:3997] + "..."
+                raise PlantriError(f"plantri_sqs: execution failed (exit {return_code}); {detail or 'no output'}")
         except BaseException as cleanup_error:
             if body_error is None:
                 raise
             body_error.add_note(f"plantri_sqs: cleanup also failed: {cleanup_error}")
         return False
-
-    @staticmethod
-    def _error_detail(text: bytes, *, limit: int = 4000) -> str:
-        normalized = " ".join(text.decode("utf-8", errors="replace").split())
-        return normalized if len(normalized) <= limit else normalized[: limit - 3] + "..."
 
     @staticmethod
     @contextmanager
